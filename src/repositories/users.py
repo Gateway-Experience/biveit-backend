@@ -22,7 +22,7 @@ from src.utils import postgres
 # Everything a caller may see. `password_hash` is absent on purpose -- see the module note.
 _COLUMNS = """
     id, user_type, username, platform, platform_id, full_name, profile_picture,
-    tags, meta, deleted, created_at, updated_at
+    tags, meta, created_at, updated_at, deleted_at
 """
 
 # What a caller may write. Anything outside this set is dropped.
@@ -36,7 +36,7 @@ _WRITABLE_COLUMNS = [
     "profile_picture",
     "tags",
     "meta",
-    "deleted",
+    "deleted_at",
 ]
 
 # Unique constraint name (Postgres' default `<table>_<column>_key`) -> the field it guards.
@@ -59,10 +59,10 @@ def _to_duplicate(error: asyncpg.UniqueViolationError) -> DuplicateUser:
     return DuplicateUser("duplicate key", {"keys": keys})
 
 
-_GET = f"SELECT {_COLUMNS} FROM users WHERE id = $user_id AND NOT deleted"
-_GET_BY_USERNAME = f"SELECT {_COLUMNS} FROM users WHERE username = $username AND NOT deleted"
+_GET = f"SELECT {_COLUMNS} FROM users WHERE id = $user_id AND deleted_at IS NULL"
+_GET_BY_USERNAME = f"SELECT {_COLUMNS} FROM users WHERE username = $username AND deleted_at IS NULL"
 _GET_BY_PLATFORM = f"""
-    SELECT {_COLUMNS} FROM users WHERE platform = $platform AND platform_id = $platform_id AND NOT deleted
+    SELECT {_COLUMNS} FROM users WHERE platform = $platform AND platform_id = $platform_id AND deleted_at IS NULL
 """
 
 
@@ -80,7 +80,7 @@ async def get_by_platform(platform: str, platform_id: str) -> User | None:
     return cast("User | None", row)
 
 
-_GET_AUTH_BY_USERNAME = "SELECT id, password_hash FROM users WHERE username = $username AND NOT deleted"
+_GET_AUTH_BY_USERNAME = "SELECT id, password_hash FROM users WHERE username = $username AND deleted_at IS NULL"
 
 
 async def get_auth_by_username(username: str) -> dict | None:
@@ -115,7 +115,7 @@ async def update(user_id: int, updates: dict[str, Any]) -> User | None:
             "updated_at = now()",
         ]
     )
-    sql = f"UPDATE users SET {', '.join(assignments)} WHERE id = $user_id AND NOT deleted RETURNING {_COLUMNS}"
+    sql = f"UPDATE users SET {', '.join(assignments)} WHERE id = $user_id AND deleted_at IS NULL RETURNING {_COLUMNS}"
     try:
         updated = await postgres.fetchrow(sql, {**row, "user_id": user_id})
     except asyncpg.UniqueViolationError as error:

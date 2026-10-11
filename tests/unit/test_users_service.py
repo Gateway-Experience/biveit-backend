@@ -28,7 +28,7 @@ def _user(**overrides):
         "username": "alice",
         "user_type": UserType.USER,
         "tags": [],
-        "deleted": False,
+        "deleted_at": None,
         **overrides,
     }
 

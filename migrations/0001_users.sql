@@ -14,6 +14,7 @@
 -- any number of guests coexist while real values stay unique.
 -- password_hash is bcrypt, never raw, and NULL for guests and Google-only accounts.
 -- meta: free-form app-level data, including any FE-sent profile keys that have no column of their own.
+-- Soft-deleted via deleted_at: NULL = live. Every read filters on it; nothing is ever hard-deleted.
 -- No Google tokens or raw profile payloads are stored.
 
 CREATE TABLE IF NOT EXISTS users
@@ -28,9 +29,9 @@ CREATE TABLE IF NOT EXISTS users
     profile_picture varchar(1000),
     tags            text[]       NOT NULL DEFAULT '{}',
     meta            jsonb        NOT NULL DEFAULT '{}',
-    deleted         boolean      NOT NULL DEFAULT false,
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    deleted_at      TIMESTAMPTZ,                           -- NULL = live
 
     UNIQUE (platform, platform_id)
 );

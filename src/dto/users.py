@@ -22,9 +22,9 @@ class User(TypedDict):
     platform_id: str | None  # WEB: the username; GOOGLE: Google's `sub` (not the email)
     tags: list[str]
     meta: dict[str, Any]  # app-level data, incl. FE-sent profile keys with no column of their own
-    deleted: bool
     created_at: Any  # datetime
     updated_at: Any  # datetime
+    deleted_at: Any  # datetime | None -- always None on anything a read returns (reads skip deleted rows)
 
 
 class RegisterRequest(BaseModel):
@@ -56,7 +56,7 @@ class UpdateMeRequest(BaseModel):
     """PATCH /me body. Deliberately NARROW -- this is a self-service edit from the browser, so it lists
     only the fields a user may change about themselves. Anything not listed is rejected (extra="forbid")
     rather than silently dropped, so a FE sending a field it thinks is being saved finds out. Widen this
-    as the profile grows; never widen it to privileged fields (user_type, tags, deleted)."""
+    as the profile grows; never widen it to privileged fields (user_type, tags, deleted_at)."""
 
     model_config = {"extra": "forbid"}
 
