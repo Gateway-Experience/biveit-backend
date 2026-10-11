@@ -1,0 +1,48 @@
+[project]
+name = "vib3-backend"
+version = "0.1.0"
+description = "vib3 backend: FastAPI + asyncpg/PostgreSQL"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.14.1",
+    "asyncpg>=0.32.0",
+    "authlib>=1.8.0",
+    "bcrypt>=5.0.0",
+    "boto3>=1.35.0",
+    "fastapi>=0.137.1",
+    "httpx>=0.28.1",
+    "itsdangerous>=2.2.0",
+    "pydantic-settings>=2.14.1",
+    "pydantic[email]>=2.13.4",
+    "pydash>=8.0.6",
+    "pyjwt>=2.13.0",
+    "python-dotenv>=1.2.2",
+    "redis>=5",
+    "ruff>=0.15.17",
+    "uvicorn[standard]>=0.49.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13.1",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# Ruff's defaults flag three things this codebase does ON PURPOSE:
+#   BLE001/S110 -- broad `except Exception`. That IS the error-handling convention here: a controller
+#     catches everything at the edge so one failing handler can't take down the process, logs it via
+#     log_http_error, and returns a 500. utils/logging's own last-ditch handler must likewise never
+#     propagate. Narrowing these would mean an unanticipated exception escapes unlogged.
+#   B008 -- a function call in an argument default. That's FastAPI's `Depends()` idiom, evaluated once
+#     at route-definition time by design; the rule is aimed at accidental mutable defaults.
+ignore = ["BLE001", "S110", "B008"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"

@@ -1,0 +1,26 @@
+# Environment config. Real env files hold secrets and are listed EXPLICITLY rather than globbed as
+# .env.* -- a glob would also swallow any *.example template you add later, which is exactly the file
+# that's meant to be committed.
+.env
+.env.local*
+.env.dev
+.env.prod
+.env.canary
+.env.test
+.env.migration
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Tool caches / local tool artifacts (Playwright MCP snapshots hold real emails + OAuth URLs)
+.playwright-mcp/
+.pytest_cache/
+.ruff_cache/
