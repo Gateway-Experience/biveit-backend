@@ -1,0 +1,523 @@
+# Agent chat tests (controllers/conversations + services/agent/conversations) against the mock agent.
+# Repos and redis are faked over in-memory state, so this covers the full request flow -- ownership,
+# what gets stored, the mock's replies, wake-ups -- without a db. watch_messages is tested directly.
+
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+
+import pytest
+from fastapi.testclient import TestClient
+
+from src.app import create_app
+from src.config import settings
+from src.repositories import ai_conversations as ai_conversations_repo
+from src.repositories import ai_messages as ai_messages_repo
+from src.repositories import projects as projects_repo
+from src.services import agent as agent_service
+from src.services.agent import conversations, mock
+from src.utils import redis
+from src.utils.auth import get_current_user
+
+_ALICE = {"id": 7, "username": "alice", "user_type": "USER"}
+_PROJECTS = [{"id": 3, "user_id": 7}, {"id": 4, "user_id": 99}]  # 4 is someone else's
+
+
+@pytest.fixture
+def db(monkeypatch):
+    state = {"conversations": [], "messages": [], "published": [], "spawned": []}
+
+    async def find_projects(criteria):
+        return [project for project in _PROJECTS if all(project.get(key) == value for key, value in criteria.items())]
+
+    async def get_conversation(conversation_id):
+        return next((conv for conv in state["conversations"] if conv["id"] == conversation_id), None)
+
+    async def find_conversations(criteria):
+        return [conv for conv in state["conversations"] if conv["project_id"] == criteria["project_id"]][::-1]
+
+    async def insert_conversation(data):
+        conversation = {
+            "id": len(state["conversations"]) + 1,
+            "title": None,
+            "meta": {},
+            "created_at": "t",
+            "updated_at": "t",
+            "deleted_at": None,
+            **data,
+        }
+        state["conversations"] = [*state["conversations"], conversation]
+        return conversation
+
+    async def find_messages(conversation_id, after_seq=0, limit=None):
+        newer = [m for m in state["messages"] if m["conversation_id"] == conversation_id and m["seq"] > after_seq]
+        return newer[:limit]
+
+    async def find_messages_before(conversation_id, before_seq, limit):
+        # Only routing is under test here; the page-start rule is SQL, checked against a real db.
+        older = [
+            m
+            for m in state["messages"]
+            if m["conversation_id"] == conversation_id and (before_seq is None or m["seq"] < before_seq)
+        ]
+        return older[-limit:]
+
+    async def insert_message(data):
+        seq = len([m for m in state["messages"] if m["conversation_id"] == data["conversation_id"]]) + 1
+        message = {
+            "id": len(state["messages"]) + 1,
+            "seq": seq,
+            "model": None,
+            "stop_reason": None,
+            "usage": None,
+            "created_at": "t",
+            **data,
+        }
+        state["messages"] = [*state["messages"], message]
+        return message
+
+    async def publish(channel, payload=""):
+        state["published"] = [*state["published"], (channel, payload)]
+
+    @asynccontextmanager
+    async def lock(key, ttl_seconds, wait_seconds):
+        yield
+
+    monkeypatch.setattr(projects_repo, "find", find_projects)
+    monkeypatch.setattr(ai_conversations_repo, "get", get_conversation)
+    monkeypatch.setattr(ai_conversations_repo, "find", find_conversations)
+    monkeypatch.setattr(ai_conversations_repo, "insert", insert_conversation)
+    monkeypatch.setattr(ai_messages_repo, "find", find_messages)
+    monkeypatch.setattr(ai_messages_repo, "insert", insert_message)
+    monkeypatch.setattr(ai_messages_repo, "find_before", find_messages_before)
+    monkeypatch.setattr(redis, "publish", publish)
+    monkeypatch.setattr(redis, "lock", lock)
+    # The mock replies in the background after a pause: capture the background job instead, with no
+    # pause, and let each test run it (_settle) when it wants the reply stored.
+    monkeypatch.setattr(conversations, "spawn", lambda job: state["spawned"].append(job))
+    monkeypatch.setattr(mock, "REPLY_DELAY_SECONDS", 0)
+    return state
+
+
+@pytest.fixture(autouse=True)
+def _storage_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
+    return tmp_path
+
+
+@pytest.fixture
+def client(db) -> TestClient:
+    app = create_app()
+    app.dependency_overrides[get_current_user] = lambda: _ALICE
+    return TestClient(app)
+
+
+def _open_conversation(client) -> int:
+    return client.get("/api/projects/3/conversation").json()["id"]
+
+
+def _say(client, conversation_id, text):
+    return client.post(f"/api/conversations/{conversation_id}/messages", json={"type": "text", "text": text})
+
+
+async def _settle(db):
+    """Run the captured background replies, i.e. let the mock answer."""
+    jobs, db["spawned"] = db["spawned"], []
+    await asyncio.gather(*jobs)
+
+
+async def _say_and_settle(client, db, conversation_id, text):
+    response = _say(client, conversation_id, text)
+    await _settle(db)
+    return response
+
+
+def _pending_tool_use(db):
+    return db["messages"][-1]["content"][-1]
+
+
+# --- conversation + ownership ---
+
+
+def test_current_conversation_is_created_once(client, db):
+    first = _open_conversation(client)
+    assert _open_conversation(client) == first
+    assert len(db["conversations"]) == 1
+
+
+def test_someone_elses_project_or_conversation_is_404(client, db):
+    assert client.get("/api/projects/4/conversation").status_code == 404
+    db["conversations"] = [{"id": 50, "project_id": 4}]
+    assert client.get("/api/conversations/50/messages").status_code == 404
+    assert _say(client, 50, "hi").status_code == 404
+    assert client.get("/api/conversations/50/events").status_code == 404
+
+
+# --- text ---
+
+
+async def test_text_is_stored_and_echoed_by_the_mock(client, db):
+    conversation_id = _open_conversation(client)
+    response = _say(client, conversation_id, "make it blue")
+
+    assert response.status_code == 201
+    assert [m["role"] for m in db["messages"]] == ["user"]  # the reply isn't inline...
+    await _settle(db)  # ...it lands in the background
+    assert response.json()["content"] == [{"type": "text", "text": "make it blue"}]
+    assert [(m["role"], m["content"][0]["text"]) for m in db["messages"]] == [
+        ("user", "make it blue"),
+        ("assistant", "(mock agent) You said: make it blue"),
+    ]
+    assert db["published"] == [(f"ai_conversation:{conversation_id}", "1"), (f"ai_conversation:{conversation_id}", "2")]
+
+
+async def test_messages_are_paged_by_seq_cursors(client, db):
+    conversation_id = _open_conversation(client)
+    for text in ["one", "two", "three"]:
+        await _say_and_settle(client, db, conversation_id, text)  # 6 messages: each text + its echo
+
+    def seqs(query):
+        return [m["seq"] for m in client.get(f"/api/conversations/{conversation_id}/messages?{query}").json()]
+
+    assert seqs("") == [1, 2, 3, 4, 5, 6]  # newest page; first seq is 1, so nothing older
+    assert seqs("limit=2") == [5, 6]
+    assert seqs("before_seq=5&limit=2") == [3, 4]
+    assert seqs("after_seq=1&limit=2") == [2, 3]
+
+
+@pytest.mark.parametrize("query", ["before_seq=3&after_seq=1", "limit=0", "limit=201", "before_seq=0"])
+def test_bad_page_queries_are_422(query, client, db):
+    assert client.get(f"/api/conversations/{_open_conversation(client)}/messages?{query}").status_code == 422
+
+
+async def test_text_is_refused_while_a_question_is_pending(client, db):
+    conversation_id = _open_conversation(client)
+    await _say_and_settle(client, db, conversation_id, "question")
+    response = _say(client, conversation_id, "never mind")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "INTERACTION_PENDING"
+
+
+# --- submissions ---
+
+
+async def test_answers_are_stored_as_a_tool_result_and_echoed(client, db):
+    conversation_id = _open_conversation(client)
+    await _say_and_settle(client, db, conversation_id, "questions")
+    tool_use = _pending_tool_use(db)
+    results = [
+        {"status": "submitted", "value": {"selected": [], "custom": "Earthy"}},
+        {"status": "submitted", "value": {"selected": ["No"], "custom": None}},
+        {"status": "submitted", "value": {"selected": [], "custom": None}},
+        {"status": "submitted", "value": {"selected": ["About", "Blog"], "custom": None}},
+    ]
+    response = client.post(
+        f"/api/conversations/{conversation_id}/messages",
+        json={"type": "submission", "interaction_id": tool_use["id"], "results": results},
+    )
+
+    assert response.status_code == 201
+    tool_result = response.json()["content"][0]
+    assert tool_result["type"] == "tool_result" and tool_result["tool_use_id"] == tool_use["id"]
+    assert tool_result["content"][1] == results[1]
+    await _settle(db)
+    assert db["messages"][-1]["role"] == "assistant"
+    assert "Earthy" in db["messages"][-1]["content"][0]["text"]
+    assert (await _say_and_settle(client, db, conversation_id, "thanks")).status_code == 201  # no longer pending
+
+
+async def test_an_abort_closes_the_question_without_a_reply(client, db):
+    conversation_id = _open_conversation(client)
+    await _say_and_settle(client, db, conversation_id, "question")
+    tool_use = _pending_tool_use(db)
+    client.post(
+        f"/api/conversations/{conversation_id}/messages",
+        json={"type": "submission", "interaction_id": tool_use["id"], "results": [{"status": "aborted"}]},
+    )
+    await _settle(db)
+    assert db["messages"][-1]["role"] == "user"  # stored the abort, the mock said nothing
+    assert (await _say_and_settle(client, db, conversation_id, "back to chatting")).status_code == 201
+
+
+async def test_submission_to_an_unknown_interaction_is_409(client, db):
+    conversation_id = _open_conversation(client)
+    await _say_and_settle(client, db, conversation_id, "question")
+    response = client.post(
+        f"/api/conversations/{conversation_id}/messages",
+        json={"type": "submission", "interaction_id": "toolu_nope", "results": [{"status": "aborted"}]},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "INTERACTION_NOT_PENDING"
+
+
+async def test_an_invalid_submission_is_422_with_a_reason(client, db):
+    conversation_id = _open_conversation(client)
+    await _say_and_settle(client, db, conversation_id, "question")  # single-select
+    response = client.post(
+        f"/api/conversations/{conversation_id}/messages",
+        json={
+            "type": "submission",
+            "interaction_id": _pending_tool_use(db)["id"],
+            "results": [{"status": "submitted", "value": {"selected": ["Minimal", "Bold & colorful"], "custom": None}}],
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "INVALID_SUBMISSION"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"type": "text", "text": ""},
+        {"type": "shout", "text": "hi"},
+        {"type": "submission", "interaction_id": "x", "results": []},
+    ],
+)
+def test_malformed_bodies_are_422(body, client, db):
+    assert client.post(f"/api/conversations/{_open_conversation(client)}/messages", json=body).status_code == 422
+
+
+# --- watch_messages ---
+
+
+async def test_watch_replays_then_waits_then_delivers_new_messages(db, monkeypatch):
+    db["messages"] = [{"conversation_id": 1, "seq": seq} for seq in (1, 2, 3)]
+    wakeups = []
+
+    @asynccontextmanager
+    async def fake_subscription(channel):
+        async def receive(timeout_seconds):
+            wakeups.append(timeout_seconds)
+            # Something lands while we "wait": the next read must pick it up, from the watermark.
+            db["messages"] = [*db["messages"], {"conversation_id": 1, "seq": len(db["messages"]) + 1}]
+            return "4"
+
+        yield receive
+
+    monkeypatch.setattr(redis, "subscription", fake_subscription)
+
+    stream = agent_service.watch_messages(1, after_seq=1, idle_seconds=15, max_age_seconds=60)
+    first = await anext(stream)
+    second = await anext(stream)
+    await stream.aclose()
+
+    assert [m["seq"] for m in first] == [2, 3]  # replay after the client's seq
+    assert [m["seq"] for m in second] == [4]  # only what's new since
+    assert wakeups == [15]
+
+
+async def test_watch_yields_an_empty_batch_when_idle_and_ends_at_max_age(db, monkeypatch):
+    @asynccontextmanager
+    async def fake_subscription(channel):
+        async def receive(timeout_seconds):
+            return None  # nothing within the timeout
+
+        yield receive
+
+    monkeypatch.setattr(redis, "subscription", fake_subscription)
+
+    batches = [
+        batch async for batch in agent_service.watch_messages(1, after_seq=0, idle_seconds=0, max_age_seconds=0.01)
+    ]
+    assert batches and all(batch == [] for batch in batches)
+
+
+# --- attachments ---
+
+
+def _upload(client, conversation_id, *files):
+    return client.post(
+        f"/api/conversations/{conversation_id}/uploads",
+        files=[("files", (name, content, mime)) for name, content, mime in files],
+    )
+
+
+async def test_upload_then_send_lists_the_whole_uploads_folder(client, db):
+    conversation_id = _open_conversation(client)
+    earlier = _upload(client, conversation_id, ("brief.pdf", b"%PDF-1.4", "application/pdf")).json()
+    uploaded = _upload(client, conversation_id, ("logo.png", b"png-bytes", "image/png")).json()
+
+    assert uploaded[0]["name"] == "logo.png" and uploaded[0]["mime"] == "image/png" and uploaded[0]["size"] == 9
+    assert db["messages"] == []  # uploading alone posts nothing
+
+    response = client.post(
+        f"/api/conversations/{conversation_id}/messages",
+        json={"type": "text", "text": "use this logo", "attachments": [uploaded[0]["path"]]},
+    )
+    assert response.status_code == 201
+    content = response.json()["content"]
+    assert content[0] == {"type": "attachment", **uploaded[0]}
+    assert content[1] == {"type": "text", "text": "use this logo"}
+
+    await _settle(db)
+    reply = db["messages"][-1]["content"][0]["text"]
+    assert "brief.pdf" in reply and "logo.png" in reply  # everything in the folder, not just this message's
+    assert earlier[0]["path"] not in [block.get("path") for block in content]
+
+
+async def test_attachments_alone_are_a_valid_message(client, db):
+    conversation_id = _open_conversation(client)
+    path = _upload(client, conversation_id, ("a.txt", b"hi", "text/plain")).json()[0]["path"]
+    response = client.post(
+        f"/api/conversations/{conversation_id}/messages", json={"type": "text", "attachments": [path]}
+    )
+    assert [block["type"] for block in response.json()["content"]] == ["attachment"]
+    await _settle(db)
+
+
+def test_a_message_needs_text_or_attachments(client, db):
+    conversation_id = _open_conversation(client)
+    response = client.post(f"/api/conversations/{conversation_id}/messages", json={"type": "text", "text": "  "})
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("bad_path", ["uploads/never-uploaded.png", "uploads/../../../etc/passwd", "artifacts/x.md"])
+def test_attachments_must_be_this_conversations_uploads(bad_path, client, db):
+    conversation_id = _open_conversation(client)
+    response = client.post(
+        f"/api/conversations/{conversation_id}/messages", json={"type": "text", "text": "x", "attachments": [bad_path]}
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "INVALID_ATTACHMENT"
+
+
+def test_too_many_files_is_413_and_writes_nothing(client, db, tmp_path):
+    conversation_id = _open_conversation(client)
+    response = _upload(client, conversation_id, *[(f"{index}.txt", b"x", "text/plain") for index in range(11)])
+    assert response.status_code == 413
+    assert not any(tmp_path.rglob("*.txt"))
+
+
+def test_an_oversized_file_is_413(client, db, monkeypatch):
+    monkeypatch.setattr(conversations, "UPLOAD_MAX_BYTES", 4)
+    response = _upload(client, _open_conversation(client), ("big.bin", b"12345", "application/octet-stream"))
+    assert response.status_code == 413
+
+
+def test_uploaded_files_can_be_downloaded_safely(client, db):
+    conversation_id = _open_conversation(client)
+    path = _upload(client, conversation_id, ("page.html", b"<script>alert(1)</script>", "text/html")).json()[0]["path"]
+
+    response = client.get(f"/api/conversations/{conversation_id}/files", params={"path": path})
+    assert response.status_code == 200
+    assert response.content == b"<script>alert(1)</script>"
+    assert response.headers["content-security-policy"] == "sandbox"  # can't run script on our origin
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert 'filename="page.html"' in response.headers["content-disposition"]
+
+
+@pytest.mark.parametrize("bad_path", ["uploads/nope.png", "../../../../etc/passwd", "uploads/../../x"])
+def test_downloads_outside_the_conversation_folders_are_404(bad_path, client, db):
+    response = client.get(f"/api/conversations/{_open_conversation(client)}/files", params={"path": bad_path})
+    assert response.status_code == 404
+
+
+def test_uploads_and_downloads_check_ownership(client, db):
+    db["conversations"] = [{"id": 50, "project_id": 4}]  # someone else's
+    assert _upload(client, 50, ("a.txt", b"x", "text/plain")).status_code == 404
+    assert client.get("/api/conversations/50/files", params={"path": "uploads/a.txt"}).status_code == 404
+
+
+# --- artifacts ---
+
+
+async def test_artifact_command_writes_the_file_and_shows_it(client, db, tmp_path):
+    conversation_id = _open_conversation(client)
+    await _say_and_settle(client, db, conversation_id, "artifact")
+
+    tool_use = db["messages"][-1]["content"][-1]
+    assert tool_use["type"] == "tool_use" and tool_use["name"] == "show_artifact"
+    assert tool_use["input"] == {"path": "artifacts/website-spec.md", "title": "Website spec"}
+    file = client.get(f"/api/conversations/{conversation_id}/files", params={"path": tool_use["input"]["path"]})
+    assert file.status_code == 200 and file.headers["content-type"].startswith("text/markdown")
+
+
+async def test_showing_an_artifact_doesnt_block_the_chat(client, db):
+    conversation_id = _open_conversation(client)
+    await _say_and_settle(client, db, conversation_id, "artifacts")
+    assert (await _say_and_settle(client, db, conversation_id, "nice")).status_code == 201  # not pending
+
+
+async def test_artifact_list_has_files_with_their_latest_titles(client, db):
+    conversation_id = _open_conversation(client)
+    await _say_and_settle(client, db, conversation_id, "artifacts")
+    # The agent re-shows the spec under a new title later -- the list should pick that up.
+    shown_again = {
+        **db["messages"][-1],
+        "seq": 99,
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "t9",
+                "name": "show_artifact",
+                "input": {"path": "artifacts/website-spec.md", "title": "Website spec v2"},
+            }
+        ],
+    }
+    db["messages"] = [*db["messages"], shown_again]
+
+    artifacts = client.get(f"/api/conversations/{conversation_id}/artifacts").json()
+    assert {(a["name"], a["title"], a["mime"]) for a in artifacts} == {
+        ("website-spec.md", "Website spec v2", "text/markdown"),
+        ("color-palette.svg", "Color palette", "image/svg+xml"),
+    }
+
+
+def test_artifact_list_is_empty_before_any_and_checks_ownership(client, db):
+    assert client.get(f"/api/conversations/{_open_conversation(client)}/artifacts").json() == []
+    db["conversations"] = [*db["conversations"], {"id": 50, "project_id": 4}]
+    assert client.get("/api/conversations/50/artifacts").status_code == 404
+
+
+# --- mock vs. real agent ---
+
+
+async def test_without_the_mock_messages_go_to_the_agent_and_nothing_replies_here(client, db, monkeypatch):
+    sent = []
+
+    async def fake_send_to_agent(conversation, user_message):
+        sent.append(user_message)
+
+    monkeypatch.setattr(conversations, "AGENT_MOCK_REPLIES", False)
+    monkeypatch.setattr(conversations, "_send_to_agent", fake_send_to_agent)
+
+    response = _say(client, _open_conversation(client), "hello agent")
+    assert response.status_code == 201
+    assert [message["content"] for message in sent] == [[{"type": "text", "text": "hello agent"}]]
+    assert db["spawned"] == []  # no mock reply queued
+    assert [message["role"] for message in db["messages"]] == ["user"]
+
+
+# --- caching ---
+
+
+def _get_file(client, conversation_id, path, **headers):
+    return client.get(f"/api/conversations/{conversation_id}/files", params={"path": path}, headers=headers)
+
+
+def test_uploads_are_cached_for_good(client, db):
+    conversation_id = _open_conversation(client)
+    path = _upload(client, conversation_id, ("logo.png", b"png", "image/png")).json()[0]["path"]
+    assert _get_file(client, conversation_id, path).headers["cache-control"] == "private, max-age=31536000, immutable"
+
+
+async def test_artifacts_revalidate_and_get_304_until_they_change(client, db, monkeypatch):
+    conversation_id = _open_conversation(client)
+    await _say_and_settle(client, db, conversation_id, "artifact")
+    path = "artifacts/website-spec.md"
+
+    first = _get_file(client, conversation_id, path)
+    assert first.headers["cache-control"] == "private, no-cache"
+    etag = first.headers["etag"]
+    unchanged = _get_file(client, conversation_id, path, **{"If-None-Match": etag})
+    assert unchanged.status_code == 304 and unchanged.content == b""
+
+    # The agent revises the spec (the mock stamps the time, so force a different stamp).
+    version_before = client.get(f"/api/conversations/{conversation_id}/artifacts").json()[0]["version"]
+    monkeypatch.setattr(mock, "utc_now", lambda: datetime(2030, 1, 1, 12, 0, 0, tzinfo=UTC))
+    await _say_and_settle(client, db, conversation_id, "artifact")
+
+    changed = _get_file(client, conversation_id, path, **{"If-None-Match": etag})
+    assert changed.status_code == 200 and b"12:00:00" in changed.content
+    assert changed.headers["etag"] != etag
+    assert client.get(f"/api/conversations/{conversation_id}/artifacts").json()[0]["version"] != version_before

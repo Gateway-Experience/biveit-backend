@@ -14,6 +14,7 @@ class Project(TypedDict):
     user_id: int  # the owner
     name: str
     description: str | None
+    current_port: int | None  # last seen agent-session port; a hint, can be stale (see 0005_projects.sql)
     meta: dict[str, Any]
     created_at: Any  # datetime
     updated_at: Any  # datetime -- "last edited"; the list is sorted by it

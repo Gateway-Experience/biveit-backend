@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     # callback legs. Random per env.
     session_secret: str = ""
 
+    # File storage (services/agent/storage). storage_dir is the root of every project's directory, laid out
+    # as <storage_dir>/<user_id>/<project_id>/; template_dir is the starter site copied into each project
+    # (missing files only, never overwriting). Relative paths resolve against the process's cwd.
+    storage_dir: str = "data/storage_root"
+    template_dir: str = "data/template"
+
     # CORS -- comma-separated allowed browser origins. Empty falls back to frontend_url. No wildcard:
     # auth rides an httpOnly cookie, so CORS runs WITH credentials, and browsers reject "*" + credentials.
     cors_allowed_origins: str = ""

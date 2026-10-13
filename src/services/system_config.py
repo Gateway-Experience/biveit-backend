@@ -21,7 +21,9 @@ from src.utils.logging import log_error
 _TTL_SECONDS = 900  # 15 minutes
 
 _cache: dict[str, Any] = {}
-_loaded_at: float = 0.0
+# -inf = never loaded. Not 0.0: monotonic() counts from boot, so for the first _TTL_SECONDS after a host
+# boot a 0.0 would look like a FRESH load and an empty cache would be served as if it were current.
+_loaded_at: float = float("-inf")
 # Serializes refreshes: without it, N concurrent reads arriving on an expired cache would each fire
 # their own query. The first caller in reloads; the rest await it and then find the cache fresh.
 _refresh_lock = asyncio.Lock()

@@ -24,3 +24,6 @@ wheels/
 .playwright-mcp/
 .pytest_cache/
 .ruff_cache/
+
+# File storage (STORAGE_DIR) -- user project files, never committed
+data/storage_root/

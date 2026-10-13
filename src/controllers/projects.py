@@ -19,7 +19,7 @@ router = APIRouter()
 async def list_projects(request: Request, user: User = Depends(get_current_user)) -> list[Project]:
     """Returned BARE (a plain array). An empty list is the FE's cue for its "create a project" CTA."""
     try:
-        return await projects_repo.find(user["id"])
+        return await projects_repo.find({"user_id": user["id"]})
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error

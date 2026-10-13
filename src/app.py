@@ -13,7 +13,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from src.config import settings
+from src.controllers.agent import router as agent_router
 from src.controllers.auth import router as auth_router
+from src.controllers.conversations import router as conversations_router
 from src.controllers.projects import router as projects_router
 from src.controllers.system import router as system_router
 from src.controllers.system_configurations import router as system_configurations_router
@@ -86,6 +88,8 @@ def create_app() -> FastAPI:
     app.include_router(users_router, prefix=_API_PREFIX)
     app.include_router(auth_router, prefix=_API_PREFIX)
     app.include_router(projects_router, prefix=_API_PREFIX)
+    app.include_router(agent_router, prefix=_API_PREFIX)
+    app.include_router(conversations_router, prefix=_API_PREFIX)
     app.include_router(system_configurations_router, prefix=_API_PREFIX)
     app.include_router(system_router, prefix=_API_PREFIX)
     return app

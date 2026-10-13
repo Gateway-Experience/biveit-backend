@@ -2,12 +2,13 @@
 # client() for the live handle, close() at shutdown (see utils/postgres for the note). Generic
 # operations only -- domain logic belongs in its own module, not here.
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 import redis.asyncio as redis
 
 from src.config import settings
+from src.utils.common import with_retries
 
 _client: redis.Redis | None = None
 
@@ -60,26 +61,56 @@ async def publish(channel: str, message: str = "") -> None:
     await client().publish(channel, message)
 
 
-# ci:trivial
 @asynccontextmanager
-async def subscription(channel: str) -> AsyncIterator[AsyncIterator[str]]:
-    """Subscribe to `channel`, yielding an async iterator of received message payloads. Auto-
-    unsubscribes/closes on exit. Best-effort: messages published while not subscribed are lost.
-    Generic op -- the caller decides what a message means."""
+async def subscription(channel: str) -> AsyncIterator[Callable[[float], Awaitable[str | None]]]:
+    """Subscribe to `channel` and yield `receive(timeout_seconds) -> payload | None`, which waits up to the
+    timeout for the next message (None on timeout). Unsubscribes/closes on exit. Generic op -- the caller
+    decides what a message means.
+
+    Best-effort, like all pub/sub: anything published while not subscribed is lost. Why a receive
+    function rather than an async iterator: the natural way to time out an iterator (wait_for around
+    anext) CANCELS it, which ends the generator and silently kills the subscription."""
     pubsub = client().pubsub()
     await pubsub.subscribe(channel)
 
-    async def _messages() -> AsyncIterator[str]:
-        async for msg in pubsub.listen():
-            if msg.get("type") == "message":
-                data = msg["data"]
-                yield data.decode() if isinstance(data, bytes) else str(data)
+    async def _receive(timeout_seconds: float) -> str | None:
+        msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=timeout_seconds)
+        if msg is None:
+            return None
+        data = msg["data"]
+        return data.decode() if isinstance(data, bytes) else str(data)
 
     try:
-        yield _messages()
+        yield _receive
     finally:
         await pubsub.unsubscribe(channel)
         await pubsub.aclose()
+
+
+class LockNotAcquired(Exception):
+    """lock() gave up waiting -- someone else held the key for the whole wait."""
+
+
+@asynccontextmanager
+async def lock(key: str, ttl_seconds: int, wait_seconds: float, poll_seconds: float = 0.2) -> AsyncIterator[None]:
+    """Hold a simple mutex on `key` for the duration of the block, polling for up to `wait_seconds` to get
+    it (raises LockNotAcquired otherwise). Generic op.
+
+    Gotcha: it's not owner-checked. The TTL is only a safety net for a crashed holder, so pick one well
+    above how long the block takes -- if the TTL runs out mid-block, another caller can get in, and our
+    release would then delete THEIR lock."""
+
+    async def _acquire() -> None:
+        if not await set_if_absent(key, ttl_seconds):
+            raise LockNotAcquired(key)
+
+    await with_retries(
+        _acquire, retries=max(1, int(wait_seconds / poll_seconds)), calculate_backoff=lambda _: poll_seconds
+    )
+    try:
+        yield
+    finally:
+        await delete(key)
 
 
 # ci:trivial

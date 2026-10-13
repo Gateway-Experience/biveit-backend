@@ -17,6 +17,7 @@ def _project(**overrides):
         "user_id": _CALLER["id"],
         "name": "Portfolio",
         "description": None,
+        "current_port": None,
         "meta": {},
         "created_at": "2026-10-01T00:00:00Z",
         "updated_at": "2026-10-02T00:00:00Z",
@@ -36,8 +37,8 @@ def client() -> TestClient:
 def test_list_returns_the_callers_projects(monkeypatch, client):
     calls = {}
 
-    async def fake_find(user_id):
-        calls["user_id"] = user_id
+    async def fake_find(criteria):
+        calls["criteria"] = criteria
         return [_project(id=2), _project(id=1)]
 
     monkeypatch.setattr(projects_repo, "find", fake_find)
@@ -45,11 +46,11 @@ def test_list_returns_the_callers_projects(monkeypatch, client):
     response = client.get("/api/projects")
     assert response.status_code == 200
     assert [project["id"] for project in response.json()] == [2, 1]
-    assert calls["user_id"] == _CALLER["id"]
+    assert calls["criteria"] == {"user_id": _CALLER["id"]}
 
 
 def test_list_is_empty_when_the_caller_has_none(monkeypatch, client):
-    async def fake_find(user_id):
+    async def fake_find(criteria):
         return []
 
     monkeypatch.setattr(projects_repo, "find", fake_find)

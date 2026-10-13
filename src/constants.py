@@ -50,3 +50,77 @@ class ConfigName(StrEnum):
     """The keys that live in the system_configurations table. Declare each one here rather than
     scattering raw strings at the call sites, so there's one list of what's tunable at runtime.
     Empty in the boilerplate -- add yours as the app grows."""
+
+
+# --- Agent sessions (services/agent/adapter) ---
+# A project's agent session is a long-running process found again by its working directory (the
+# project's workspace) plus this env var, which also carries the port it listens on.
+SESSION_PORT_ENV = "EVENT_CHANNEL_PORT"
+# What a session runs (argv, no shell), launched inside the project's workspace with SESSION_PORT_ENV set.
+SESSION_COMMAND = ["doit", "--param", "1"]
+# How long a freshly picked port stays reserved -- covers the gap until the session actually binds it.
+SESSION_PORT_LOCK_TTL_SECONDS = 300
+SESSION_PORT_MAX_ATTEMPTS = 1000
+# Per-project mutex around find-or-start, so two concurrent calls can't both start a session.
+SESSION_LOCK_TTL_SECONDS = 60
+SESSION_LOCK_WAIT_SECONDS = 30
+
+
+# Whether user messages are answered by the stand-in agent (services/agent/mock) instead of being sent to
+# the project's real agent session. Flip it off once sending to the session is built.
+AGENT_MOCK_REPLIES = True
+
+# Per-project mutex around "find or create the current conversation" (services/agent/conversations).
+AI_CONVERSATION_LOCK_TTL_SECONDS = 10
+AI_CONVERSATION_LOCK_WAIT_SECONDS = 5
+# Attempts at claiming a message's next seq (repositories/ai_messages). Only concurrent writers to the
+# SAME conversation collide -- normally a session message vs. a user answer, two at most.
+AI_MESSAGE_SEQ_ATTEMPTS = 10
+
+
+class AiMessageRole(StrEnum):
+    """ai_messages.role -- the LLM API's two turn roles. A user's answers to the agent's questions /
+    actions are USER messages too (tool_result blocks), same as in the API."""
+
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+# The user-facing tool the agent asks multiple-choice questions with. Its input is {"questions": [...]};
+# the answer comes back as a tool_result whose content is the array of per-question results.
+ASK_USER_TOOL_NAME = "ask_user"
+# The tool the agent shows the user a file with: input {"path": "artifacts/<name>", "title": "..."}. Not
+# user-facing -- it never waits on the user; the FE just renders it as a button opening the file.
+SHOW_ARTIFACT_TOOL_NAME = "show_artifact"
+# Tools whose "execution" is the user answering. A tool_use of one of these pauses the conversation
+# until a matching tool_result arrives (services/agent/interactions).
+USER_FACING_TOOLS = [ASK_USER_TOOL_NAME]
+
+
+class InteractionStatus(StrEnum):
+    """Per-item status in a submission. An array is either all SUBMITTED, or SUBMITTED* then exactly one
+    ABORTED then UNTOUCHED* -- the user works through items in order and bails out at one."""
+
+    SUBMITTED = "submitted"
+    ABORTED = "aborted"
+    UNTOUCHED = "untouched"  # never reached, because an earlier item was aborted
+
+
+# Pages of GET /conversations/{id}/messages (infinite scroll up).
+MESSAGES_PAGE_DEFAULT = 50
+MESSAGES_PAGE_MAX = 200
+
+
+# File attachments (POST /conversations/{id}/uploads). Per request; the real body-size guard belongs in
+# nginx too (client_max_body_size), since the multipart body is parsed before our code sees it.
+UPLOAD_MAX_FILES = 10
+UPLOAD_MAX_BYTES = 25 * 1024 * 1024  # per file
+
+
+# SSE (GET /conversations/{id}/events). With nothing new, the stream sends a heartbeat comment this
+# often -- keeps proxies from closing it as idle, and doubles as the fallback db check for a missed
+# wake-up. Each stream is closed after the max age; the browser reconnects at once, which re-checks auth.
+SSE_HEARTBEAT_SECONDS = 15
+SSE_MAX_AGE_SECONDS = 1800
+# How long EventSource waits before reconnecting after a drop, in ms (sent once, up front).
+SSE_RETRY_MS = 3000

@@ -10,10 +10,10 @@ from src.services import system_config
 def _reset_cache():
     # The snapshot is module-global, so each test starts from a cold one.
     system_config._cache = {}
-    system_config._loaded_at = 0.0
+    system_config._loaded_at = float("-inf")
     yield
     system_config._cache = {}
-    system_config._loaded_at = 0.0
+    system_config._loaded_at = float("-inf")
 
 
 def _rows(calls: list, value):
