@@ -15,7 +15,7 @@ from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
-from src.services.agent import conversations, mock
+from src.services.agent import conversations, mock, sessions
 from src.utils import redis
 from src.utils.auth import get_current_user
 
@@ -96,6 +96,8 @@ def db(monkeypatch):
     # pause, and let each test run it (_settle) when it wants the reply stored.
     monkeypatch.setattr(conversations, "spawn", lambda job: state["spawned"].append(job))
     monkeypatch.setattr(mock, "REPLY_DELAY_SECONDS", 0)
+    # These tests exercise the mock agent, whatever the switch is set to in constants.py.
+    monkeypatch.setattr(conversations, "AGENT_MOCK_REPLIES", True)
     return state
 
 
@@ -130,6 +132,14 @@ async def _say_and_settle(client, db, conversation_id, text):
     response = _say(client, conversation_id, text)
     await _settle(db)
     return response
+
+
+def _submission(*answers):
+    """A submission body from (interaction_id, results) pairs."""
+    return {
+        "type": "submission",
+        "answers": [{"interaction_id": interaction_id, "results": results} for interaction_id, results in answers],
+    }
 
 
 def _pending_tool_use(db):
@@ -213,7 +223,7 @@ async def test_answers_are_stored_as_a_tool_result_and_echoed(client, db):
     ]
     response = client.post(
         f"/api/conversations/{conversation_id}/messages",
-        json={"type": "submission", "interaction_id": tool_use["id"], "results": results},
+        json=_submission((tool_use["id"], results)),
     )
 
     assert response.status_code == 201
@@ -232,7 +242,7 @@ async def test_an_abort_closes_the_question_without_a_reply(client, db):
     tool_use = _pending_tool_use(db)
     client.post(
         f"/api/conversations/{conversation_id}/messages",
-        json={"type": "submission", "interaction_id": tool_use["id"], "results": [{"status": "aborted"}]},
+        json=_submission((tool_use["id"], [{"status": "aborted"}])),
     )
     await _settle(db)
     assert db["messages"][-1]["role"] == "user"  # stored the abort, the mock said nothing
@@ -244,7 +254,7 @@ async def test_submission_to_an_unknown_interaction_is_409(client, db):
     await _say_and_settle(client, db, conversation_id, "question")
     response = client.post(
         f"/api/conversations/{conversation_id}/messages",
-        json={"type": "submission", "interaction_id": "toolu_nope", "results": [{"status": "aborted"}]},
+        json=_submission(("toolu_nope", [{"status": "aborted"}])),
     )
     assert response.status_code == 409
     assert response.json()["detail"] == "INTERACTION_NOT_PENDING"
@@ -255,11 +265,12 @@ async def test_an_invalid_submission_is_422_with_a_reason(client, db):
     await _say_and_settle(client, db, conversation_id, "question")  # single-select
     response = client.post(
         f"/api/conversations/{conversation_id}/messages",
-        json={
-            "type": "submission",
-            "interaction_id": _pending_tool_use(db)["id"],
-            "results": [{"status": "submitted", "value": {"selected": ["Minimal", "Bold & colorful"], "custom": None}}],
-        },
+        json=_submission(
+            (
+                _pending_tool_use(db)["id"],
+                [{"status": "submitted", "value": {"selected": ["Minimal", "Bold & colorful"], "custom": None}}],
+            )
+        ),
     )
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "INVALID_SUBMISSION"
@@ -270,7 +281,13 @@ async def test_an_invalid_submission_is_422_with_a_reason(client, db):
     [
         {"type": "text", "text": ""},
         {"type": "shout", "text": "hi"},
-        {"type": "submission", "interaction_id": "x", "results": []},
+        {"type": "submission", "answers": []},
+        {"type": "submission", "answers": [{"interaction_id": "x", "results": []}]},
+        {
+            "type": "submission",
+            "interaction_id": "x",
+            "results": [{"status": "aborted"}],
+        },  # the old per-interaction shape
     ],
 )
 def test_malformed_bodies_are_422(body, client, db):
@@ -521,3 +538,131 @@ async def test_artifacts_revalidate_and_get_304_until_they_change(client, db, mo
     assert changed.status_code == 200 and b"12:00:00" in changed.content
     assert changed.headers["etag"] != etag
     assert client.get(f"/api/conversations/{conversation_id}/artifacts").json()[0]["version"] != version_before
+
+
+# --- the real agent (AGENT_MOCK_REPLIES off) ---
+
+
+@pytest.fixture
+def real_agent(monkeypatch):
+    """The mock off, the session faked: records what gets pushed into it."""
+    pushed = []
+
+    async def fake_ensure_session(project, conversation_id):
+        return 8899
+
+    async def fake_send(port, content):
+        pushed.append(content)
+
+    monkeypatch.setattr(conversations, "AGENT_MOCK_REPLIES", False)
+    monkeypatch.setattr(sessions, "ensure_session", fake_ensure_session)
+    monkeypatch.setattr(sessions, "send", fake_send)
+    return pushed
+
+
+def test_text_is_pushed_into_the_session(client, db, real_agent):
+    assert _say(client, _open_conversation(client), "make it blue").status_code == 201
+    assert real_agent == [[{"type": "text", "text": "make it blue"}]]
+
+
+def test_session_questions_can_be_answered_and_the_answers_go_back_in(client, db, real_agent, monkeypatch):
+    conversation_id = _open_conversation(client)
+    # The session asks something -- the channel sends tool_use items with no id or name.
+    monkeypatch.setattr(settings, "admin_token", "admin-token-of-a-realistic-length-000001")
+    monkeypatch.setattr(conversations.projects_repo, "find", _fake_find_by_port_or_owner)
+    asked = client.post(
+        "/api/agent/8899/messages",
+        json={
+            "content": [
+                {
+                    "type": "tool_use",
+                    "input": {
+                        "questions": [
+                            {"question": "Style?", "options": ["A", "B"], "multi_select": False, "allow_custom": False}
+                        ]
+                    },
+                }
+            ]
+        },
+        headers={"Authorization": "Bearer admin-token-of-a-realistic-length-000001"},
+    ).json()
+    tool_use = asked["content"][0]
+    assert tool_use["name"] == "ask_user" and tool_use["id"].startswith("toolu_")
+
+    answer = [{"status": "submitted", "value": {"selected": ["B"], "custom": None}}]
+    response = client.post(
+        f"/api/conversations/{conversation_id}/messages",
+        json=_submission((tool_use["id"], answer)),
+    )
+    assert response.status_code == 201
+    assert real_agent == [[{"type": "tool_result", "content": answer}]]
+
+
+def test_an_unreachable_session_is_503_but_the_message_is_kept(client, db, real_agent, monkeypatch):
+    async def unreachable(port, content):
+        raise sessions.SessionUnavailable("nobody home")
+
+    monkeypatch.setattr(sessions, "send", unreachable)
+    response = _say(client, _open_conversation(client), "hello?")
+    assert response.status_code == 503 and response.json()["detail"] == "AGENT_UNAVAILABLE"
+    assert [m["content"][0]["text"] for m in db["messages"]] == ["hello?"]
+
+
+async def _fake_find_by_port_or_owner(criteria):
+    # Project 3 (Alice's) is the one running a session on port 8899.
+    project = {"id": 3, "user_id": 7, "current_port": 8899}
+    return [project] if all(project.get(key) == value for key, value in criteria.items()) else []
+
+
+# --- answering several questions of one message ---
+
+
+def _agent_asks(db, conversation_id, *tool_ids):
+    """Store an agent message asking one single-select question per tool id."""
+    question = {"question": "Pick?", "options": ["A", "B"], "multi_select": False, "allow_custom": False}
+    db["messages"] = [
+        *db["messages"],
+        {
+            "id": 900,
+            "conversation_id": conversation_id,
+            "seq": len(db["messages"]) + 1,
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": tool_id, "name": "ask_user", "input": {"questions": [question]}}
+                for tool_id in tool_ids
+            ],
+            "meta": {},
+        },
+    ]
+
+
+_PICK_A = [{"status": "submitted", "value": {"selected": ["A"], "custom": None}}]
+_PICK_B = [{"status": "submitted", "value": {"selected": ["B"], "custom": None}}]
+
+
+async def test_a_whole_batch_is_stored_in_the_order_the_agent_asked(client, db):
+    conversation_id = _open_conversation(client)
+    _agent_asks(db, conversation_id, "t1", "t2")
+    # answered in the other order -- stored in the agent's order anyway
+    response = client.post(
+        f"/api/conversations/{conversation_id}/messages", json=_submission(("t2", _PICK_B), ("t1", _PICK_A))
+    )
+    assert response.status_code == 201
+    stored = response.json()["content"]
+    assert [(block["tool_use_id"], block["content"]) for block in stored] == [("t1", _PICK_A), ("t2", _PICK_B)]
+    await _settle(db)
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        [("t1", _PICK_A)],  # t2 left out
+        [("t1", _PICK_A), ("t1", _PICK_A), ("t2", _PICK_B)],  # t1 twice
+    ],
+)
+def test_a_batch_must_answer_every_pending_question_exactly_once(answers, client, db):
+    conversation_id = _open_conversation(client)
+    _agent_asks(db, conversation_id, "t1", "t2")
+    response = client.post(f"/api/conversations/{conversation_id}/messages", json=_submission(*answers))
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "INVALID_SUBMISSION"

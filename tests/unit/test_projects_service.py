@@ -1,11 +1,11 @@
-# Project service + repo-update tests. No db and no real sessions: the agent service and postgres are
-# faked, so what's under test is when current_port gets written and what the update SQL touches.
+# Session port bookkeeping (services/agent/sessions.ensure_session) + projects repo-update tests. No db
+# and no real sessions: the adapter and postgres are faked, so what's under test is when current_port gets
+# written and what the update SQL touches.
 
 import pytest
 
 from src.repositories import projects as projects_repo
-from src.services import agent as agent_service
-from src.services import projects as project_service
+from src.services.agent import adapter, sessions
 from src.utils import postgres
 
 
@@ -24,14 +24,14 @@ def updates(monkeypatch):
 def _fake_session_on(monkeypatch, port, port_holders=()):
     """The session comes up on `port`; `port_holders` are the projects the db says hold that port."""
 
-    async def fake_ensure_workspace(project):
+    async def fake_ensure_workspace(project, conversation_id):
         return port
 
     async def fake_find(criteria):
         assert criteria == {"current_port": port}
         return list(port_holders)
 
-    monkeypatch.setattr(agent_service, "ensure_workspace", fake_ensure_workspace)
+    monkeypatch.setattr(adapter, "ensure_workspace", fake_ensure_workspace)
     monkeypatch.setattr(projects_repo, "find", fake_find)
 
 
@@ -40,26 +40,26 @@ def _fake_session_on(monkeypatch, port, port_holders=()):
 
 async def test_ensure_session_records_a_new_port(monkeypatch, updates):
     _fake_session_on(monkeypatch, 8899)
-    assert await project_service.ensure_session({"id": 1, "current_port": None}) == 8899
+    assert await sessions.ensure_session({"id": 1, "current_port": None}, 5) == 8899
     assert updates == [(1, {"current_port": 8899})]
 
 
 async def test_ensure_session_corrects_a_stale_port(monkeypatch, updates):
     _fake_session_on(monkeypatch, 8900)
-    await project_service.ensure_session({"id": 1, "current_port": 8899})
+    await sessions.ensure_session({"id": 1, "current_port": 8899}, 5)
     assert updates == [(1, {"current_port": 8900})]
 
 
 async def test_ensure_session_skips_the_write_when_unchanged(monkeypatch, updates):
     _fake_session_on(monkeypatch, 8899, port_holders=[{"id": 1}])
-    await project_service.ensure_session({"id": 1, "current_port": 8899})
+    await sessions.ensure_session({"id": 1, "current_port": 8899}, 5)
     assert updates == []
 
 
 async def test_ensure_session_takes_the_port_from_a_stale_holder(monkeypatch, updates):
     # Project 2's session died and the OS gave its port to project 1's new session.
     _fake_session_on(monkeypatch, 8899, port_holders=[{"id": 2}])
-    await project_service.ensure_session({"id": 1, "current_port": None})
+    await sessions.ensure_session({"id": 1, "current_port": None}, 5)
     assert updates == [(2, {"current_port": None}), (1, {"current_port": 8899})]
 
 

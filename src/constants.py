@@ -56,19 +56,37 @@ class ConfigName(StrEnum):
 # A project's agent session is a long-running process found again by its working directory (the
 # project's workspace) plus this env var, which also carries the port it listens on.
 SESSION_PORT_ENV = "EVENT_CHANNEL_PORT"
+# Where the session's event-channel MCP posts the agent's messages back (POST /api/agent/{port}/messages)
+# and the bearer token it sends. Both are handed to the session at launch (services/agent/adapter).
+SESSION_OUTBOX_URL_ENV = "EVENT_CHANNEL_OUTBOX_URL"
+SESSION_OUTBOX_TOKEN_ENV = "EVENT_CHANNEL_OUTBOX_TOKEN"
 # What a session runs (argv, no shell), launched inside the project's workspace with SESSION_PORT_ENV set.
-SESSION_COMMAND = ["doit", "--param", "1"]
+# SESSION_COMMAND = ["doit", "--param", "1"]
+SESSION_COMMAND = ["claude", "--dangerously-load-development-channels", "server:event-channel"]
+# Claude's startup screens that need an answer before the session runs. start_session watches the
+# session's terminal and answers them, giving up after the wait below:
+#   - the folder-trust dialog, shown in a folder Claude hasn't been told to trust (a trusted parent folder
+#     counts). Its preselected option is "No, exit", so it's answered with Down then Enter.
+#   - the --dangerously-load-development-channels confirmation; its option 1 (this text) is preselected,
+#     so Enter accepts it. This one is always last.
+SESSION_TRUST_PROMPT = "Yes, I trust this folder"
+SESSION_STARTUP_PROMPT = "I am using this for local development"
+SESSION_STARTUP_PROMPT_WAIT_SECONDS = 30
 # How long a freshly picked port stays reserved -- covers the gap until the session actually binds it.
 SESSION_PORT_LOCK_TTL_SECONDS = 300
 SESSION_PORT_MAX_ATTEMPTS = 1000
 # Per-project mutex around find-or-start, so two concurrent calls can't both start a session.
-SESSION_LOCK_TTL_SECONDS = 60
-SESSION_LOCK_WAIT_SECONDS = 30
+# Generous, since starting a session now includes waiting out its startup prompt (below).
+SESSION_LOCK_TTL_SECONDS = 120
+SESSION_LOCK_WAIT_SECONDS = 60
+# Attempts at pushing a message into a session (services/agent/sessions.send), with backoff growing to 2s
+# -- about 15s in all, enough for a session that was just started to begin listening.
+SESSION_SEND_ATTEMPTS = 10
 
 
 # Whether user messages are answered by the stand-in agent (services/agent/mock) instead of being sent to
 # the project's real agent session. Flip it off once sending to the session is built.
-AGENT_MOCK_REPLIES = True
+AGENT_MOCK_REPLIES = False
 
 # Per-project mutex around "find or create the current conversation" (services/agent/conversations).
 AI_CONVERSATION_LOCK_TTL_SECONDS = 10
@@ -92,6 +110,9 @@ ASK_USER_TOOL_NAME = "ask_user"
 # The tool the agent shows the user a file with: input {"path": "artifacts/<name>", "title": "..."}. Not
 # user-facing -- it never waits on the user; the FE just renders it as a button opening the file.
 SHOW_ARTIFACT_TOOL_NAME = "show_artifact"
+# The tool the agent proposes externally declared actions with: input {"actions": [{name, params}]}. The
+# session's channel sends these; the FE can't answer them yet.
+REQUEST_ACTIONS_TOOL_NAME = "request_actions"
 # Tools whose "execution" is the user answering. A tool_use of one of these pauses the conversation
 # until a matching tool_result arrives (services/agent/interactions).
 USER_FACING_TOOLS = [ASK_USER_TOOL_NAME]
@@ -115,6 +136,11 @@ MESSAGES_PAGE_MAX = 200
 # nginx too (client_max_body_size), since the multipart body is parsed before our code sees it.
 UPLOAD_MAX_FILES = 10
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024  # per file
+
+
+# How long a server reload/shutdown waits for open connections before closing them (main.py). Has to be
+# short: SSE streams never finish on their own before SSE_MAX_AGE_SECONDS.
+SERVER_GRACEFUL_SHUTDOWN_SECONDS = 3
 
 
 # SSE (GET /conversations/{id}/events). With nothing new, the stream sends a heartbeat comment this

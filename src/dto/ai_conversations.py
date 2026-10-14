@@ -79,15 +79,24 @@ class TextMessageRequest(BaseModel):
         return self
 
 
+class InteractionAnswer(BaseModel):
+    """The results for one interaction (one tool_use of the agent's), one per question/action, in order."""
+
+    model_config = {"extra": "forbid"}
+
+    interaction_id: str  # the tool_use id
+    results: list[InteractionResult] = Field(min_length=1)
+
+
 class SubmissionRequest(BaseModel):
-    """The user's answers to one pending interaction (a tool_use of the agent's). Aborting is a submission
-    too -- one whose results contain an ABORTED item."""
+    """The user's answers to EVERY pending interaction of the agent's message, sent together in one go --
+    the FE collects them all before posting. Aborting is a submission too: one whose results contain an
+    ABORTED item."""
 
     model_config = {"extra": "forbid"}
 
     type: Literal["submission"]
-    interaction_id: str  # the tool_use id
-    results: list[InteractionResult] = Field(min_length=1)
+    answers: list[InteractionAnswer] = Field(min_length=1)
 
 
 # POST /conversations/{id}/messages body.

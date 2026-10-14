@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
+from src import debug_scratch
 from src.config import settings
 from src.controllers.agent import router as agent_router
 from src.controllers.auth import router as auth_router
@@ -51,6 +52,12 @@ async def lifespan(app: FastAPI):
         await system_config.force_load()
     except Exception as error:
         log_error(error, "system config load failed at startup; running on defaults")
+
+    # LOCAL-ONLY scratch hook: runs debug_scratch.do_test() on the live loop with live connections. uvicorn
+    # --reload re-runs startup on every save, so this is the "edit do_test, save, see output" debug loop.
+    # No-op unless you've put something in do_test; never runs outside local (and it swallows its own errors).
+    if settings.env == "local":
+        await debug_scratch.run_do_test()
 
     yield
 

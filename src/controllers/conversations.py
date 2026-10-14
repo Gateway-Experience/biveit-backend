@@ -98,6 +98,10 @@ async def post_message(
         raise HTTPException(status_code=422, detail={"code": "INVALID_SUBMISSION", "reason": str(error)}) from error
     except agent_service.FileNotAvailable as error:
         raise HTTPException(status_code=422, detail={"code": "INVALID_ATTACHMENT", "path": str(error)}) from error
+    except agent_service.SessionUnavailable as error:
+        # The message IS stored; only its delivery to the agent failed.
+        log_http_error(error, request)
+        raise HTTPException(status_code=503, detail="AGENT_UNAVAILABLE") from error
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error

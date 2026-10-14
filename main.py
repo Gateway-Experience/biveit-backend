@@ -4,6 +4,7 @@
 import uvicorn
 
 from src.config import settings
+from src.constants import SERVER_GRACEFUL_SHUTDOWN_SECONDS
 from src.utils.logging import configure_logging
 
 
@@ -18,6 +19,10 @@ def main() -> None:
         port=settings.api_port,
         reload=settings.api_reload,
         reload_dirs=["src"] if settings.api_reload else None,
+        # Without a cap, a reload or shutdown waits for EVERY open connection to finish -- and SSE streams
+        # (GET /conversations/{id}/events) stay open for up to SSE_MAX_AGE_SECONDS, so the server would
+        # hang half-restarted. Past the cap they're closed; EventSource reconnects and resumes on its own.
+        timeout_graceful_shutdown=SERVER_GRACEFUL_SHUTDOWN_SECONDS,
     )
 
 

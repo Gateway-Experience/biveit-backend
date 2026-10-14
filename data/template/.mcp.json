@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "event-channel": {
+      "command": "node",
+      "args": ["/home/anhlq/workspace/mcps/event-channel-mcp.js"]
+    }
+  }
+}

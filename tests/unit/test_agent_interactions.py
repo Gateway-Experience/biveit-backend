@@ -142,9 +142,16 @@ def test_mock_questions_are_valid_against_its_own_rules():
 
 def test_mock_echoes_answers_but_not_aborts():
     tool_use = mock.reply_to_text("question")[-1]
-    reply = mock.reply_to_submission(tool_use, [_submitted(custom="Earthy")])
-    assert '"Earthy"' in reply[0]["text"]
-    assert mock.reply_to_submission(tool_use, [{"status": "aborted"}]) is None
+    other_tool_use = mock.reply_to_text("question")[-1]
+    reply = mock.reply_to_submission(
+        [(tool_use, [_submitted(custom="Earthy")]), (other_tool_use, [_submitted(["Minimal"])])]
+    )
+    assert '"Earthy"' in reply[0]["text"] and "Minimal" in reply[0]["text"]
+    # one aborted interaction anywhere in the batch -> no reply
+    assert (
+        mock.reply_to_submission([(tool_use, [_submitted(["Minimal"])]), (other_tool_use, [{"status": "aborted"}])])
+        is None
+    )
 
 
 def test_mock_lists_uploads_with_types_and_sizes():

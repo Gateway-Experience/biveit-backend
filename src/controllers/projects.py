@@ -1,14 +1,16 @@
 # Intentions: the caller's own projects.
 #   GET  /projects  (auth)  my live projects, most recently edited first
-#   POST /projects  (auth)  create a project owned by me
+#   POST /projects            (auth)  create a project owned by me
+#   POST /projects/{id}/open  (auth)  get my project ready to work on (call it when the user opens it)
 # Guests count as callers too -- their projects stay theirs after signup (promotion keeps the user id).
-# No service hop: both are straight repo calls with nothing to orchestrate yet.
+# Listing and creating are straight repo calls; opening goes through services/projects.
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from src.dto.projects import CreateProjectRequest, Project
 from src.dto.users import User
 from src.repositories import projects as projects_repo
+from src.services import projects as project_service
 from src.utils.auth import get_current_user
 from src.utils.logging import log_http_error
 
@@ -34,3 +36,20 @@ async def create_project(
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.post("/projects/{project_id}/open")
+async def open_project(project_id: int, request: Request, user: User = Depends(get_current_user)) -> dict:
+    """Prepare the caller's project -- its workspace and agent -- and answer once it's ready. Safe to call
+    on every visit. The agent's port stays internal: the browser never talks to the session directly."""
+    try:
+        projects = await projects_repo.find({"id": project_id, "user_id": user["id"]})
+        if not projects:
+            raise HTTPException(status_code=404, detail="PROJECT_NOT_FOUND")
+        await project_service.open_project(projects[0])
+        return {"status": "ready"}
+    except HTTPException:
+        raise
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=503, detail="WORKSPACE_UNAVAILABLE") from error

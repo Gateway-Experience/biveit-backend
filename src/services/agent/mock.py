@@ -130,12 +130,14 @@ def _format_size(size: int) -> str:
     )
 
 
-def reply_to_submission(tool_use: dict, results: list[dict]) -> list[dict] | None:
-    """[Pure] The mock's reply to the user's answers, or None when they aborted (no reply then)."""
-    if any(result["status"] != InteractionStatus.SUBMITTED for result in results):
+def reply_to_submission(answered: list[tuple[dict, list[dict]]]) -> list[dict] | None:
+    """[Pure] The mock's reply to the user's answers -- `answered` is [(tool_use, its results)] for every
+    interaction of the message -- or None when anything was aborted (no reply then)."""
+    if any(result["status"] != InteractionStatus.SUBMITTED for _, results in answered for result in results):
         return None
     answer_lines = [
         f"- {question['question']} -> {_describe_answer(result['value'])}"
+        for tool_use, results in answered
         for question, result in zip(tool_use["input"]["questions"], results, strict=True)
     ]
     return [_to_text_block("(mock agent) Got your answers:\n" + "\n".join(answer_lines))]

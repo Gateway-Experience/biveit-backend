@@ -29,8 +29,13 @@ from src.dto.projects import Project
 from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
-from src.services.agent import mock, storage
-from src.services.agent.interactions import find_pending_interactions, to_tool_result_block, validate_question_results
+from src.services.agent import mock, sessions, storage
+from src.services.agent.interactions import (
+    InvalidSubmission,
+    find_pending_interactions,
+    to_tool_result_block,
+    validate_question_results,
+)
 from src.utils import redis
 from src.utils.common import spawn
 from src.utils.logging import log_error
@@ -163,12 +168,15 @@ async def watch_messages(
 async def receive_session_message(port: int, content: list[dict[str, Any]]) -> AiMessage:
     """Append a message from the session on `port` to its project's current conversation, and return
     the stored message. Everything a session posts is the agent talking, so it's an ASSISTANT message;
-    the port goes in meta so a message can be traced back to the session that sent it."""
+    its tool_use items get the id and name the channel leaves out (sessions.to_stored_content), and the
+    port goes in meta so a message can be traced back to the session that sent it."""
     projects = await projects_repo.find({"current_port": port})
     if len(projects) != 1:
         raise SessionNotFound(f"{len(projects)} projects on port {port}", {"port": port})
     conversation = await _ensure_conversation(projects[0])
-    return await _append(conversation["id"], AiMessageRole.ASSISTANT, content, {"session_port": port})
+    return await _append(
+        conversation["id"], AiMessageRole.ASSISTANT, sessions.to_stored_content(content), {"session_port": port}
+    )
 
 
 async def upload_files(conversation: AiConversation, files: list[dict]) -> list[dict]:
@@ -206,8 +214,10 @@ async def post_user_message(conversation: AiConversation, body: dict[str, Any]) 
     Attachments are paths from upload_files; each becomes an `attachment` block ({path, name, mime, size},
     re-described from disk rather than trusting the client), placed before the text.
 
-    A submission is checked against the interaction it answers (must be pending, results must fit) and
-    stored as the tool_result the agent expects. Text is refused while an interaction is pending."""
+    A submission must answer EVERY pending interaction of the agent's message, each exactly once (409 for
+    an id that isn't pending, InvalidSubmission for a missing or repeated one), with results that fit. It's
+    stored as one message holding a tool_result per interaction, in the order they were asked. Text is
+    refused while an interaction is pending."""
     pending = find_pending_interactions(await ai_messages_repo.find(conversation["id"]))
 
     if body["type"] == "text":
@@ -221,13 +231,22 @@ async def post_user_message(conversation: AiConversation, body: dict[str, Any]) 
         text_blocks = [{"type": "text", "text": body["text"]}] if body["text"].strip() else []
         return await _append_user(conversation, [*attachment_blocks, *text_blocks])
 
-    tool_use = pydash.find(pending, {"id": body["interaction_id"]})
-    if tool_use is None:
-        raise InteractionNotFound(
-            f"no pending interaction {body['interaction_id']}", {"interaction_id": body["interaction_id"]}
-        )
-    validate_question_results(tool_use["input"]["questions"], body["results"])
-    return await _append_user(conversation, [to_tool_result_block(tool_use["id"], body["results"])])
+    results_by_id = {answer["interaction_id"]: answer["results"] for answer in body["answers"]}
+    unknown_ids = [
+        interaction_id for interaction_id in results_by_id if not pydash.find(pending, {"id": interaction_id})
+    ]
+    if unknown_ids:
+        raise InteractionNotFound(f"not pending: {unknown_ids}", {"interaction_ids": unknown_ids})
+    unanswered_ids = [tool_use["id"] for tool_use in pending if tool_use["id"] not in results_by_id]
+    if unanswered_ids or len(results_by_id) != len(body["answers"]):
+        raise InvalidSubmission(f"answer every pending interaction exactly once (missing: {unanswered_ids})")
+    for tool_use in pending:
+        validate_question_results(tool_use["input"]["questions"], results_by_id[tool_use["id"]])
+    # One tool_result per pending tool_use, in the order the agent asked them -- a complete answer to its
+    # message, which is how both the session's channel and the LLM API want it.
+    return await _append_user(
+        conversation, [to_tool_result_block(tool_use["id"], results_by_id[tool_use["id"]]) for tool_use in pending]
+    )
 
 
 async def _append_user(conversation: AiConversation, content: list[dict]) -> AiMessage:
@@ -244,32 +263,36 @@ async def _append_user(conversation: AiConversation, content: list[dict]) -> AiM
 
 
 async def _send_to_agent(conversation: AiConversation, user_message: AiMessage) -> None:
-    """Forward a user message to the project's agent session. Not built yet -- how the session takes
-    input isn't decided.
+    """Forward a just-stored user message to the conversation's agent session, starting the session if it
+    isn't running. The message is complete on its own (answers come as a whole batch), so there's nothing
+    to look up. The session's reply comes back on its own, through POST /agent/{port}/messages ->
+    receive_session_message.
 
-    The shape it'll take: get the session's port from services/projects.ensure_session (called by the
-    caller of this package -- importing services/projects here would be circular), send `user_message`
-    to the session on that port, and return. The session's answer comes back on its own through
-    POST /agent/{port}/messages -> receive_session_message, and reaches the user the same way."""
-    raise NotImplementedError("sending messages to the agent session isn't built yet; keep AGENT_MOCK_REPLIES on")
+    Raises sessions.SessionUnavailable if the session can't be reached. The message stays stored either
+    way -- it just didn't get through."""
+    port = await sessions.ensure_session(await _get_project(conversation), conversation["id"])
+    await sessions.send(port, sessions.to_session_content(user_message))
 
 
 async def _get_mock_reply(conversation: AiConversation, user_message: AiMessage) -> list[dict] | None:
-    """The mock's reply to a stored user message, worked out from the message itself: answers to a
-    question are echoed (found by tool_use_id), attachments get the uploads folder listed, the artifact
+    """The mock's reply to a stored user message, worked out from the message itself: answers are echoed
+    (each matched to its question by tool_use_id), attachments get the uploads folder listed, the artifact
     commands write files and show them, and any other text is echoed. None means no reply (an abort).
 
     The artifact commands need their files on disk BEFORE the reply shows them, so that writing happens
     here rather than in the (pure) mock module."""
     blocks_by_type = pydash.group_by(user_message["content"], "type")
     if "tool_result" in blocks_by_type:
-        answered = blocks_by_type["tool_result"][0]
         history = await ai_messages_repo.find(conversation["id"])
-        tool_use = pydash.find(
-            [block for message in history for block in message["content"]],
-            {"type": "tool_use", "id": answered["tool_use_id"]},
+        tool_uses_by_id = {
+            block["id"]: block for message in history for block in message["content"] if block.get("type") == "tool_use"
+        }
+        return mock.reply_to_submission(
+            [
+                (tool_uses_by_id[answered["tool_use_id"]], answered["content"])
+                for answered in blocks_by_type["tool_result"]
+            ]
         )
-        return mock.reply_to_submission(tool_use, answered["content"])
 
     project = await _get_project(conversation)
     if "attachment" in blocks_by_type:

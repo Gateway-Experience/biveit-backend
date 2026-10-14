@@ -1,7 +1,7 @@
-# Intentions: the bridge between a project and its agent session -- a long-running process working
-# inside the project's own directory (the workspace). ensure_workspace is the entry point: it makes
-# sure the workspace exists (seeded from the template) and that exactly one session is running in it,
-# and hands back the session's port.
+# Intentions: the bridge between a conversation and its agent session -- a long-running process working
+# inside the conversation's own directory (the workspace: <project dir>/<conversation_id>, next to its
+# uploads/ and artifacts/). ensure_workspace is the entry point: it makes sure the workspace exists
+# (seeded from the template) and that exactly one session is running in it, and hands back the port.
 #
 # THERE'S NO SESSION TABLE on purpose. The OS is the source of truth: a session is "the process whose
 # cwd is the workspace and whose env has EVENT_CHANNEL_PORT=<port>". So nothing can drift out of sync
@@ -11,8 +11,10 @@
 import asyncio
 import os
 import re
+import shlex
 import shutil
 import socket
+import time
 from pathlib import Path
 
 import pydash
@@ -22,9 +24,14 @@ from src.constants import (
     SESSION_COMMAND,
     SESSION_LOCK_TTL_SECONDS,
     SESSION_LOCK_WAIT_SECONDS,
+    SESSION_OUTBOX_TOKEN_ENV,
+    SESSION_OUTBOX_URL_ENV,
     SESSION_PORT_ENV,
     SESSION_PORT_LOCK_TTL_SECONDS,
     SESSION_PORT_MAX_ATTEMPTS,
+    SESSION_STARTUP_PROMPT,
+    SESSION_STARTUP_PROMPT_WAIT_SECONDS,
+    SESSION_TRUST_PROMPT,
 )
 from src.dto.projects import Project
 from src.services.agent import storage
@@ -37,20 +44,33 @@ _SESSION_PORT_PATTERN = re.compile(rf"^{SESSION_PORT_ENV}=(\d+)$")
 
 class TooManySessions(Exception):
     """More than one session is running in a project's workspace. Shouldn't happen (ensure_session
-    is serialized per project), so it's a real bug -- or someone started one by hand. (A session's own
+    is serialized per workspace), so it's a real bug -- or someone started one by hand. (A session's own
     child processes don't count -- see ensure_session.)"""
+
+
+class SessionStartFailed(Exception):
+    """The session couldn't be brought up: tmux refused, or it never got to (or past) its startup prompt."""
 
 
 class _PortTaken(Exception):
     """Internal retry signal: the port we picked is already reserved by another session start."""
 
 
-async def ensure_workspace(project: Project) -> int:
-    """Make sure the project's workspace exists and is seeded, and that its session is running. Returns
-    the session's port. Safe to call on every visit -- each step is idempotent."""
-    pwd = storage.get_project_dir(project)
-    await asyncio.to_thread(_copy_missing_files, os.path.realpath(settings.template_dir), pwd)
-    return await ensure_session(project)
+async def ensure_workspace(project: Project, conversation_id: int) -> int:
+    """Make sure the conversation's workspace exists and is seeded, and that its session is running.
+    Returns the session's port. Safe to call on every visit -- each step is idempotent."""
+    await seed_workspace(project, conversation_id)
+    return await ensure_session(project, conversation_id)
+
+
+async def seed_workspace(project: Project, conversation_id: int) -> None:
+    """Create the conversation's workspace if needed and copy in any template files it's missing.
+    Idempotent, and never touches files the workspace already has."""
+    await asyncio.to_thread(
+        _copy_missing_files,
+        os.path.realpath(settings.template_dir),
+        storage.get_conversation_dir(project, conversation_id),
+    )
 
 
 def _copy_missing_files(source_dir: str, destination_dir: str) -> None:
@@ -104,14 +124,14 @@ async def find_processes_in_dir(abs_dir: str, regex: re.Pattern) -> list[dict]:
     return [process for process in dir_processes if any(regex.search(entry) for entry in process["environ"])]
 
 
-async def ensure_session(project: Project) -> int:
-    """The port of the project's running session, starting one if none is running. Serialized per
-    project, so two tabs opening the same project at once can't both start a session.
+async def ensure_session(project: Project, conversation_id: int) -> int:
+    """The port of the conversation's running session, starting one if none is running. Serialized per
+    workspace, so two tabs opening the same conversation at once can't both start a session.
 
     The port comes back as soon as the process is launched. Whether it's LISTENING yet is the caller's
     problem: connect with a retry."""
-    async with redis.lock(f"agent_session:{project['id']}", SESSION_LOCK_TTL_SECONDS, SESSION_LOCK_WAIT_SECONDS):
-        pwd = storage.get_project_dir(project)
+    async with redis.lock(f"agent_session:{conversation_id}", SESSION_LOCK_TTL_SECONDS, SESSION_LOCK_WAIT_SECONDS):
+        pwd = storage.get_conversation_dir(project, conversation_id)
         # A session's children (a dev server, say) inherit its cwd AND its env, so they match too. They
         # all share the session's OS session id though (start_session gives it its own), so count those.
         processes = await find_processes_in_dir(pwd, _SESSION_PORT_PATTERN)
@@ -127,7 +147,7 @@ async def ensure_session(project: Project) -> int:
             retries=SESSION_PORT_MAX_ATTEMPTS,
             should_retry=lambda error, _: isinstance(error, _PortTaken),
         )
-        await start_session(project, port)
+        await start_session(project, conversation_id, port)
         return port
 
 
@@ -143,28 +163,111 @@ async def _claim_free_port() -> int:
     return port
 
 
-async def start_session(project: Project, port: int) -> None:
-    """Launch the project's session process (SESSION_COMMAND) and return once it's running -- not once
-    it's listening.
+async def start_session(project: Project, conversation_id: int, port: int) -> None:
+    """Launch the conversation's session (SESSION_COMMAND) in a detached tmux session, get it past its
+    startup prompt, and return -- once it's running, not once it's listening.
 
     How it's launched is a CONTRACT with ensure_session, which finds the session again by these:
-      - cwd = the project's workspace dir
+      - cwd = the conversation's workspace dir
       - SESSION_PORT_ENV=<port> in its environment, on top of ours
-    It's also detached (its own session, no stdin, never awaited), so it outlives a backend restart
-    instead of dying with it.
+    Living in tmux, it outlives a backend restart, and you can watch it: `tmux attach -t conv_<id>`.
 
-    Its output goes to `<storage_dir>/<user_id>/<project_id>.session.log`, next to the workspace rather than inside it,
-    so the agent never sees its own log among the project's files. Appended, so it covers every session
-    the project has had."""
-    pwd = storage.get_project_dir(project)
+    The tmux client's own output (its errors, e.g. a duplicate session name) goes to
+    `<project dir>/<conversation_id>.session.log`, next to the workspace rather than inside it; the
+    session's output is in its tmux pane. Raises SessionStartFailed if tmux refuses, or the startup
+    prompt never shows."""
+    pwd = storage.get_conversation_dir(project, conversation_id)
+    tmux_session = _get_tmux_session_name(conversation_id)
     with await asyncio.to_thread(open, f"{pwd}.session.log", "ab") as session_log:
-        # The child gets its own copy of the log's fd, so closing ours when the block ends is fine.
-        await asyncio.create_subprocess_exec(
-            *SESSION_COMMAND,
+        # exec takes argv, not a shell line, so every argument is its own string; tmux itself takes the
+        # session command as ONE string, hence shlex.join.
+        # The port goes ONLY to the pane, via -e: a tmux pane doesn't get the client's environment, and the
+        # client's env must not carry it either -- the first `tmux new` starts the tmux SERVER with that
+        # env and cwd, and a server carrying the port would match ensure_session's discovery as an extra
+        # session. -c sets the pane's cwd, which is what discovery matches on. The outbox URL and token are
+        # how the session's channel posts the agent's messages back to us -- passed explicitly too, since
+        # the pane would otherwise only have whatever env the tmux server happened to start with.
+        # Gotcha: the token is the admin token, so the agent holds full admin rights.
+        tmux_client = await asyncio.create_subprocess_exec(
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            tmux_session,
+            "-c",
+            pwd,
+            "-e",
+            f"{SESSION_PORT_ENV}={port}",
+            "-e",
+            f"{SESSION_OUTBOX_URL_ENV}=http://127.0.0.1:{settings.api_port}",
+            "-e",
+            f"{SESSION_OUTBOX_TOKEN_ENV}={settings.admin_token}",
+            shlex.join(SESSION_COMMAND),
             cwd=pwd,
-            env={**os.environ, SESSION_PORT_ENV: str(port)},
+            env=_get_tmux_client_env(),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=session_log,
             stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
         )
+        # With -d the client exits as soon as the session exists. Waiting for it means the session is
+        # there before we look at its pane, and a refusal (e.g. "duplicate session") doesn't go unnoticed.
+        if await tmux_client.wait() != 0:
+            raise SessionStartFailed(f"tmux couldn't start {tmux_session}; see {pwd}.session.log")
+    await _accept_startup_prompt(tmux_session)
+
+
+async def _accept_startup_prompt(tmux_session: str) -> None:
+    """Answer Claude's startup screens in the session's terminal (see SESSION_TRUST_PROMPT /
+    SESSION_STARTUP_PROMPT): the folder-trust dialog if it shows, then the development-channels
+    confirmation. Raises SessionStartFailed if the confirmation hasn't shown within
+    SESSION_STARTUP_PROMPT_WAIT_SECONDS, or the pane is gone (the session died during startup)."""
+    await _answer_startup_screens(tmux_session, time.monotonic() + SESSION_STARTUP_PROMPT_WAIT_SECONDS)
+
+
+async def _answer_startup_screens(tmux_session: str, deadline: float, trust_answered: bool = False) -> None:
+    """Check the terminal once a second until the development-channels confirmation shows, answering
+    the trust dialog on the way. Recursive: each call is one look at the screen.
+
+    `trust_answered`: whether we've already answered the trust dialog. It's answered at most ONCE -- the
+    screen can still show it for a moment after (or, in a plain terminal, keep it scrolled up), and
+    answering again would send Down+Enter into the NEXT prompt, which selects "Exit"."""
+    pane_text = await _run_tmux("capture-pane", "-p", "-t", tmux_session)
+    if SESSION_STARTUP_PROMPT in pane_text:
+        await _run_tmux("send-keys", "-t", tmux_session, "Enter")
+        return
+    if SESSION_TRUST_PROMPT in pane_text and not trust_answered:
+        # Separate keystrokes with a beat between: the dialog should see the selection move before Enter.
+        await _run_tmux("send-keys", "-t", tmux_session, "Down")
+        await asyncio.sleep(0.5)
+        await _run_tmux("send-keys", "-t", tmux_session, "Enter")
+        return await _answer_startup_screens(tmux_session, deadline, trust_answered=True)
+    if time.monotonic() >= deadline:
+        raise SessionStartFailed(f"{tmux_session} never showed its startup prompt")
+    await asyncio.sleep(1)
+    return await _answer_startup_screens(tmux_session, deadline, trust_answered)
+
+
+async def _run_tmux(*args: str) -> str:
+    """Run one tmux command against the same tmux server sessions are started on, and return its stdout.
+    Raises SessionStartFailed if tmux fails (e.g. the session is gone)."""
+    tmux = await asyncio.create_subprocess_exec(
+        "tmux",
+        *args,
+        env=_get_tmux_client_env(),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await tmux.communicate()
+    if tmux.returncode != 0:
+        raise SessionStartFailed(f"tmux {args[0]} failed: {stderr.decode(errors='replace').strip()}")
+    return stdout.decode(errors="replace")
+
+
+def _get_tmux_session_name(conversation_id: int) -> str:
+    return f"conv_{conversation_id}"
+
+
+def _get_tmux_client_env() -> dict[str, str]:
+    """[Pure-ish] Our environment minus the session port -- see start_session for why the tmux client
+    must never carry it."""
+    return pydash.omit(dict(os.environ), SESSION_PORT_ENV)

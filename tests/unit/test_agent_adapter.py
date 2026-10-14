@@ -4,28 +4,32 @@
 
 import asyncio
 import os
-import signal
+import shutil
+import subprocess
 import sys
+import tempfile
+import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import pytest
 
 from src.config import settings
-from src.constants import SESSION_PORT_ENV
+from src.constants import SESSION_PORT_ENV, SESSION_STARTUP_PROMPT, SESSION_TRUST_PROMPT
 from src.services.agent import adapter, storage
 from src.utils import redis
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="process discovery reads /proc")
+needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="sessions run inside tmux")
 
 _PROJECT = {"id": 42, "user_id": 7}
+_CONVERSATION_ID = 5
 
 
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
     """Points STORAGE_DIR at a temp dir and returns the project's (created) workspace path."""
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path / "storage"))
-    pwd = storage.get_project_dir(_PROJECT)
+    pwd = storage.get_conversation_dir(_PROJECT, _CONVERSATION_ID)
     os.makedirs(pwd)
     return pwd
 
@@ -87,30 +91,59 @@ async def test_find_processes_in_dir_filters_by_env(workspace, spawn_in):
     assert [process["pid"] for process in processes] == [session.pid]
 
 
+@pytest.fixture
+def isolated_tmux(monkeypatch):
+    """Sessions run inside tmux (start_session), so give these tests a PRIVATE tmux server -- never the
+    developer's own, where a test session named conv_<id> could collide with a real one. tmux keeps its
+    socket under $TMUX_TMPDIR (short path on purpose: unix socket paths are capped at ~108 chars).
+    The whole server is killed afterwards, taking every test session with it."""
+    socket_dir = tempfile.mkdtemp(prefix="tmx")
+    monkeypatch.setenv("TMUX_TMPDIR", socket_dir)
+    yield
+    subprocess.run(
+        ["tmux", "kill-server"], env={**os.environ, "TMUX_TMPDIR": socket_dir}, capture_output=True, check=False
+    )
+    shutil.rmtree(socket_dir, ignore_errors=True)
+
+
+def _claude_like(then: str) -> list[str]:
+    """A stand-in session command that behaves like Claude at startup: shows the confirmation prompt and
+    waits for Enter, then runs `then` (shell)."""
+    return ["sh", "-c", f'echo "{SESSION_STARTUP_PROMPT}"; read confirmation; echo accepted; {then}']
+
+
+async def _wait_for_sessions(workspace, count, timeout_seconds=5.0):
+    """The session processes in `workspace` once there are `count` of them -- a tmux pane takes a moment to
+    start. Returns whatever is there at the timeout, so the assertion shows what went wrong."""
+    deadline = time.monotonic() + timeout_seconds
+    processes = await adapter.find_processes_in_dir(workspace, adapter._SESSION_PORT_PATTERN)
+    while len(processes) < count and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+        processes = await adapter.find_processes_in_dir(workspace, adapter._SESSION_PORT_PATTERN)
+    return processes
+
+
 # --- ensure_session ---
 
 
 async def test_ensure_session_reuses_the_running_session(workspace, spawn_in, fake_redis, monkeypatch):
     await spawn_in(workspace, {SESSION_PORT_ENV: "8899"})
 
-    async def fail_start(project, port):
+    async def fail_start(project, conversation_id, port):
         raise AssertionError("must not start a second session")
 
     monkeypatch.setattr(adapter, "start_session", fail_start)
-    assert await adapter.ensure_session(_PROJECT) == 8899
+    assert await adapter.ensure_session(_PROJECT, _CONVERSATION_ID) == 8899
 
 
-async def test_ensure_session_ignores_a_sessions_own_children(workspace, fake_redis, monkeypatch):
+@needs_tmux
+async def test_ensure_session_ignores_a_sessions_own_children(workspace, fake_redis, isolated_tmux, monkeypatch):
     # The session forks a child (think: a dev server). Same cwd, same env -- but the same OS session.
-    monkeypatch.setattr(adapter, "SESSION_COMMAND", ["sh", "-c", "sleep 30 & exec sleep 30"])
-    port = await adapter.ensure_session(_PROJECT)
-    try:
-        await asyncio.sleep(0.2)  # let the child start
-        processes = await adapter.find_processes_in_dir(workspace, adapter._SESSION_PORT_PATTERN)
-        assert len(processes) == 2
-        assert await adapter.ensure_session(_PROJECT) == port  # one session, not TooManySessions
-    finally:
-        os.killpg(processes[0]["sid"], signal.SIGKILL)
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("sleep 30 & exec sleep 30"))
+    port = await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
+    processes = await _wait_for_sessions(workspace, 2)
+    assert len(processes) == 2
+    assert await adapter.ensure_session(_PROJECT, _CONVERSATION_ID) == port  # one session, not TooManySessions
 
 
 async def test_ensure_session_refuses_when_several_are_running(workspace, spawn_in, fake_redis):
@@ -118,18 +151,18 @@ async def test_ensure_session_refuses_when_several_are_running(workspace, spawn_
     await spawn_in(workspace, {SESSION_PORT_ENV: "8900"})
 
     with pytest.raises(adapter.TooManySessions):
-        await adapter.ensure_session(_PROJECT)
+        await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
 
 
 async def test_ensure_session_starts_one_on_a_reserved_port(workspace, fake_redis, monkeypatch):
     started = {}
 
-    async def fake_start(project, port):
+    async def fake_start(project, conversation_id, port):
         started["port"] = port
 
     monkeypatch.setattr(adapter, "start_session", fake_start)
 
-    port = await adapter.ensure_session(_PROJECT)
+    port = await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
     assert started["port"] == port
     assert f"agent_session_port:{port}" in fake_redis
 
@@ -154,10 +187,10 @@ async def test_claim_free_port_retries_past_a_reserved_port(fake_redis, monkeypa
 
     fake_redis.add("agent_session_port:5001")
     monkeypatch.setattr(adapter.socket, "socket", FakeSocket)
-    monkeypatch.setattr(adapter, "start_session", lambda project, port: asyncio.sleep(0))
+    monkeypatch.setattr(adapter, "start_session", lambda project, conversation_id, port: asyncio.sleep(0))
     monkeypatch.setattr(settings, "storage_dir", "/nonexistent-storage")
 
-    assert await adapter.ensure_session(_PROJECT) == 5002
+    assert await adapter.ensure_session(_PROJECT, _CONVERSATION_ID) == 5002
 
 
 # --- workspace seeding ---
@@ -182,17 +215,68 @@ def test_copy_missing_files_never_overwrites(tmp_path):
 # --- start_session ---
 
 
-async def test_started_session_is_found_again(workspace, fake_redis, monkeypatch):
-    # The launch contract end to end: whatever start_session runs, ensure_session must find it next time.
-    monkeypatch.setattr(adapter, "SESSION_COMMAND", ["sh", "-c", "echo booted; exec sleep 30"])
+@needs_tmux
+async def test_started_session_is_found_again(workspace, fake_redis, isolated_tmux, monkeypatch):
+    # The launch contract end to end: whatever start_session runs, ensure_session must find it next time --
+    # which takes the port reaching the pane (tmux -e) and the pane running in the workspace (tmux -c).
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("exec sleep 30"))
+    monkeypatch.setattr(settings, "admin_token", "outbox-test-token")
 
-    port = await adapter.ensure_session(_PROJECT)
-    try:
-        processes = await adapter.find_processes_in_dir(workspace, adapter._SESSION_PORT_PATTERN)
-        assert len(processes) == 1
-        assert await adapter.ensure_session(_PROJECT) == port  # reused, not started again
-        await asyncio.sleep(0.2)  # let the shell write before we read its log
-        assert "booted" in await asyncio.to_thread(Path(f"{workspace}.session.log").read_text)
-    finally:
-        for process in processes:
-            os.killpg(process["pid"], signal.SIGKILL)  # its own session -> its own process group
+    port = await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
+    processes = await _wait_for_sessions(workspace, 1)
+    assert len(processes) == 1
+    assert f"{SESSION_PORT_ENV}={port}" in processes[0]["environ"]
+    # ...and so does the way back: where the channel posts the agent's messages, and the token it sends.
+    assert f"EVENT_CHANNEL_OUTBOX_URL=http://127.0.0.1:{settings.api_port}" in processes[0]["environ"]
+    assert "EVENT_CHANNEL_OUTBOX_TOKEN=outbox-test-token" in processes[0]["environ"]
+    assert await adapter.ensure_session(_PROJECT, _CONVERSATION_ID) == port  # reused, not started again
+
+
+@needs_tmux
+async def test_start_presses_enter_on_the_startup_prompt(workspace, fake_redis, isolated_tmux, monkeypatch):
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("exec sleep 30"))
+    await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
+    # ensure_session returned, so Enter was already sent -- the stand-in printed "accepted" after reading it.
+    await asyncio.sleep(0.2)
+    pane_text = await adapter._run_tmux("capture-pane", "-p", "-t", f"conv_{_CONVERSATION_ID}")
+    assert "accepted" in pane_text
+
+
+@needs_tmux
+async def test_start_fails_if_the_prompt_never_shows(workspace, fake_redis, isolated_tmux, monkeypatch):
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", ["sleep", "30"])  # never prompts
+    monkeypatch.setattr(adapter, "SESSION_STARTUP_PROMPT_WAIT_SECONDS", 2)
+    with pytest.raises(adapter.SessionStartFailed, match="never showed"):
+        await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
+
+
+@needs_tmux
+async def test_start_fails_on_a_duplicate_tmux_session(workspace, fake_redis, isolated_tmux, monkeypatch):
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("exec sleep 30"))
+    await adapter._run_tmux("new-session", "-d", "-s", f"conv_{_CONVERSATION_ID}", "sleep 30")  # a leftover
+    with pytest.raises(adapter.SessionStartFailed, match="couldn't start"):
+        await adapter.start_session(_PROJECT, _CONVERSATION_ID, 8899)
+
+
+@needs_tmux
+async def test_start_answers_the_trust_dialog_once_then_the_prompt(workspace, fake_redis, isolated_tmux, monkeypatch):
+    # A folder Claude doesn't trust yet: the trust dialog first, then the channels prompt. In this plain
+    # terminal the answered trust line stays on screen -- it must NOT be answered a second time (that
+    # would push Down+Enter into the next prompt, i.e. "Exit"). The stand-in records each line it reads.
+    monkeypatch.setattr(
+        adapter,
+        "SESSION_COMMAND",
+        [
+            "sh",
+            "-c",
+            (
+                f'echo "{SESSION_TRUST_PROMPT}"; read trust; echo "trust answered"; '
+                f'echo "{SESSION_STARTUP_PROMPT}"; read confirmation; echo "confirmation=[$confirmation]"; exec sleep 30'
+            ),
+        ],
+    )
+    await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
+    await asyncio.sleep(0.2)
+    pane_text = await adapter._run_tmux("capture-pane", "-p", "-t", f"conv_{_CONVERSATION_ID}")
+    assert "trust answered" in pane_text
+    assert "confirmation=[]" in pane_text  # a bare Enter -- no stray Down from a second trust answer
