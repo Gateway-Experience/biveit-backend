@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field, model_validator
 
-from src.constants import UPLOAD_MAX_FILES, InteractionStatus
+from src.constants import UPLOAD_MAX_FILES, DevServerAction, InteractionStatus
 
 
 class AiConversation(TypedDict):
@@ -45,11 +45,28 @@ class ContentBlock(BaseModel):
 
 
 class PostAgentMessageRequest(BaseModel):
-    """POST /agent/{port}/messages body: one message from the project's agent session."""
+    """POST /agent/messages body: one message from the project's agent session."""
 
     model_config = {"extra": "forbid"}
 
     content: list[ContentBlock] = Field(min_length=1)
+
+
+class PostBuildingRequest(BaseModel):
+    """POST /agent/building body: the agent starting (or refreshing) or ending a big change."""
+
+    model_config = {"extra": "forbid"}
+
+    active: bool
+    summary: str | None = Field(None, max_length=200)  # one line on what's being built, shown to the user
+
+
+class PostDevServersRequest(BaseModel):
+    """POST /agent/dev-servers body: what to do to the project's dev servers."""
+
+    model_config = {"extra": "forbid"}
+
+    action: DevServerAction
 
 
 class InteractionResult(BaseModel):

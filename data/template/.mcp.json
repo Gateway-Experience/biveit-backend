@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "event-channel": {
+    "communication": {
       "command": "node",
-      "args": ["/home/anhlq/workspace/mcps/event-channel-mcp.js"]
+      "args": ["/home/anhlq/workspace/mcps/communication-mcp.js"]
     }
   }
 }

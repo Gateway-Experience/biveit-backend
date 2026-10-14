@@ -6,12 +6,14 @@
 #   POST /conversations/{conversation_id}/uploads     (auth)  store attached files (multipart `files`), before sending
 #   GET  /conversations/{conversation_id}/files       (auth)  download a file: ?path=uploads/... or artifacts/...
 #   GET  /conversations/{conversation_id}/artifacts   (auth)  the artifacts list (the Documents tab)
+#   GET  /conversations/{conversation_id}/devenv      (auth)  the dev environment: stage, preview URL, servers
 # Every conversation route checks the conversation belongs to one of the caller's projects (404 if not).
 #
 # SSE PROTOCOL: each message is an `event: message` with `id: <seq>` and the message row as JSON `data`.
 # EventSource resends the last id as Last-Event-ID when it reconnects, and the stream resumes right
 # after it -- so a dropped connection never loses or repeats a message. A `: heartbeat` comment goes out
 # when idle; the stream closes itself every SSE_MAX_AGE_SECONDS and the browser just reconnects.
+# An `event: devenv` (data {}, no id) is only a hint that the dev environment changed: re-read GET .../devenv.
 # Auth rides the session cookie (EventSource can't send headers), so open it with withCredentials.
 
 import json
@@ -129,10 +131,14 @@ async def stream_events(
     async def _generate_events():
         yield f"retry: {SSE_RETRY_MS}\n\n"
         try:
-            async for new_messages in agent_service.watch_messages(
+            async for new_messages, devenv_changed in agent_service.watch_messages(
                 conversation["id"], max(after_seq, last_event_id or 0), SSE_HEARTBEAT_SECONDS, SSE_MAX_AGE_SECONDS
             ):
-                yield "".join(_to_sse_event(message) for message in new_messages) or ": heartbeat\n\n"
+                events = [
+                    *[_to_sse_event(message) for message in new_messages],
+                    *(["event: devenv\ndata: {}\n\n"] if devenv_changed else []),
+                ]
+                yield "".join(events) or ": heartbeat\n\n"
         except Exception as error:
             # The 200 is already sent, so all we can do is log and end the stream; EventSource reconnects.
             log_http_error(error, request)
@@ -176,6 +182,18 @@ async def list_artifacts(conversation_id: int, request: Request, user: User = De
     try:
         conversation = await agent_service.get_owned_conversation(conversation_id, user["id"])
         return await agent_service.list_artifacts(conversation)
+    except agent_service.ConversationNotFound as error:
+        raise HTTPException(status_code=404, detail="CONVERSATION_NOT_FOUND") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.get("/conversations/{conversation_id}/devenv")
+async def get_devenv(conversation_id: int, request: Request, user: User = Depends(get_current_user)) -> dict:
+    try:
+        conversation = await agent_service.get_owned_conversation(conversation_id, user["id"])
+        return await agent_service.get_devenv_status(conversation)
     except agent_service.ConversationNotFound as error:
         raise HTTPException(status_code=404, detail="CONVERSATION_NOT_FOUND") from error
     except Exception as error:

@@ -16,6 +16,18 @@ class UserPlatform(StrEnum):
     GOOGLE = "GOOGLE"  # Google OIDC; platform_id = the `sub`
 
 
+class UserLanguage(StrEnum):
+    """users.language -- the language the user picked in the FE's language picker (keep in sync with its
+    SUPPORTED_LANGUAGES). The UI shows in it, and the agent talks to them in it."""
+
+    EN = "en"
+    VI = "vi"
+
+
+# How the agent is told about a language (services/agent/sessions.introduce_project).
+USER_LANGUAGE_NAMES = {UserLanguage.EN: "English", UserLanguage.VI: "Vietnamese"}
+
+
 class Charset(StrEnum):
     ALPHA_NUMERIC = "abcdefghijklmnopqrstuvwxyz0123456789"
     ALPHABET = "abcdefghijklmnopqrstuvwxyz"
@@ -55,14 +67,22 @@ class ConfigName(StrEnum):
 # --- Agent sessions (services/agent/adapter) ---
 # A project's agent session is a long-running process found again by its working directory (the
 # project's workspace) plus this env var, which also carries the port it listens on.
-SESSION_PORT_ENV = "EVENT_CHANNEL_PORT"
-# Where the session's event-channel MCP posts the agent's messages back (POST /api/agent/{port}/messages)
+SESSION_PORT_ENV = "COMMUNICATION_PORT"
+# Where the session's communication MCP posts the agent's messages back (POST /api/agent/messages)
 # and the bearer token it sends. Both are handed to the session at launch (services/agent/adapter).
-SESSION_OUTBOX_URL_ENV = "EVENT_CHANNEL_OUTBOX_URL"
-SESSION_OUTBOX_TOKEN_ENV = "EVENT_CHANNEL_OUTBOX_TOKEN"
+SESSION_OUTBOX_URL_ENV = "COMMUNICATION_OUTBOX_URL"
+SESSION_OUTBOX_TOKEN_ENV = "COMMUNICATION_OUTBOX_TOKEN"
 # What a session runs (argv, no shell), launched inside the project's workspace with SESSION_PORT_ENV set.
 # SESSION_COMMAND = ["doit", "--param", "1"]
-SESSION_COMMAND = ["claude", "--dangerously-load-development-channels", "server:event-channel"]
+SESSION_COMMAND = ["claude", "--dangerously-load-development-channels", "server:communication"]
+# Added to SESSION_COMMAND when the workspace already has a Claude conversation, so a restarted session
+# picks up where the last one left off (same flags every time: they're not saved with the conversation).
+# Only then: with nothing to continue, `claude --continue` exits straight away. A workspace is meant to
+# hold exactly one conversation, so "the most recent" is the one.
+SESSION_CONTINUE_ARGS = ["--continue"]
+# Where Claude keeps its conversations: one folder per working directory, named after its path with
+# every non-alphanumeric character turned into "-", holding a <session id>.jsonl transcript each.
+CLAUDE_PROJECTS_DIR = "~/.claude/projects"
 # Claude's startup screens that need an answer before the session runs. start_session watches the
 # session's terminal and answers them, giving up after the wait below:
 #   - the folder-trust dialog, shown in a folder Claude hasn't been told to trust (a trusted parent folder
@@ -85,14 +105,87 @@ SESSION_PORT_MAX_ATTEMPTS = 1000
 # Generous, since starting a session now includes waiting out its startup prompt (below).
 SESSION_LOCK_TTL_SECONDS = 120
 SESSION_LOCK_WAIT_SECONDS = 60
+# How long stopping a session waits for its processes to exit after SIGTERM, before it SIGKILLs them.
+SESSION_STOP_WAIT_SECONDS = 5
 # Attempts at pushing a message into a session (services/agent/sessions.send), with backoff growing to 2s
 # -- about 15s in all, enough for a session that was just started to begin listening.
 SESSION_SEND_ATTEMPTS = 10
+
+# The only variables of our environment that commands we launch get to see (utils/processes) -- the
+# agent's tmux session, uv, npm, pm2. Everything else stays behind: python-dotenv loads our .env files
+# INTO our environment, so passing it on would hand our secrets to code the agent writes, and our config
+# (API_PORT...) would override the project's own .env files.
+SUBPROCESS_ENV_PASSTHROUGH = [
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM", "TMPDIR", "TMUX_TMPDIR",
+    "XDG_RUNTIME_DIR",
+]  # fmt: skip
+
+# --- Dev environments (services/devenv) ---
+# A project's dev servers listen on these + its id (see SESSION_PORT_RANGE above for the whole plan).
+PROJECT_DEV_BACKEND_PORT_BASE = 8000
+PROJECT_DEV_FRONTEND_PORT_BASE = 16000
+# ...except on a local platform (ENV=local), where every project uses the same two fixed ports and there's
+# no nginx: open the dev site straight on the frontend port. So only one project's dev servers can run
+# at a time locally -- another project's would find the ports taken.
+LOCAL_DEV_BACKEND_PORT = 10101
+LOCAL_DEV_FRONTEND_PORT = 10102
+# The boilerplate's apps, copied into the workspace when implementing starts (projects.stage records
+# that it started; these being there means the setup got that far).
+DEVENV_APP_DIRS = ["backend", "frontend"]
+# Never copied from the boilerplate, wherever they appear: VCS, dependencies, build output, caches, logs,
+# and env files (the project's own are rendered from DEVENV_ENV_FILES instead).
+DEVENV_COPY_SKIPPED_NAMES = [
+    ".git", "node_modules", ".venv", "dist", "logs", "__pycache__", ".pytest_cache", ".ruff_cache",
+    ".env", ".env.local", ".env.dev", ".env.prod",
+]  # fmt: skip
+# (template in DEVENV_TEMPLATES_DIR, output relative to the workspace). Written once, never overwritten:
+# they hold secrets in use, and the agent may have edited them since.
+DEVENV_ENV_FILES = [
+    ("backend.env.local.tmpl", "backend/.env.local"),
+    ("frontend.env.tmpl", "frontend/.env"),
+]
+# Ours, not the agent's, so these are re-rendered every time: the pm2 file (in the workspace) and the
+# nginx site (in NGINX_SITES_DIR).
+DEVENV_ECOSYSTEM_TEMPLATE = ("ecosystem.config.cjs.tmpl", "ecosystem.config.cjs")
+DEVENV_NGINX_TEMPLATE = "nginx-dev.conf.tmpl"
+# What the dev backend answers once it's up; checked after the servers start.
+DEVENV_BACKEND_HEALTH_PATH = "/api/debug/health"
+DEVENV_HEALTH_WAIT_SECONDS = 90
+# Per-conversation mutex around setting up. Generous: a first setup runs uv sync and npm install. A
+# second caller waits it out and then re-runs the (by then quick) setup, so it gets a real answer too.
+DEVENV_LOCK_TTL_SECONDS = 900
+DEVENV_LOCK_WAIT_SECONDS = 900
+DEVENV_INSTALL_TIMEOUT_SECONDS = 600
+# The payload of a conversation's wake-up (services/agent/conversations) that means "its dev environment
+# changed" rather than "new messages" -- the SSE stream turns it into an `event: devenv` hint.
+DEVENV_WAKEUP = "devenv"
+
+
+class ProjectStage(StrEnum):
+    """projects.stage -- where a project is in the building process. Moves forward only (see
+    migrations/0005_projects.sql). The starting form before it is the FE's alone: a project only exists
+    once that's submitted."""
+
+    SPECING = "specing"  # chatting with the agent to work out the spec; no app yet
+    IMPLEMENTING = "implementing"  # the app is set up (or being set up): there's something to preview
+
+
+class DevServerAction(StrEnum):
+    """What the agent can ask of its project's dev servers (POST /agent/dev-servers)."""
+
+    STATUS = "status"
+    START = "start"
+    RESTART = "restart"
+    STOP = "stop"
 
 
 # Whether user messages are answered by the stand-in agent (services/agent/mock) instead of being sent to
 # the project's real agent session. Flip it off once sending to the session is built.
 AGENT_MOCK_REPLIES = False
+
+# The ai_conversations.meta key marking that the agent was handed the project's starting form
+# (services/agent/sessions.ensure_introduced) -- set once, by whichever open gets there first.
+CONVERSATION_INTRODUCED_KEY = "introduced_at"
 
 # Per-project mutex around "find or create the current conversation" (services/agent/conversations).
 AI_CONVERSATION_LOCK_TTL_SECONDS = 10
@@ -132,6 +225,10 @@ class InteractionStatus(StrEnum):
     ABORTED = "aborted"
     UNTOUCHED = "untouched"  # never reached, because an earlier item was aborted
 
+
+# How long the agent's "building" flag lasts (services/agent/building) unless it clears or refreshes it --
+# so a flag the agent forgot about can't leave a project "building" forever.
+BUILDING_TTL_SECONDS = 3600
 
 # Pages of GET /conversations/{id}/messages (infinite scroll up).
 MESSAGES_PAGE_DEFAULT = 50

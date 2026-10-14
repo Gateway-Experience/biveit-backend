@@ -35,3 +35,20 @@ async def insert(data: dict[str, Any]) -> AiConversation:
         f"INSERT INTO ai_conversations {postgres.to_insert_clause(row)} RETURNING {_COLUMNS}", row
     )
     return cast("AiConversation", inserted)
+
+
+async def claim_meta_key(conversation_id: int, key: str) -> bool:
+    """Set meta[key] to the current time unless the conversation already has it, in ONE statement -- so
+    of several callers racing for the same key exactly one gets True. A one-time marker ("this has
+    been done"); delete_meta_key gives it back."""
+    sql = """
+        UPDATE ai_conversations SET meta = meta || jsonb_build_object($key::text, now())
+        WHERE id = $conversation_id AND deleted_at IS NULL AND NOT meta ? $key::text
+        RETURNING id
+    """
+    return await postgres.fetchrow(sql, {"conversation_id": conversation_id, "key": key}) is not None
+
+
+async def delete_meta_key(conversation_id: int, key: str) -> None:
+    sql = "UPDATE ai_conversations SET meta = meta - $key::text WHERE id = $conversation_id"
+    await postgres.execute(sql, {"conversation_id": conversation_id, "key": key})

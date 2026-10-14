@@ -6,6 +6,7 @@ import pytest
 
 from src.repositories import projects as projects_repo
 from src.services import devenv
+from src.services import projects as projects_service
 from src.services.agent import adapter, sessions
 from src.utils import postgres
 
@@ -97,3 +98,120 @@ async def test_update_sets_updated_at_when_given(captured_sql):
 async def test_update_drops_unwritable_columns(captured_sql):
     await projects_repo.update(1, {"name": "Renamed", "id": 99})
     assert "id" not in captured_sql["params"]
+
+
+# --- open_project ---
+
+
+async def _record(calls, what):
+    calls.append(what)
+
+
+@pytest.mark.parametrize("stage", ["specing", "implementing"])
+async def test_open_project_ensures_the_devenv_only_once_implementing(stage, monkeypatch):
+    calls = []
+
+    async def fake_current_conversation(project_id, user_id):
+        return {"id": 5}
+
+    async def fake_ensure_session(project, conversation_id):
+        calls.append("session")
+
+    monkeypatch.setattr(projects_service, "AGENT_MOCK_REPLIES", False)
+    monkeypatch.setattr(projects_service.agent_service, "get_current_conversation", fake_current_conversation)
+    monkeypatch.setattr(projects_service.agent_service, "ensure_session", fake_ensure_session)
+    monkeypatch.setattr(
+        projects_service.agent_service,
+        "ensure_introduced",
+        lambda project, conversation_id: _record(calls, "introduced"),
+    )
+    monkeypatch.setattr(
+        projects_service.agent_service, "restore_devenv", lambda project, conversation_id: ("devenv", conversation_id)
+    )
+    monkeypatch.setattr(projects_service, "spawn", lambda job: calls.append(job))
+
+    await projects_service.open_project({"id": 1, "user_id": 7, "stage": stage})
+    assert calls == (["session", "introduced", ("devenv", 5)] if stage == "implementing" else ["session", "introduced"])
+
+
+async def test_the_agent_is_introduced_once_and_retried_after_a_failure(monkeypatch):
+    claimed = set()
+    introduced = []
+
+    async def fake_claim(conversation_id, key):
+        if (conversation_id, key) in claimed:
+            return False
+        claimed.add((conversation_id, key))
+        return True
+
+    async def fake_delete(conversation_id, key):
+        claimed.discard((conversation_id, key))
+
+    failures = [sessions.SessionUnavailable("not yet")]
+
+    async def fake_introduce(project, conversation_id):
+        if failures:
+            raise failures.pop()
+        introduced.append(conversation_id)
+
+    monkeypatch.setattr(sessions.ai_conversations_repo, "claim_meta_key", fake_claim)
+    monkeypatch.setattr(sessions.ai_conversations_repo, "delete_meta_key", fake_delete)
+    monkeypatch.setattr(sessions, "introduce_project", fake_introduce)
+
+    with pytest.raises(sessions.SessionUnavailable):
+        await sessions.ensure_introduced({"id": 1}, 5)  # fails: the claim is given back
+    await sessions.ensure_introduced({"id": 1}, 5)  # the next open tries again
+    await sessions.ensure_introduced({"id": 1}, 5)  # and from then on it's done
+    assert introduced == [5]
+
+
+# --- close_project ---
+
+
+async def test_close_project_stops_every_session_and_the_dev_servers(monkeypatch):
+    calls = []
+
+    async def fake_find(criteria):
+        assert criteria == {"project_id": 1}
+        return [{"id": 6}, {"id": 5}]  # newest first
+
+    async def fake_stop_session(project, conversation_id):
+        calls.append(("session", conversation_id))
+        return {"tmux_session": True, "pids": [100 + conversation_id]}
+
+    async def fake_stop_devenv(project, conversation_id):
+        calls.append(("devenv", conversation_id))
+        return ["project_1_be"]
+
+    monkeypatch.setattr(projects_service.ai_conversations_repo, "find", fake_find)
+    monkeypatch.setattr(projects_service.agent_service, "stop_session", fake_stop_session)
+    monkeypatch.setattr(projects_service.agent_service, "stop_devenv", fake_stop_devenv)
+
+    stopped = await projects_service.close_project({"id": 1})
+    assert calls == [("session", 6), ("session", 5), ("devenv", 6)]
+    assert stopped == {
+        "sessions": {6: {"tmux_session": True, "pids": [106]}, 5: {"tmux_session": True, "pids": [105]}},
+        "dev_servers": ["project_1_be"],
+    }
+
+
+async def test_closing_a_project_without_conversations_does_nothing(monkeypatch):
+    async def no_conversations(criteria):
+        return []
+
+    monkeypatch.setattr(projects_service.ai_conversations_repo, "find", no_conversations)
+    assert await projects_service.close_project({"id": 1}) == {"sessions": {}, "dev_servers": []}
+
+
+async def test_stopping_a_session_clears_the_current_port(monkeypatch, updates):
+    async def fake_adapter_stop(project, conversation_id):
+        return {"tmux_session": False, "pids": []}
+
+    async def fake_clear_building(conversation_id):
+        pass
+
+    monkeypatch.setattr(adapter, "stop_session", fake_adapter_stop)
+    monkeypatch.setattr(sessions.building, "clear_building", fake_clear_building)
+    await sessions.stop_session({"id": 1, "current_port": 47000}, 5)
+    await sessions.stop_session({"id": 2, "current_port": None}, 5)
+    assert updates == [(1, {"current_port": None})]

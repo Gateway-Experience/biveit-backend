@@ -80,11 +80,36 @@ class Settings(BaseSettings):
     # callback legs. Random per env.
     session_secret: str = ""
 
-    # File storage (services/agent/storage). storage_dir is the root of every project's directory, laid out
-    # as <storage_dir>/<user_id>/<project_id>/; template_dir is the starter site copied into each project
+    # File storage (services/devenv/workspaces). storage_dir is the root of every project's directory, laid
+    # out as <storage_dir>/<user hash>/<project hash>/; template_dir is the starter site copied into each project
     # (missing files only, never overwriting). Relative paths resolve against the process's cwd.
     storage_dir: str = "data/storage_root"
     template_dir: str = "data/template"
+
+    # Signs the token each agent session calls back into us with (services/agent/tokens). Empty -> no
+    # session can be started, and no session call is accepted (fail closed). Long and random per env.
+    session_token_secret: str = ""
+
+    # Dev environments (services/devenv), set up once a conversation's agent starts implementing.
+    # boilerplate_dir: the app copied in (its backend/ and frontend/). devenv_templates_dir: the env, pm2
+    # and nginx templates rendered for each project. ~ is expanded; relative paths resolve against the cwd.
+    boilerplate_dir: str = "~/workspace/vib3-boilerplate"
+    devenv_templates_dir: str = "data/devenv_templates"
+    # A project's dev site is https://<project hash>.<dev_domain>, behind nginx with a wildcard certificate
+    # for *.<dev_domain> (set up once on the VPS, at /etc/letsencrypt/live/<dev_domain>/). Empty -> no
+    # nginx site at all; the dev servers are only reachable on their localhost ports (local dev).
+    dev_domain: str = ""
+    # Where each project's nginx site file goes (written with sudo, then nginx is reloaded).
+    nginx_sites_dir: str = "/etc/nginx/conf.d"
+    # What the projects' own apps connect to: one shared Mongo user (each project gets the databases
+    # db_project_dev_<id> / db_project_<id>), and the dev redis db shared by every project, each one
+    # prefixing its keys with project_<id>:.
+    project_mongo_uri: str = "mongodb://localhost:27017"
+    project_redis_url_dev: str = "redis://localhost:6379/1"
+    # Every project secret (its JWT secret, admin token...) is derived from this plus the project id, so
+    # nothing has to be stored, and re-rendering a project's env gives the same values. Effectively a
+    # key: long, random, never shared. Empty -> rendering a template that asks for a secret fails.
+    project_secret_seed: str = ""
 
     # CORS -- comma-separated allowed browser origins. Empty falls back to frontend_url. No wildcard:
     # auth rides an httpOnly cookie, so CORS runs WITH credentials, and browsers reject "*" + credentials.

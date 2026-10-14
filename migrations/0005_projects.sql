@@ -5,10 +5,25 @@
 -- Soft-deleted via deleted_at: NULL = live. Every read filters on it; nothing is ever hard-deleted.
 -- (users are soft-deleted too, so the user_id FK never needs an ON DELETE rule -- it just guarantees
 -- the owner exists.)
--- current_port: the port of the project's agent session, as last seen -- a HINT for debugging and quick
--- reads, NOT the source of truth (the running process is; see services/agent/adapter). It can be stale
--- (session died, port reused); services/projects.ensure_session rewrites it from the live process and
--- clears it from any other project still holding the same port, so a port maps to at most one project.
+-- hash: a random, unguessable public handle (16 hex chars, filled in by the DB on insert). It names the
+-- project's folder on disk (<STORAGE_DIR>/<user hash>/<project hash>/...) and its dev site
+-- (<hash>.<DEV_DOMAIN>), so paths and URLs don't give away or enumerate ids.
+-- Rows that existed before it was added have hash = id::text (their folders were already named by id).
+-- current_port: the port of the project's agent session, as last seen -- bookkeeping for humans, NOT the
+-- source of truth (the running process is; see services/agent/adapter). It can be stale (session died,
+-- port reused); services/agent/sessions.ensure_session rewrites it from the live process and clears it
+-- from any other project still holding the same port, so a port maps to at most one project.
+-- stage: where the project is in the building process -- specing (chatting with the agent to work out
+-- the spec) -> implementing (the app is set up). Moves forward only, through the agent's
+-- start_implementation (services/agent/devenvs). It's what the project SHOULD be: the workspace and dev
+-- servers are brought in line with it on each open. (Before specing there's the starting form, but
+-- that's the FE's alone: the project is only created once the form is submitted.)
+-- implementation_done_at: when the agent signalled that the user is happy with the implemented site
+-- (its implementing_done tool). Set once and kept: from then on the FE offers payment/deployment, even
+-- if the user goes back to more spec-ing or implementing. A milestone, not a stage -- the stage says
+-- where the project is now, this says it got there once.
+-- bootstrap_data: the starting form's answers, as the FE sent them when creating the project. Handed
+-- to the agent to start the chat with.
 -- updated_at: when the USER last edited the project (the list sorts by it). Never bumped implicitly --
 -- only user-facing edit flows set it, so system writes (current_port) don't reshuffle the list.
 -- meta: free-form app-level data (settings, flags) until a field earns its own column.
@@ -18,9 +33,13 @@
 CREATE TABLE IF NOT EXISTS projects
 (
     id          BIGSERIAL PRIMARY KEY,
+    hash        varchar(32)  NOT NULL UNIQUE DEFAULT left(md5(gen_random_uuid()::text), 16),
     user_id     BIGINT       NOT NULL REFERENCES users (id),  -- owner
     name        varchar(200) NOT NULL,
     description text,
+    stage       varchar(32)  NOT NULL DEFAULT 'specing',       -- ProjectStage
+    bootstrap_data jsonb      NOT NULL DEFAULT '{}',          -- the starting form's answers
+    implementation_done_at TIMESTAMPTZ,                        -- NULL until the user signed off a version
     current_port integer,                                      -- NULL until a session has run
     meta        jsonb        NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -31,5 +50,5 @@ CREATE TABLE IF NOT EXISTS projects
 -- "My projects, most recently edited first" -- the main read. Partial: deleted rows never qualify.
 CREATE INDEX IF NOT EXISTS idx_projects_user_updated ON projects (user_id, updated_at DESC) WHERE deleted_at IS NULL;
 
--- Which project is a session port talking for? (POST /agent/{port}/messages.) Partial: most rows are NULL.
+-- Which project is on a session port? Partial: most rows are NULL.
 CREATE INDEX IF NOT EXISTS idx_projects_current_port ON projects (current_port) WHERE current_port IS NOT NULL;

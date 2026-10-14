@@ -19,9 +19,14 @@ _CALLER = {"id": 7, "username": "alice", "user_type": "USER"}
 def _project(**overrides):
     return {
         "id": 1,
+        "hash": "p1hash",
         "user_id": _CALLER["id"],
+        "user_hash": "u7hash",
         "name": "Portfolio",
         "description": None,
+        "stage": "specing",
+        "bootstrap_data": {},
+        "implementation_done_at": None,
         "current_port": None,
         "meta": {},
         "created_at": "2026-10-01T00:00:00Z",
@@ -71,9 +76,17 @@ def test_create_owns_the_project_by_the_caller(monkeypatch, client):
 
     monkeypatch.setattr(projects_repo, "insert", fake_insert)
 
-    response = client.post("/api/projects", json={"name": "Landing page", "description": "For the launch"})
-    assert response.status_code == 201
-    assert calls["data"] == {"name": "Landing page", "description": "For the launch", "user_id": _CALLER["id"]}
+    form = {"site_kind": "bakery", "pages": ["menu", "contact"]}
+    response = client.post(
+        "/api/projects", json={"name": "Landing page", "description": "For the launch", "bootstrap_data": form}
+    )
+    assert response.status_code == 201 and response.json()["stage"] == "specing"
+    assert calls["data"] == {
+        "name": "Landing page",
+        "description": "For the launch",
+        "bootstrap_data": form,
+        "user_id": _CALLER["id"],
+    }
 
 
 @pytest.mark.parametrize("body", [{"name": ""}, {"name": "x" * 201}, {}, {"name": "ok", "user_id": 99}])
@@ -123,7 +136,7 @@ def test_open_while_mocking_seeds_the_workspace_without_starting_a_session(
     response = client.post("/api/projects/1/open")
     assert response.status_code == 200 and response.json() == {"status": "ready"}
     # Seeded into the CONVERSATION's folder (conversation 5 of project 1), not the project's.
-    assert (tmp_path / "storage" / str(_CALLER["id"]) / "1" / "5" / "index.html").read_text() == "<h1>starter</h1>"
+    assert (tmp_path / "storage" / "u7hash" / "p1hash" / "5" / "index.html").read_text() == "<h1>starter</h1>"
     assert not (tmp_path / "storage" / str(_CALLER["id"]) / "1" / "index.html").exists()
     assert client.post("/api/projects/1/open").status_code == 200  # again: idempotent
 
@@ -135,12 +148,16 @@ def test_open_with_the_real_agent_ensures_the_session(client, owned_project, mon
         opened.append((project["id"], conversation_id))
         return 8899
 
+    async def fake_ensure_introduced(project, conversation_id):
+        opened.append(("introduced", conversation_id))
+
     monkeypatch.setattr(project_service, "AGENT_MOCK_REPLIES", False)
     monkeypatch.setattr(agent_service, "ensure_session", fake_ensure_session)
+    monkeypatch.setattr(agent_service, "ensure_introduced", fake_ensure_introduced)
 
     response = client.post("/api/projects/1/open")
     assert response.json() == {"status": "ready"}  # the port stays internal
-    assert opened == [(1, 5)]
+    assert opened == [(1, 5), ("introduced", 5)]
 
 
 def test_open_someone_elses_project_is_404(client, owned_project):

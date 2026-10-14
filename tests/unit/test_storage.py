@@ -9,7 +9,7 @@ import pytest
 from src.config import settings
 from src.services.agent import storage
 
-_PROJECT = {"id": 42, "user_id": 7}
+_PROJECT = {"id": 42, "hash": "p42hash", "user_id": 7, "user_hash": "u7hash"}
 
 
 @pytest.fixture(autouse=True)
@@ -41,16 +41,16 @@ async def test_same_name_twice_never_overwrites(tmp_path):
 
     assert first != second
     assert first.startswith("uploads/") and first.endswith("_logo.png")
-    assert (tmp_path / "7/42/9" / first).read_bytes() == b"v1"
-    assert (tmp_path / "7/42/9" / second).read_bytes() == b"v2"
+    assert (tmp_path / "u7hash/p42hash/9" / first).read_bytes() == b"v1"
+    assert (tmp_path / "u7hash/p42hash/9" / second).read_bytes() == b"v2"
 
 
 async def test_saved_files_are_described_and_listed_oldest_first(tmp_path):
     second = await storage.save_upload(_PROJECT, 9, "menu.pdf", io.BytesIO(b"x"))
     first = await storage.save_upload(_PROJECT, 9, "logo.png", io.BytesIO(b"12345"))
     # Back-to-back writes can share a timestamp tick, so set the times explicitly.
-    os.utime(tmp_path / "7/42/9" / first, (1000, 1000))
-    os.utime(tmp_path / "7/42/9" / second, (2000, 2000))
+    os.utime(tmp_path / "u7hash/p42hash/9" / first, (1000, 1000))
+    os.utime(tmp_path / "u7hash/p42hash/9" / second, (2000, 2000))
 
     files = await storage.list_files(_PROJECT, 9, storage.UPLOADS_DIR)
     assert [file["name"] for file in files] == ["logo.png", "menu.pdf"]
@@ -63,8 +63,8 @@ async def test_listing_a_folder_that_doesnt_exist_yet_is_empty():
 
 async def test_resolve_accepts_only_files_in_the_allowed_folders(tmp_path):
     path = await storage.save_upload(_PROJECT, 9, "logo.png", io.BytesIO(b"x"))
-    (tmp_path / "7/42/9/secret.txt").write_text("not for clients")
-    (tmp_path / "7/42/site.html").write_text("project file")
+    (tmp_path / "u7hash/p42hash/9/secret.txt").write_text("not for clients")
+    (tmp_path / "u7hash/p42hash/site.html").write_text("project file")
 
     assert storage.resolve_conversation_file(_PROJECT, 9, path).is_file()
     for bad_path in [
@@ -83,8 +83,8 @@ async def test_resolve_accepts_only_files_in_the_allowed_folders(tmp_path):
 
 async def test_resolve_refuses_a_symlink_pointing_outside(tmp_path):
     (tmp_path / "outside.txt").write_text("secret")
-    (tmp_path / "7/42/9/uploads").mkdir(parents=True)
-    (tmp_path / "7/42/9/uploads/link.txt").symlink_to(tmp_path / "outside.txt")
+    (tmp_path / "u7hash/p42hash/9/uploads").mkdir(parents=True)
+    (tmp_path / "u7hash/p42hash/9/uploads/link.txt").symlink_to(tmp_path / "outside.txt")
     with pytest.raises(storage.FileNotAvailable):
         storage.resolve_conversation_file(_PROJECT, 9, "uploads/link.txt")
 
@@ -107,4 +107,4 @@ async def test_mime_types_dont_depend_on_the_host(name, mime):
 async def test_writing_an_artifact_again_replaces_it(tmp_path):
     path = await storage.write_artifact(_PROJECT, 9, "spec.md", b"v1")
     assert await storage.write_artifact(_PROJECT, 9, "spec.md", b"v2") == path == "artifacts/spec.md"
-    assert (tmp_path / "7/42/9/artifacts/spec.md").read_bytes() == b"v2"
+    assert (tmp_path / "u7hash/p42hash/9/artifacts/spec.md").read_bytes() == b"v2"

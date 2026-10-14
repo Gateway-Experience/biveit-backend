@@ -1,5 +1,5 @@
 # Intentions: the chat between a user and their project's agent. Messages come in from two sides --
-# the agent's session (receive_session_message, found by its port) and the user (post_user_message) --
+# the agent's session (receive_session_message) and the user (post_user_message) --
 # and go out to the user's open tabs (watch_messages, behind the SSE endpoint).
 #
 # THE DB LOG IS THE ONLY SOURCE OF TRUTH. Every new message also publishes a tiny wake-up on redis, but
@@ -19,6 +19,7 @@ from src.constants import (
     AGENT_MOCK_REPLIES,
     AI_CONVERSATION_LOCK_TTL_SECONDS,
     AI_CONVERSATION_LOCK_WAIT_SECONDS,
+    DEVENV_WAKEUP,
     SHOW_ARTIFACT_TOOL_NAME,
     UPLOAD_MAX_BYTES,
     UPLOAD_MAX_FILES,
@@ -30,7 +31,7 @@ from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
 from src.services import devenv
-from src.services.agent import mock, sessions, storage
+from src.services.agent import mock, sessions, storage, wakeups
 from src.services.agent.interactions import (
     InvalidSubmission,
     find_pending_interactions,
@@ -39,12 +40,6 @@ from src.services.agent.interactions import (
 )
 from src.utils import redis
 from src.utils.common import spawn
-from src.utils.logging import log_error
-
-
-class SessionNotFound(Exception):
-    """No project (or, somehow, several) is recorded as running a session on this port -- a session we
-    didn't start, or a stale port. 404."""
 
 
 class ProjectNotFound(Exception):
@@ -68,10 +63,6 @@ class InteractionNotFound(Exception):
     """The submission names an interaction that isn't pending (wrong id, or already answered). 409."""
 
 
-def _get_wakeup_channel(conversation_id: int) -> str:
-    return f"ai_conversation:{conversation_id}"
-
-
 # --- Reading ---------------------------------------------------------------------------------------
 
 
@@ -91,7 +82,16 @@ async def get_owned_conversation(conversation_id: int, user_id: int) -> AiConver
     return conversation
 
 
-async def _get_project(conversation: AiConversation) -> Project:
+async def get_live_conversation(conversation_id: int) -> AiConversation:
+    """A conversation that still exists, whoever it belongs to -- for callers already proven to speak for
+    it (its session's token). Raises ConversationNotFound."""
+    conversation = await ai_conversations_repo.get(conversation_id)
+    if conversation is None:
+        raise ConversationNotFound(f"conversation {conversation_id}", {"conversation_id": conversation_id})
+    return conversation
+
+
+async def get_conversation_project(conversation: AiConversation) -> Project:
     """The project a conversation belongs to -- its storage paths hang off the project (see storage)."""
     projects = await projects_repo.find({"id": conversation["project_id"]})
     return projects[0]
@@ -104,7 +104,7 @@ async def get_conversation_file(conversation: AiConversation, relative_path: str
 
     `immutable`: uploads never change (each gets a unique name), so they can be cached for good;
     artifacts are rewritten in place, so a cached copy must be revalidated against `version`."""
-    project = await _get_project(conversation)
+    project = await get_conversation_project(conversation)
     absolute_path = storage.resolve_conversation_file(project, conversation["id"], relative_path)
     file_info = {
         **storage.describe_file(relative_path, absolute_path),
@@ -121,7 +121,7 @@ async def list_artifacts(conversation: AiConversation) -> list[dict]:
     The folder is the list: whatever is in artifacts/ is an artifact. `title` comes from the latest
     show_artifact call that showed the file (an artifact can be re-shown with a new title as it evolves),
     falling back to the file name for files the agent wrote but never showed."""
-    project = await _get_project(conversation)
+    project = await get_conversation_project(conversation)
     files = await storage.list_files(project, conversation["id"], storage.ARTIFACTS_DIR)
     # Later calls overwrite earlier ones in the dict, so each path keeps its most recent title.
     titles_by_path = {
@@ -143,41 +143,41 @@ async def list_artifacts(conversation: AiConversation) -> list[dict]:
 
 async def watch_messages(
     conversation_id: int, after_seq: int, idle_seconds: float, max_age_seconds: float
-) -> AsyncIterator[list[AiMessage]]:
-    """Yield the conversation's new messages as they arrive, in batches, starting after `after_seq`.
+) -> AsyncIterator[tuple[list[AiMessage], bool]]:
+    """Yield (new messages, devenv_changed) as things happen: the conversation's new messages in
+    batches, starting after `after_seq`, and whether its dev environment changed since the last yield
+    (wakeups.publish_devenv_changed) -- a hint to re-read its status, which isn't in the log.
 
-    Yields an EMPTY batch when `idle_seconds` pass with nothing new -- the caller's cue for a heartbeat.
+    Yields an EMPTY batch (and False) when `idle_seconds` pass with nothing new -- the caller's cue for a
+    heartbeat.
     Each wake-up or idle tick re-reads the log from the last seq sent, so this never misses or repeats a
     message, whatever happens to the wake-ups. Ends after `max_age_seconds` (the client reconnects).
 
     Subscribes BEFORE the first read: a message landing between the two then still wakes us."""
     deadline = time.monotonic() + max_age_seconds
-    async with redis.subscription(_get_wakeup_channel(conversation_id)) as receive_wakeup:
+    async with redis.subscription(wakeups.get_wakeup_channel(conversation_id)) as receive_wakeup:
         last_seq = after_seq
+        devenv_changed = False
         # An endless stream by nature, so a loop rather than anything declarative. last_seq is the only
-        # state: the watermark of what this client has.
+        # real state: the watermark of what this client has. devenv_changed just carries the last
+        # wake-up's meaning into the next yield.
         while time.monotonic() < deadline:
             new_messages = await ai_messages_repo.find(conversation_id, after_seq=last_seq)
-            yield new_messages
+            yield new_messages, devenv_changed
             last_seq = new_messages[-1]["seq"] if new_messages else last_seq
-            await receive_wakeup(idle_seconds)
+            devenv_changed = await receive_wakeup(idle_seconds) == DEVENV_WAKEUP
 
 
 # --- Writing ---------------------------------------------------------------------------------------
 
 
-async def receive_session_message(port: int, content: list[dict[str, Any]]) -> AiMessage:
-    """Append a message from the session on `port` to its project's current conversation, and return
-    the stored message. Everything a session posts is the agent talking, so it's an ASSISTANT message;
-    its tool_use items get the id and name the channel leaves out (sessions.to_stored_content), and the
-    port goes in meta so a message can be traced back to the session that sent it."""
-    projects = await projects_repo.find({"current_port": port})
-    if len(projects) != 1:
-        raise SessionNotFound(f"{len(projects)} projects on port {port}", {"port": port})
-    conversation = await _ensure_conversation(projects[0])
-    return await _append(
-        conversation["id"], AiMessageRole.ASSISTANT, sessions.to_stored_content(content), {"session_port": port}
-    )
+async def receive_session_message(conversation_id: int, content: list[dict[str, Any]]) -> AiMessage:
+    """Append a message from the conversation's session, and return the stored message. Everything a
+    session posts is the agent talking, so it's an ASSISTANT message; its tool_use items get the id and
+    name the channel leaves out (sessions.to_stored_content). Raises ConversationNotFound if the
+    conversation is gone (deleted while its session ran on)."""
+    conversation = await get_live_conversation(conversation_id)
+    return await _append(conversation["id"], AiMessageRole.ASSISTANT, sessions.to_stored_content(content), {})
 
 
 async def upload_files(conversation: AiConversation, files: list[dict]) -> list[dict]:
@@ -193,7 +193,7 @@ async def upload_files(conversation: AiConversation, files: list[dict]) -> list[
     if oversized:
         raise UploadRejected(f"over {UPLOAD_MAX_BYTES // (1024 * 1024)} MB: {oversized}")
 
-    project = await _get_project(conversation)
+    project = await get_conversation_project(conversation)
     saved_paths = [
         await storage.save_upload(project, conversation["id"], file["name"], file["source"]) for file in files
     ]
@@ -224,7 +224,7 @@ async def post_user_message(conversation: AiConversation, body: dict[str, Any]) 
     if body["type"] == "text":
         if pending:
             raise InteractionPending(f"{len(pending)} pending", {"interaction_ids": pydash.map_(pending, "id")})
-        project = await _get_project(conversation)
+        project = await get_conversation_project(conversation)
         attachment_blocks = [
             {"type": "attachment", **_describe_attachment(project, conversation["id"], path)}
             for path in body["attachments"]
@@ -271,7 +271,7 @@ async def _send_to_agent(conversation: AiConversation, user_message: AiMessage) 
 
     Raises sessions.SessionUnavailable if the session can't be reached. The message stays stored either
     way -- it just didn't get through."""
-    port = await sessions.ensure_session(await _get_project(conversation), conversation["id"])
+    port = await sessions.ensure_session(await get_conversation_project(conversation), conversation["id"])
     await sessions.send(port, sessions.to_session_content(user_message))
 
 
@@ -295,7 +295,7 @@ async def _get_mock_reply(conversation: AiConversation, user_message: AiMessage)
             ]
         )
 
-    project = await _get_project(conversation)
+    project = await get_conversation_project(conversation)
     if "attachment" in blocks_by_type:
         return mock.reply_to_uploads(await storage.list_files(project, conversation["id"], storage.UPLOADS_DIR))
 
@@ -327,14 +327,7 @@ async def _append(conversation_id: int, role: str, content: list[dict], meta: di
     message = await ai_messages_repo.insert(
         {"conversation_id": conversation_id, "role": role, "content": content, "meta": meta or {}}
     )
-    try:
-        await redis.publish(_get_wakeup_channel(conversation_id), str(message["seq"]))
-    except Exception as error:
-        log_error(
-            error,
-            "conversation wake-up publish failed; watchers will catch up on their idle check",
-            {"conversation_id": conversation_id},
-        )
+    await wakeups.publish_wakeup(conversation_id, str(message["seq"]))
     return message
 
 

@@ -2,8 +2,10 @@
 # inside the conversation's workspace (services/devenv). ensure_session is the entry point: it makes sure
 # exactly one session is running there, and hands back its port.
 #
-# THERE'S NO SESSION TABLE on purpose. The OS is the source of truth: a session is "the process whose
-# cwd is the workspace and whose env has EVENT_CHANNEL_PORT=<port>". So nothing can drift out of sync
+# THERE'S NO SESSION TABLE on purpose. The OS is the source of truth: a session is "the process running
+# SESSION_COMMAND, whose cwd is the workspace and whose env has COMMUNICATION_PORT=<port>". (Everything it
+# launches -- MCP servers, dev servers, a browser -- inherits that cwd and env too, but runs some other
+# command, so only the session itself matches.) So nothing can drift out of sync
 # (a crashed session simply stops being found, and the next call starts a fresh one). The cost: the
 # process scan reads /proc, so this is Linux-only.
 
@@ -12,6 +14,7 @@ import os
 import random
 import re
 import shlex
+import signal
 import socket
 import time
 from pathlib import Path
@@ -20,7 +23,9 @@ import pydash
 
 from src.config import settings
 from src.constants import (
+    CLAUDE_PROJECTS_DIR,
     SESSION_COMMAND,
+    SESSION_CONTINUE_ARGS,
     SESSION_LOCK_TTL_SECONDS,
     SESSION_LOCK_WAIT_SECONDS,
     SESSION_OUTBOX_TOKEN_ENV,
@@ -31,12 +36,15 @@ from src.constants import (
     SESSION_PORT_RANGE,
     SESSION_STARTUP_PROMPT,
     SESSION_STARTUP_PROMPT_WAIT_SECONDS,
+    SESSION_STOP_WAIT_SECONDS,
     SESSION_TRUST_PROMPT,
 )
 from src.dto.projects import Project
 from src.services import devenv
+from src.services.agent import tokens
 from src.utils import redis
 from src.utils.common import with_retries
+from src.utils.processes import get_base_env
 
 # Matched against each `NAME=value` entry of a process's environment; group 1 is the port.
 _SESSION_PORT_PATTERN = re.compile(rf"^{SESSION_PORT_ENV}=(\d+)$")
@@ -44,8 +52,8 @@ _SESSION_PORT_PATTERN = re.compile(rf"^{SESSION_PORT_ENV}=(\d+)$")
 
 class TooManySessions(Exception):
     """More than one session is running in a project's workspace. Shouldn't happen (ensure_session
-    is serialized per workspace), so it's a real bug -- or someone started one by hand. (A session's own
-    child processes don't count -- see ensure_session.)"""
+    is serialized per workspace), so it's a real bug -- or someone started one by hand. (What a session
+    launches doesn't count -- see find_session_processes.)"""
 
 
 class SessionStartFailed(Exception):
@@ -57,8 +65,8 @@ class _PortTaken(Exception):
 
 
 async def get_all_processes(abs_dir: str) -> list[dict]:
-    """Every process whose working directory is abs_dir, as {pid, sid, cmdline, environ} (sid = the OS
-    session id; cmdline/environ are lists of strings). Both paths go through realpath, so trailing slashes and symlinks don't matter.
+    """Every process whose working directory is abs_dir, as {pid, cmdline, environ} (cmdline/environ are
+    lists of strings). Both paths go through realpath, so trailing slashes and symlinks don't matter.
     Processes we can't read (other users') or that exit mid-scan are skipped."""
     target_cwd = os.path.realpath(abs_dir)
     pids = [entry for entry in os.listdir("/proc") if entry.isdigit()]
@@ -67,7 +75,7 @@ async def get_all_processes(abs_dir: str) -> list[dict]:
 
 
 def _read_process_in_dir(pid: str, target_cwd: str) -> dict | None:
-    """[Pure-ish] One /proc entry as {pid, sid, cmdline, environ} if its cwd is target_cwd, else None.
+    """[Pure-ish] One /proc entry as {pid, cmdline, environ} if its cwd is target_cwd, else None.
     The cwd check comes first so we only read the env of processes we actually care about."""
     proc_dir = Path("/proc", pid)
     try:
@@ -75,9 +83,6 @@ def _read_process_in_dir(pid: str, target_cwd: str) -> dict | None:
             return None
         return {
             "pid": int(pid),
-            # /proc/<pid>/stat is "pid (comm) state ppid pgrp session ...". comm can contain spaces and
-            # parens, so split after its LAST ')' -- session is then the 4th field.
-            "sid": int((proc_dir / "stat").read_text().rpartition(")")[2].split()[3]),
             "cmdline": _read_nul_separated(proc_dir / "cmdline"),
             "environ": _read_nul_separated(proc_dir / "environ"),
         }
@@ -95,6 +100,14 @@ async def find_processes_in_dir(abs_dir: str, regex: re.Pattern) -> list[dict]:
     return [process for process in dir_processes if any(regex.search(entry) for entry in process["environ"])]
 
 
+async def find_session_processes(abs_dir: str) -> list[dict]:
+    """The session processes in abs_dir: running SESSION_COMMAND (with or without SESSION_CONTINUE_ARGS),
+    with the session port in their env. Normally zero or one. What a session launches inherits its cwd
+    and env, so it passes find_processes_in_dir too -- the command line is what tells them apart."""
+    processes = await find_processes_in_dir(abs_dir, _SESSION_PORT_PATTERN)
+    return [process for process in processes if process["cmdline"][: len(SESSION_COMMAND)] == SESSION_COMMAND]
+
+
 async def ensure_session(project: Project, conversation_id: int) -> int:
     """The port of the conversation's running session, starting one if none is running. Serialized per
     workspace, so two tabs opening the same conversation at once can't both start a session.
@@ -103,10 +116,7 @@ async def ensure_session(project: Project, conversation_id: int) -> int:
     problem: connect with a retry."""
     async with redis.lock(f"agent_session:{conversation_id}", SESSION_LOCK_TTL_SECONDS, SESSION_LOCK_WAIT_SECONDS):
         pwd = devenv.get_conversation_dir(project, conversation_id)
-        # A session's children (a dev server, say) inherit its cwd AND its env, so they match too. They
-        # all share the session's OS session id though (start_session gives it its own), so count those.
-        processes = await find_processes_in_dir(pwd, _SESSION_PORT_PATTERN)
-        sessions = pydash.uniq_by(processes, "sid")
+        sessions = await find_session_processes(pwd)
         if len(sessions) > 1:
             raise TooManySessions(f"{len(sessions)} sessions in {pwd}", {"pids": pydash.map_(sessions, "pid")})
         if sessions:
@@ -120,6 +130,48 @@ async def ensure_session(project: Project, conversation_id: int) -> int:
         )
         await start_session(project, conversation_id, port)
         return port
+
+
+async def stop_session(project: Project, conversation_id: int) -> dict:
+    """Turn the conversation's session off: its tmux session, and every process still running as part of
+    it -- Claude, its communication MCP (which holds the channel port), and anything they started in the
+    workspace. Idempotent: with nothing running it does nothing. Returns what it found, as
+    {tmux_session: whether there was one, pids: the session processes it stopped}.
+
+    The processes are the ones ensure_session would find (cwd = the workspace, the port in their env),
+    so afterwards it's guaranteed to find none and start fresh -- even if something outlived the tmux
+    session (an MCP server whose parent died, say). They get SIGTERM, then SIGKILL after
+    SESSION_STOP_WAIT_SECONDS. Serialized with ensure_session, so a stop can't race a start."""
+    async with redis.lock(f"agent_session:{conversation_id}", SESSION_LOCK_TTL_SECONDS, SESSION_LOCK_WAIT_SECONDS):
+        tmux_session = _get_tmux_session_name(conversation_id)
+        try:
+            await _run_tmux("kill-session", "-t", tmux_session)
+            had_tmux_session = True
+        except SessionStartFailed:
+            had_tmux_session = False  # no such session, or no tmux server at all
+        pwd = devenv.get_conversation_dir(project, conversation_id)
+        pids = pydash.map_(await find_processes_in_dir(pwd, _SESSION_PORT_PATTERN), "pid")
+        _signal_all(pids, signal.SIGTERM)
+        survivors = await _wait_for_exit(pids, time.monotonic() + SESSION_STOP_WAIT_SECONDS)
+        _signal_all(survivors, signal.SIGKILL)
+        return {"tmux_session": had_tmux_session, "pids": pids}
+
+
+def _signal_all(pids: list[int], signal_number: int) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, signal_number)
+        except ProcessLookupError:
+            pass  # already gone
+
+
+async def _wait_for_exit(pids: list[int], deadline: float) -> list[int]:
+    """Recursive: the pids still alive, checked every 0.1s until none are or the deadline passes."""
+    alive = [pid for pid in pids if os.path.exists(f"/proc/{pid}")]
+    if not alive or time.monotonic() >= deadline:
+        return alive
+    await asyncio.sleep(0.1)
+    return await _wait_for_exit(alive, deadline)
 
 
 async def _claim_free_port() -> int:
@@ -138,6 +190,14 @@ async def _claim_free_port() -> int:
     return port
 
 
+def get_latest_claude_transcript(workspace_dir: str) -> Path | None:
+    """[Pure-ish] The newest Claude conversation transcript for this working directory (see
+    CLAUDE_PROJECTS_DIR), or None if Claude has never had one there. Its file name is the session id."""
+    transcripts_dir = Path(CLAUDE_PROJECTS_DIR).expanduser() / re.sub(r"[^a-zA-Z0-9]", "-", workspace_dir)
+    transcripts = list(transcripts_dir.glob("*.jsonl")) if transcripts_dir.is_dir() else []
+    return max(transcripts, key=lambda path: path.stat().st_mtime, default=None)
+
+
 async def start_session(project: Project, conversation_id: int, port: int) -> None:
     """Launch the conversation's session (SESSION_COMMAND) in a detached tmux session, get it past its
     startup prompt, and return -- once it's running, not once it's listening.
@@ -146,6 +206,8 @@ async def start_session(project: Project, conversation_id: int, port: int) -> No
       - cwd = the conversation's workspace dir
       - SESSION_PORT_ENV=<port> in its environment, on top of ours
     Living in tmux, it outlives a backend restart, and you can watch it: `tmux attach -t conv_<id>`.
+    If Claude already had a conversation in the workspace, the session continues it (SESSION_CONTINUE_ARGS)
+    rather than starting from scratch.
 
     The tmux client's own output (its errors, e.g. a duplicate session name) goes to
     `<project dir>/<conversation_id>.session.log`, next to the workspace rather than inside it; the
@@ -162,7 +224,7 @@ async def start_session(project: Project, conversation_id: int, port: int) -> No
         # session. -c sets the pane's cwd, which is what discovery matches on. The outbox URL and token are
         # how the session's channel posts the agent's messages back to us -- passed explicitly too, since
         # the pane would otherwise only have whatever env the tmux server happened to start with.
-        # Gotcha: the token is the admin token, so the agent holds full admin rights.
+        # The token only speaks for this conversation (services/agent/tokens).
         tmux_client = await asyncio.create_subprocess_exec(
             "tmux",
             "new-session",
@@ -176,8 +238,8 @@ async def start_session(project: Project, conversation_id: int, port: int) -> No
             "-e",
             f"{SESSION_OUTBOX_URL_ENV}=http://127.0.0.1:{settings.api_port}",
             "-e",
-            f"{SESSION_OUTBOX_TOKEN_ENV}={settings.admin_token}",
-            shlex.join(SESSION_COMMAND),
+            f"{SESSION_OUTBOX_TOKEN_ENV}={tokens.to_session_token(conversation_id)}",
+            shlex.join([*SESSION_COMMAND, *(SESSION_CONTINUE_ARGS if get_latest_claude_transcript(pwd) else [])]),
             cwd=pwd,
             env=_get_tmux_client_env(),
             stdin=asyncio.subprocess.DEVNULL,
@@ -243,6 +305,7 @@ def _get_tmux_session_name(conversation_id: int) -> str:
 
 
 def _get_tmux_client_env() -> dict[str, str]:
-    """[Pure-ish] Our environment minus the session port -- see start_session for why the tmux client
-    must never carry it."""
-    return pydash.omit(dict(os.environ), SESSION_PORT_ENV)
+    """[Pure-ish] The tmux client's environment: only the base env (utils/processes), so neither our
+    secrets nor the session port reach it -- see start_session for why the port must never be there.
+    The first `tmux new` starts the tmux SERVER with this env, and every pane inherits it."""
+    return pydash.omit(get_base_env(), SESSION_PORT_ENV)

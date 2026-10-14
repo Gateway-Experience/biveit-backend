@@ -4,6 +4,7 @@
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,14 +17,19 @@ import pytest
 from src.config import settings
 from src.constants import SESSION_PORT_ENV, SESSION_PORT_RANGE, SESSION_STARTUP_PROMPT, SESSION_TRUST_PROMPT
 from src.services import devenv
-from src.services.agent import adapter
+from src.services.agent import adapter, tokens
 from src.utils import redis
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="process discovery reads /proc")
 needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="sessions run inside tmux")
 
-_PROJECT = {"id": 42, "user_id": 7}
+_PROJECT = {"id": 42, "hash": "p42hash", "user_id": 7, "user_hash": "u7hash"}
 _CONVERSATION_ID = 5
+
+
+@pytest.fixture(autouse=True)
+def _session_token_secret(monkeypatch):
+    monkeypatch.setattr(settings, "session_token_secret", "session-token-secret-for-tests")
 
 
 @pytest.fixture
@@ -109,7 +115,8 @@ def isolated_tmux(monkeypatch):
 
 def _claude_like(then: str) -> list[str]:
     """A stand-in session command that behaves like Claude at startup: shows the confirmation prompt and
-    waits for Enter, then runs `then` (shell)."""
+    waits for Enter, then runs `then` (shell). `then` must not `exec`: the shell has to stay the running
+    process, since sessions are recognized by their command line (find_session_processes)."""
     return ["sh", "-c", f'echo "{SESSION_STARTUP_PROMPT}"; read confirmation; echo accepted; {then}']
 
 
@@ -128,6 +135,7 @@ async def _wait_for_sessions(workspace, count, timeout_seconds=5.0):
 
 
 async def test_ensure_session_reuses_the_running_session(workspace, spawn_in, fake_redis, monkeypatch):
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", ["sleep", "30"])  # what spawn_in runs
     await spawn_in(workspace, {SESSION_PORT_ENV: "8899"})
 
     async def fail_start(project, conversation_id, port):
@@ -138,16 +146,19 @@ async def test_ensure_session_reuses_the_running_session(workspace, spawn_in, fa
 
 
 @needs_tmux
-async def test_ensure_session_ignores_a_sessions_own_children(workspace, fake_redis, isolated_tmux, monkeypatch):
-    # The session forks a child (think: a dev server). Same cwd, same env -- but the same OS session.
-    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("sleep 30 & exec sleep 30"))
+async def test_ensure_session_ignores_what_the_session_launches(workspace, fake_redis, isolated_tmux, monkeypatch):
+    # The session launches things that inherit its cwd and env: a dev server, and a browser that puts
+    # itself in its own OS session (setsid -- what Chrome does). Neither runs the session's command.
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("sleep 30 & setsid sleep 30 & sleep 30"))
     port = await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
-    processes = await _wait_for_sessions(workspace, 2)
-    assert len(processes) == 2
+    processes = await _wait_for_sessions(workspace, 4)
+    assert len(processes) == 4  # the session shell, and the three sleeps
+    assert len(await adapter.find_session_processes(workspace)) == 1
     assert await adapter.ensure_session(_PROJECT, _CONVERSATION_ID) == port  # one session, not TooManySessions
 
 
-async def test_ensure_session_refuses_when_several_are_running(workspace, spawn_in, fake_redis):
+async def test_ensure_session_refuses_when_several_are_running(workspace, spawn_in, fake_redis, monkeypatch):
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", ["sleep", "30"])  # two real sessions, as far as it knows
     await spawn_in(workspace, {SESSION_PORT_ENV: "8899"})
     await spawn_in(workspace, {SESSION_PORT_ENV: "8900"})
 
@@ -204,22 +215,81 @@ async def test_claim_free_port_stays_in_the_session_range(fake_redis):
 async def test_started_session_is_found_again(workspace, fake_redis, isolated_tmux, monkeypatch):
     # The launch contract end to end: whatever start_session runs, ensure_session must find it next time --
     # which takes the port reaching the pane (tmux -e) and the pane running in the workspace (tmux -c).
-    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("exec sleep 30"))
-    monkeypatch.setattr(settings, "admin_token", "outbox-test-token")
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("sleep 30"))
 
     port = await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
-    processes = await _wait_for_sessions(workspace, 1)
+    await _wait_for_sessions(workspace, 1)
+    processes = await adapter.find_session_processes(workspace)
     assert len(processes) == 1
     assert f"{SESSION_PORT_ENV}={port}" in processes[0]["environ"]
     # ...and so does the way back: where the channel posts the agent's messages, and the token it sends.
-    assert f"EVENT_CHANNEL_OUTBOX_URL=http://127.0.0.1:{settings.api_port}" in processes[0]["environ"]
-    assert "EVENT_CHANNEL_OUTBOX_TOKEN=outbox-test-token" in processes[0]["environ"]
+    assert f"COMMUNICATION_OUTBOX_URL=http://127.0.0.1:{settings.api_port}" in processes[0]["environ"]
+    assert f"COMMUNICATION_OUTBOX_TOKEN={tokens.to_session_token(_CONVERSATION_ID)}" in processes[0]["environ"]
     assert await adapter.ensure_session(_PROJECT, _CONVERSATION_ID) == port  # reused, not started again
+
+
+def test_latest_claude_transcript_is_found_by_the_workspace_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(adapter, "CLAUDE_PROJECTS_DIR", str(tmp_path / "claude-projects"))
+    assert adapter.get_latest_claude_transcript("/srv/storage_root/u1/p2/3") is None
+    transcripts_dir = tmp_path / "claude-projects" / "-srv-storage-root-u1-p2-3"
+    transcripts_dir.mkdir(parents=True)
+    (transcripts_dir / "old.jsonl").write_text("{}")
+    (transcripts_dir / "new.jsonl").write_text("{}")
+    os.utime(transcripts_dir / "old.jsonl", (1000, 1000))
+    assert adapter.get_latest_claude_transcript("/srv/storage_root/u1/p2/3").stem == "new"
+
+
+@needs_tmux
+@pytest.mark.parametrize("has_conversation", [False, True])
+async def test_start_continues_an_existing_claude_conversation(
+    has_conversation, workspace, fake_redis, isolated_tmux, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(adapter, "CLAUDE_PROJECTS_DIR", str(tmp_path / "claude-projects"))
+    if has_conversation:
+        transcripts_dir = tmp_path / "claude-projects" / re.sub(r"[^a-zA-Z0-9]", "-", workspace)
+        transcripts_dir.mkdir(parents=True)
+        (transcripts_dir / "abc.jsonl").write_text("{}")
+    # sh -c '<script>' <extra args>: the first extra arg lands in $0, so the stand-in can echo it.
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like('echo "extra:$0"; sleep 30'))
+    await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
+    await asyncio.sleep(0.2)
+    pane_text = await adapter._run_tmux("capture-pane", "-p", "-t", f"conv_{_CONVERSATION_ID}")
+    assert ("extra:--continue" in pane_text) == has_conversation
+
+
+@needs_tmux
+async def test_stop_session_stops_everything_and_is_idempotent(workspace, fake_redis, isolated_tmux, monkeypatch):
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("sleep 30"))
+    port = await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
+    # Something that outlived its tmux session -- an MCP server whose parent died, say: same workspace,
+    # same port in its env, but in no tmux session at all.
+    orphan = await asyncio.create_subprocess_exec(
+        "sleep", "30", cwd=workspace, env={**os.environ, SESSION_PORT_ENV: str(port)}, start_new_session=True
+    )
+    # The session's shell, the sleep it runs, and the orphan.
+    assert len(await _wait_for_sessions(workspace, 3)) == 3
+
+    stopped = await adapter.stop_session(_PROJECT, _CONVERSATION_ID)
+
+    assert stopped["tmux_session"] is True and orphan.pid in stopped["pids"]
+    assert await asyncio.wait_for(orphan.wait(), 5) is not None
+    assert await adapter.find_processes_in_dir(workspace, adapter._SESSION_PORT_PATTERN) == []
+    assert await adapter.stop_session(_PROJECT, _CONVERSATION_ID) == {"tmux_session": False, "pids": []}
+
+
+async def test_stop_session_sigkills_what_ignores_sigterm(workspace, fake_redis, monkeypatch):
+    monkeypatch.setattr(adapter, "SESSION_STOP_WAIT_SECONDS", 0.3)
+    stubborn = await asyncio.create_subprocess_exec(
+        "sh", "-c", "trap '' TERM; sleep 30", cwd=workspace, env={**os.environ, SESSION_PORT_ENV: "47001"}
+    )
+    await _wait_for_sessions(workspace, 1)
+    await adapter.stop_session(_PROJECT, _CONVERSATION_ID)
+    assert await asyncio.wait_for(stubborn.wait(), 5) == -9  # SIGKILL
 
 
 @needs_tmux
 async def test_start_presses_enter_on_the_startup_prompt(workspace, fake_redis, isolated_tmux, monkeypatch):
-    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("exec sleep 30"))
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("sleep 30"))
     await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
     # ensure_session returned, so Enter was already sent -- the stand-in printed "accepted" after reading it.
     await asyncio.sleep(0.2)
@@ -237,7 +307,7 @@ async def test_start_fails_if_the_prompt_never_shows(workspace, fake_redis, isol
 
 @needs_tmux
 async def test_start_fails_on_a_duplicate_tmux_session(workspace, fake_redis, isolated_tmux, monkeypatch):
-    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("exec sleep 30"))
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("sleep 30"))
     await adapter._run_tmux("new-session", "-d", "-s", f"conv_{_CONVERSATION_ID}", "sleep 30")  # a leftover
     with pytest.raises(adapter.SessionStartFailed, match="couldn't start"):
         await adapter.start_session(_PROJECT, _CONVERSATION_ID, 8899)
@@ -256,7 +326,7 @@ async def test_start_answers_the_trust_dialog_once_then_the_prompt(workspace, fa
             "-c",
             (
                 f'echo "{SESSION_TRUST_PROMPT}"; read trust; echo "trust answered"; '
-                f'echo "{SESSION_STARTUP_PROMPT}"; read confirmation; echo "confirmation=[$confirmation]"; exec sleep 30'
+                f'echo "{SESSION_STARTUP_PROMPT}"; read confirmation; echo "confirmation=[$confirmation]"; sleep 30'
             ),
         ],
     )

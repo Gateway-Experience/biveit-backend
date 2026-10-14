@@ -6,7 +6,9 @@
 
 from typing import Any, TypedDict
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from src.constants import UserLanguage
 
 
 class User(TypedDict):
@@ -14,10 +16,12 @@ class User(TypedDict):
     it's left out of every read but the auth lookup."""
 
     id: int
+    hash: str  # random public handle; names the user's storage folder (see 0001_users.sql)
     username: str | None  # the email; None for guests
     user_type: str  # UserType -- USER | GUEST
     full_name: str | None
     profile_picture: str | None
+    language: str  # UserLanguage -- the FE's language picker
     platform: str | None  # UserPlatform -- WEB | GOOGLE; None for guests
     platform_id: str | None  # WEB: the username; GOOGLE: Google's `sub` (not the email)
     tags: list[str]
@@ -62,3 +66,14 @@ class UpdateMeRequest(BaseModel):
 
     full_name: str | None = None
     profile_picture: str | None = None
+    # Sent by the FE's language picker whenever the user switches language.
+    language: UserLanguage | None = None
+
+    @field_validator("language")
+    @classmethod
+    def _refuse_null_language(cls, language: UserLanguage | None) -> UserLanguage:
+        """Leaving `language` out keeps it as is; an explicit null is refused (422) -- a user always has
+        one. (Validators only run on values actually sent, so the None default is unaffected.)"""
+        if language is None:
+            raise ValueError("language can't be null")
+        return language

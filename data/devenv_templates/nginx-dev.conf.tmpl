@@ -1,0 +1,43 @@
+# Dev site for project {{{project_id}}}, written by vib3 (services/devenv/sites). Rewritten whenever it
+# changes -- don't edit it here. Uses the wildcard certificate for *.{{{settings.dev_domain}}}.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{{dev_host}}};
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name {{{dev_host}}};
+
+    ssl_certificate /etc/letsencrypt/live/{{{settings.dev_domain}}}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{{settings.dev_domain}}}/privkey.pem;
+
+    # Dev sites are public, so keep them out of search results.
+    add_header X-Robots-Tag "noindex, nofollow" always;
+
+    # Dev backend on the host.
+    location /api/ {
+        proxy_pass http://127.0.0.1:{{{dev_backend_port}}};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Overwrite, never append: the backend trusts the first hop as the client IP.
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_read_timeout 120s;
+    }
+
+    # Vite dev server, including the hot-reload websocket.
+    location / {
+        proxy_pass http://127.0.0.1:{{{dev_frontend_port}}};
+        proxy_set_header Host $host;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        # nginx closes idle connections after 60s by default; Vite would read that as a server restart
+        # and reload the page every minute.
+        proxy_read_timeout 1d;
+    }
+}

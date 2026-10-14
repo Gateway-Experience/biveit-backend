@@ -4,9 +4,11 @@
 
 import bcrypt
 import pytest
+from pydantic import ValidationError
 
 from src.config import settings
 from src.constants import UserType
+from src.dto.users import UpdateMeRequest
 from src.repositories import users as users_repo
 from src.services import users as user_service
 from src.services.users.users import to_profile
@@ -326,3 +328,24 @@ async def test_google_username_is_the_email(fake_repo):
     fake_repo([])
     result = await user_service.signin_google(_claims())
     assert result["user"]["username"] == "a@b.c"
+
+
+# --- language (PATCH /me) ---
+
+
+@pytest.mark.parametrize(
+    ("body", "valid"),
+    [
+        ({"language": "vi"}, True),
+        ({"language": "en"}, True),
+        ({}, True),  # left out: unchanged
+        ({"language": "fr"}, False),  # not one the FE offers
+        ({"language": None}, False),  # a user always has one
+    ],
+)
+def test_the_language_can_be_set_to_a_supported_one(body, valid):
+    if valid:
+        assert UpdateMeRequest(**body).model_dump(exclude_unset=True) == body
+    else:
+        with pytest.raises(ValidationError):
+            UpdateMeRequest(**body)

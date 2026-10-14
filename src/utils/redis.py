@@ -43,6 +43,20 @@ async def set_flag(key: str, ttl_seconds: int) -> None:
 
 
 # ci:trivial
+async def set_value(key: str, value: str, ttl_seconds: int) -> None:
+    """SET key value EX ttl -- store a string that expires on its own (re-setting refreshes the TTL). The
+    caller owns any encoding. Generic op."""
+    await client().set(key, value, ex=ttl_seconds)
+
+
+# ci:trivial
+async def get_value(key: str) -> str | None:
+    """GET key -> the string stored there, or None if it's missing (or expired). Generic op."""
+    value = await client().get(key)
+    return value.decode() if isinstance(value, bytes) else value
+
+
+# ci:trivial
 async def flag_exists(key: str) -> bool:
     """EXISTS key -> whether the flag is currently raised. The poll side of a key-based signal. Generic op."""
     return bool(await client().exists(key))

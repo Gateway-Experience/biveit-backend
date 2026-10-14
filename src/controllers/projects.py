@@ -1,7 +1,8 @@
 # Intentions: the caller's own projects.
 #   GET  /projects  (auth)  my live projects, most recently edited first
-#   POST /projects            (auth)  create a project owned by me
-#   POST /projects/{id}/open  (auth)  get my project ready to work on (call it when the user opens it)
+#   POST /projects            (auth)  create a project owned by me, from the submitted starting form
+#   POST /projects/{id}/open  (auth)  get my project ready to work on: call it right after creating it,
+#                                     and whenever the user opens it
 # Guests count as callers too -- their projects stay theirs after signup (promotion keeps the user id).
 # Listing and creating are straight repo calls; opening goes through services/projects.
 

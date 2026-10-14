@@ -15,12 +15,23 @@ from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
-from src.services.agent import conversations, mock, sessions
+from src.services import devenv as conversations_devenv
+from src.services.agent import building, conversations, mock, sessions, tokens, wakeups
 from src.utils import redis
 from src.utils.auth import get_current_user
 
 _ALICE = {"id": 7, "username": "alice", "user_type": "USER"}
-_PROJECTS = [{"id": 3, "user_id": 7}, {"id": 4, "user_id": 99}]  # 4 is someone else's
+_PROJECTS = [
+    {
+        "id": 3,
+        "hash": "p3hash",
+        "user_id": 7,
+        "user_hash": "u7hash",
+        "stage": "implementing",
+        "implementation_done_at": None,
+    },
+    {"id": 4, "hash": "p4hash", "user_id": 99, "user_hash": "u99hash", "stage": "specing"},
+]  # 4 is someone else's
 
 
 @pytest.fixture
@@ -314,12 +325,13 @@ async def test_watch_replays_then_waits_then_delivers_new_messages(db, monkeypat
     monkeypatch.setattr(redis, "subscription", fake_subscription)
 
     stream = agent_service.watch_messages(1, after_seq=1, idle_seconds=15, max_age_seconds=60)
-    first = await anext(stream)
-    second = await anext(stream)
+    first, first_devenv_changed = await anext(stream)
+    second, second_devenv_changed = await anext(stream)
     await stream.aclose()
 
     assert [m["seq"] for m in first] == [2, 3]  # replay after the client's seq
     assert [m["seq"] for m in second] == [4]  # only what's new since
+    assert not first_devenv_changed and not second_devenv_changed
     assert wakeups == [15]
 
 
@@ -333,10 +345,51 @@ async def test_watch_yields_an_empty_batch_when_idle_and_ends_at_max_age(db, mon
 
     monkeypatch.setattr(redis, "subscription", fake_subscription)
 
-    batches = [
-        batch async for batch in agent_service.watch_messages(1, after_seq=0, idle_seconds=0, max_age_seconds=0.01)
-    ]
-    assert batches and all(batch == [] for batch in batches)
+    yields = [item async for item in agent_service.watch_messages(1, after_seq=0, idle_seconds=0, max_age_seconds=0.01)]
+    assert yields and all(item == ([], False) for item in yields)
+
+
+async def test_watch_passes_a_devenv_wakeup_on_as_a_hint(db, monkeypatch):
+    @asynccontextmanager
+    async def fake_subscription(channel):
+        async def receive(timeout_seconds):
+            return "devenv"
+
+        yield receive
+
+    monkeypatch.setattr(redis, "subscription", fake_subscription)
+    stream = agent_service.watch_messages(1, after_seq=0, idle_seconds=15, max_age_seconds=60)
+    assert await anext(stream) == ([], False)  # the first read: nothing has happened yet
+    assert await anext(stream) == ([], True)
+    await stream.aclose()
+
+
+async def test_publishing_a_devenv_change_wakes_the_conversation(db):
+    await wakeups.publish_devenv_changed(1)
+    assert db["published"] == [("ai_conversation:1", "devenv")]
+
+
+async def test_the_devenv_status_route_checks_ownership(client, db, monkeypatch):
+    async def fake_status(project, conversation_id):
+        return {"busy": False, "preview_url": "http://localhost:10102", "servers": []}
+
+    async def not_building(conversation_id):
+        return None
+
+    monkeypatch.setattr(conversations_devenv, "get_devenv_status", fake_status)
+    monkeypatch.setattr(building, "get_building", not_building)
+    conversation_id = _open_conversation(client)
+    response = client.get(f"/api/conversations/{conversation_id}/devenv")
+    assert response.status_code == 200
+    assert response.json() == {
+        "stage": "implementing",
+        "implementation_done_at": None,
+        "building": None,
+        "busy": False,
+        "preview_url": "http://localhost:10102",
+        "servers": [],
+    }
+    assert client.get("/api/conversations/999/devenv").status_code == 404
 
 
 # --- attachments ---
@@ -568,10 +621,9 @@ def test_text_is_pushed_into_the_session(client, db, real_agent):
 def test_session_questions_can_be_answered_and_the_answers_go_back_in(client, db, real_agent, monkeypatch):
     conversation_id = _open_conversation(client)
     # The session asks something -- the channel sends tool_use items with no id or name.
-    monkeypatch.setattr(settings, "admin_token", "admin-token-of-a-realistic-length-000001")
-    monkeypatch.setattr(conversations.projects_repo, "find", _fake_find_by_port_or_owner)
+    monkeypatch.setattr(settings, "session_token_secret", "session-token-secret-for-tests")
     asked = client.post(
-        "/api/agent/8899/messages",
+        "/api/agent/messages",
         json={
             "content": [
                 {
@@ -584,7 +636,7 @@ def test_session_questions_can_be_answered_and_the_answers_go_back_in(client, db
                 }
             ]
         },
-        headers={"Authorization": "Bearer admin-token-of-a-realistic-length-000001"},
+        headers={"Authorization": f"Bearer {tokens.to_session_token(conversation_id)}"},
     ).json()
     tool_use = asked["content"][0]
     assert tool_use["name"] == "ask_user" and tool_use["id"].startswith("toolu_")
@@ -606,12 +658,6 @@ def test_an_unreachable_session_is_503_but_the_message_is_kept(client, db, real_
     response = _say(client, _open_conversation(client), "hello?")
     assert response.status_code == 503 and response.json()["detail"] == "AGENT_UNAVAILABLE"
     assert [m["content"][0]["text"] for m in db["messages"]] == ["hello?"]
-
-
-async def _fake_find_by_port_or_owner(criteria):
-    # Project 3 (Alice's) is the one running a session on port 8899.
-    project = {"id": 3, "user_id": 7, "current_port": 8899}
-    return [project] if all(project.get(key) == value for key, value in criteria.items()) else []
 
 
 # --- answering several questions of one message ---

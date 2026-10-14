@@ -21,7 +21,7 @@ from src.utils import postgres
 
 # Everything a caller may see. `password_hash` is absent on purpose -- see the module note.
 _COLUMNS = """
-    id, user_type, username, platform, platform_id, full_name, profile_picture,
+    id, hash, user_type, username, platform, platform_id, full_name, profile_picture, language,
     tags, meta, created_at, updated_at, deleted_at
 """
 
@@ -34,6 +34,7 @@ _WRITABLE_COLUMNS = [
     "platform_id",
     "full_name",
     "profile_picture",
+    "language",
     "tags",
     "meta",
     "deleted_at",

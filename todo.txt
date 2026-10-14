@@ -1,0 +1,13 @@
+User onboard flow:
+- Are you experienced in tech/website building: yes/no/somewhat
+
+Some building process questions:
+- What you absolutely dont want to have
+- What's a website to use as reference (and in what aspects? UI/styling, or user flow)
+
+Learning about the user's temperment and communication style through conversations (noting things down about the user?)
+
+Security implementation and review.
+
+Loading data (after deployment).
+- Can tell them we only accept csv upload for loading data for now (we can adapt the schema). If data is too complex or big, tell them to contact admin to help with this.

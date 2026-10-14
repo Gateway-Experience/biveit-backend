@@ -1,5 +1,5 @@
 # Session channel tests (services/agent/sessions): translating our stored messages to the session's
-# event-channel format and back, and pushing a message in. Pure functions are tested directly; the HTTP
+# communication-channel format and back, and pushing a message in. Pure functions are tested directly; the HTTP
 # push fakes utils/http.
 
 import pytest
@@ -106,3 +106,26 @@ async def test_send_raises_session_unavailable(outcome, monkeypatch):
     monkeypatch.setattr(sessions, "exponential_backoff", lambda *a, **k: lambda attempt: 0)
     with pytest.raises(sessions.SessionUnavailable):
         await sessions.send(8899, [{"type": "text", "text": "hi"}])
+
+
+async def test_the_introduction_carries_the_form_and_the_owners_language(monkeypatch):
+    pushed = []
+
+    async def fake_get_user(user_id):
+        assert user_id == 7
+        return {"id": 7, "language": "vi"}
+
+    async def fake_ensure_session(project, conversation_id):
+        return 47000
+
+    async def fake_send(port, content):
+        pushed.append(content[0]["text"])
+
+    monkeypatch.setattr(sessions.users_repo, "get", fake_get_user)
+    monkeypatch.setattr(sessions, "ensure_session", fake_ensure_session)
+    monkeypatch.setattr(sessions, "send", fake_send)
+
+    project = {"id": 1, "user_id": 7, "name": "Bean & Brew", "bootstrap_data": {"kind": "café"}}
+    await sessions.introduce_project(project, 5)
+    assert "Project name: Bean & Brew" in pushed[0] and '"kind": "café"' in pushed[0]
+    assert "Their language: Vietnamese (vi)" in pushed[0]

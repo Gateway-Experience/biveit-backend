@@ -1,0 +1,43 @@
+// pm2 processes for project {{{project_id}}} in DEV: the backend (uvicorn, reloads itself on save) and
+// the frontend (Vite dev server, hot reload). Written by vib3 and rewritten whenever the servers are
+// started -- don't edit it here, it won't stick.
+//
+// pm2's own `watch` stays OFF: both servers already reload themselves, and pm2 watching too would turn
+// every save into a full restart (killing Vite's hot reload).
+// Limits: both run under `nice -n 10`, so the platform and the agent sessions win when the box is busy,
+// and pm2 restarts either one that grows past max_memory_restart.
+const path = require('node:path');
+
+module.exports = {
+  apps: [
+    {
+      name: 'project_{{{project_id}}}_be',
+      cwd: path.join(__dirname, 'backend'),
+      script: 'nice',
+      args: '-n 10 uv run python main.py',
+      interpreter: 'none',
+      // Its settings come from backend/.env.local. No `env:` key here: pm2 exports every app config key as
+      // an env var, so it would arrive as env=[object Object] and override the file.
+      out_file: path.join(__dirname, 'logs/be.log'),
+      error_file: path.join(__dirname, 'logs/be.log'),
+      time: true,
+      max_memory_restart: '1G',
+      // A backend that dies right at startup (bad import, bad env) retries with growing delays instead
+      // of spinning.
+      exp_backoff_restart_delay: 1000,
+    },
+    {
+      name: 'project_{{{project_id}}}_fe',
+      cwd: path.join(__dirname, 'frontend'),
+      script: 'nice',
+      // --strictPort: fail rather than quietly take another port that nginx doesn't point at.
+      args: '-n 10 node_modules/.bin/vite --host 127.0.0.1 --port {{{dev_frontend_port}}} --strictPort',
+      interpreter: 'none',
+      out_file: path.join(__dirname, 'logs/fe.log'),
+      error_file: path.join(__dirname, 'logs/fe.log'),
+      time: true,
+      max_memory_restart: '1G',
+      exp_backoff_restart_delay: 1000,
+    },
+  ],
+};

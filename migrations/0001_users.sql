@@ -13,13 +13,19 @@
 -- username and (platform, platform_id) are UNIQUE but nullable: Postgres treats NULLs as distinct, so
 -- any number of guests coexist while real values stay unique.
 -- password_hash is bcrypt, never raw, and NULL for guests and Google-only accounts.
+-- language: the one the user picked in the FE's language picker (it saves it here). The agent talks to
+-- them in it.
 -- meta: free-form app-level data, including any FE-sent profile keys that have no column of their own.
 -- Soft-deleted via deleted_at: NULL = live. Every read filters on it; nothing is ever hard-deleted.
 -- No Google tokens or raw profile payloads are stored.
+-- hash: a random, unguessable public handle (16 hex chars, filled in by the DB on insert). It names the
+-- user's folder on disk (<STORAGE_DIR>/<user hash>/...), so paths and URLs don't give away or enumerate ids.
+-- Rows that existed before it was added have hash = id::text (their folders were already named by id).
 
 CREATE TABLE IF NOT EXISTS users
 (
     id              BIGSERIAL PRIMARY KEY,
+    hash            varchar(32)  NOT NULL UNIQUE DEFAULT left(md5(gen_random_uuid()::text), 16),
     user_type       varchar(32)  NOT NULL DEFAULT 'USER',  -- USER | GUEST
     username        varchar(255) UNIQUE,                   -- the email; NULL for guests
     password_hash   varchar(255),
@@ -27,6 +33,7 @@ CREATE TABLE IF NOT EXISTS users
     platform_id     varchar(255),                          -- WEB: the username; GOOGLE: the `sub`
     full_name       varchar(255),
     profile_picture varchar(1000),
+    language        varchar(16)  NOT NULL DEFAULT 'en',    -- UserLanguage: the FE's language picker
     tags            text[]       NOT NULL DEFAULT '{}',
     meta            jsonb        NOT NULL DEFAULT '{}',
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),

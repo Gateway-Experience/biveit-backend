@@ -1,31 +1,38 @@
 # Intentions: a conversation's agent session as the rest of the app sees it -- making sure it's running
 # (the OS side is adapter.py) with projects.current_port pointing at it, and talking to it over its
-# event channel, translating between our stored messages and the channel's wire format.
+# communication channel, translating between our stored messages and the channel's wire format.
 #
-# THE CHANNEL (the session's `event-channel` MCP server, mcps/src/services/communication-mcp):
+# THE CHANNEL (the session's `communication` MCP server, mcps/src/services/communication-mcp):
 #   into the session:  POST http://127.0.0.1:<port>/ {content: [item]}, item = {type: "text", text} or
 #                      {type: "tool_result", content: [answer]}. Answers carry NO tool_use_id -- they're
 #                      matched BY ORDER to the tool_use items of the session's last message, and must all
 #                      come in one message (which our submissions guarantee: the FE answers a whole
 #                      message's questions at once). Answer statuses: submitted | aborted | skipped.
 #   out of it:         its send_message tool posts {content} back (-> receive_session_message), where
-#                      tool_use items have NO id or name, just input {questions} or {actions}.
+#                      tool_use items have NO id or name, just input {questions} or {actions}. It calls
+#                      us with the conversation's session token (services/agent/tokens), which is
+#                      also how we know which conversation it's from.
 # Our side stores the API-shaped version (ids, names, tool_use_id) -- see to_stored_content and
 # to_session_content for the two translations.
 
 import asyncio
+import json
 import uuid
 
 from src.constants import (
     ASK_USER_TOOL_NAME,
+    CONVERSATION_INTRODUCED_KEY,
     REQUEST_ACTIONS_TOOL_NAME,
     SESSION_SEND_ATTEMPTS,
+    USER_LANGUAGE_NAMES,
     InteractionStatus,
 )
 from src.dto.projects import Project
+from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import projects as projects_repo
+from src.repositories import users as users_repo
 from src.services import devenv
-from src.services.agent import adapter
+from src.services.agent import adapter, building, tokens
 from src.utils import http
 from src.utils.common import exponential_backoff, with_retries
 
@@ -43,20 +50,80 @@ async def ensure_session(project: Project, conversation_id: int) -> int:
     it. Idempotent -- safe on every visit and before every send.
 
     current_port is only a hint -- the running process is the truth. It's rewritten whenever the live
-    port differs, and any OTHER project still holding this port (its session died and the OS handed the
-    port out again) gets it cleared, so a port maps to at most one project -- which is how the session's
-    messages find their way back (receive_session_message). It lives on the project only because a
-    project has one conversation for now; it moves to the conversation once there can be several."""
+    port differs, and any OTHER project still holding this port (its session died and the port was
+    handed out again) gets it cleared, so a port maps to at most one project. It's bookkeeping for
+    humans now (which project is on which port) -- sessions identify themselves by their token
+    (services/agent/tokens). It lives on the project only because a project has one conversation for
+    now; it moves to the conversation once there can be several."""
     try:
         await devenv.ensure_workspace(project, conversation_id)
         port = await adapter.ensure_session(project, conversation_id)
-    except adapter.SessionStartFailed as error:
+    except (adapter.SessionStartFailed, tokens.SessionTokenSecretMissing) as error:
         raise SessionUnavailable(str(error), {"conversation_id": conversation_id}) from error
     stale_holders = [held for held in await projects_repo.find({"current_port": port}) if held["id"] != project["id"]]
     await asyncio.gather(*[projects_repo.update(held["id"], {"current_port": None}) for held in stale_holders])
     if port != project.get("current_port"):
         await projects_repo.update(project["id"], {"current_port": port})
     return port
+
+
+async def stop_session(project: Project, conversation_id: int) -> dict:
+    """Turn the conversation's session off (adapter.stop_session), clear the project's current_port (it
+    would otherwise keep naming a port nobody listens on) and the agent's building flag (nobody's
+    building anything now). Idempotent. Returns what was stopped."""
+    stopped = await adapter.stop_session(project, conversation_id)
+    await building.clear_building(conversation_id)
+    if project.get("current_port") is not None:
+        await projects_repo.update(project["id"], {"current_port": None})
+    return stopped
+
+
+async def ensure_introduced(project: Project, conversation_id: int) -> None:
+    """Make sure the conversation's agent has been started off on the project (introduce_project) --
+    exactly once. Safe to call on every open, even from two tabs at once: the conversation's
+    CONVERSATION_INTRODUCED_KEY is claimed first, and only the caller that wins it sends anything. If
+    sending fails the claim is given back, so the next open tries again. Raises SessionUnavailable."""
+    if not await ai_conversations_repo.claim_meta_key(conversation_id, CONVERSATION_INTRODUCED_KEY):
+        return
+    try:
+        await introduce_project(project, conversation_id)
+    except BaseException:
+        await ai_conversations_repo.delete_meta_key(conversation_id, CONVERSATION_INTRODUCED_KEY)
+        raise
+
+
+async def introduce_project(project: Project, conversation_id: int) -> None:
+    """Start the agent off on a new project: make sure its session is up, and push it the starting
+    form's answers (projects.bootstrap_data) and the owner's language (users.language) with the cue to
+    begin spec-ing -- the agent opens the chat. Raises SessionUnavailable. Call ensure_introduced
+    instead, which makes it happen once.
+
+    Gotcha: the language is only told here, once. If the user switches it later, the agent hears it
+    from how they write, not from us."""
+    owner = await users_repo.get(project["user_id"])
+    language = (owner or {}).get("language", "en")
+    port = await ensure_session(project, conversation_id)
+    text = "\n".join(
+        [
+            "[New project] The user just created this project by filling in its bootstrap form.",
+            f"Project name: {project['name']}",
+            f"Description: {project.get('description') or '(none)'}",
+            "Their answers:",
+            json.dumps(project.get("bootstrap_data") or {}, indent=2, ensure_ascii=False),
+            f"Their language: {USER_LANGUAGE_NAMES.get(language, language)} ({language}). Talk to them in it.",
+            "Read CLAUDE.md, start the spec-ing stage now, and open the chat with a message along these lines:\n",
+            "Welcome to your new project *<project name>*. I am your assistant and my role is ",
+            "to help you build the website the way you envisioned. This will be an easy and fun ",
+            "journey, just take it easy and follow along with me, I promise you will be happy with the end result.",
+            "First, before building the website, we'll go through the process of collecting requirements first, ",
+            "so I know exactly what kind of website you want to create. This might feel like an interview at times, ",
+            "but please bear with me as the more I understand about your website, down to the specific details, ",
+            "the more it will turn out the way you want it to be.\n",
+            "Let's get started!",
+            "<then ask them the first open-ended question to get the whole process rolling>.",
+        ]
+    )
+    await send(port, [{"type": "text", "text": text}])
 
 
 async def send(port: int, content: list[dict]) -> None:
