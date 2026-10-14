@@ -1,8 +1,8 @@
 # The agent service package -- everything about a project's AI agent:
-#   adapter.py        its workspace on disk and the long-running session process working inside it
+#   adapter.py        the long-running session process working inside the workspace (services/devenv)
 #   conversations.py  the chat: messages in from the session and the user, out to the user's tabs
 #   interactions.py   the rules of the agent's questions to the user (pending, valid answers)
-#   storage.py        where project/conversation files live on disk (uploads, artifacts) and the guards
+#   storage.py        the chat's files in the workspace (uploads, artifacts) and the guards
 #                     on client-given names and paths
 #   sessions.py       the session as the app sees it: keeping it running + its port recorded, and talking
 #                     to it over its event channel (translating to and from the channel's format)
@@ -12,7 +12,6 @@
 # exports below are exactly what something outside the package uses -- add to them only when a new
 # caller needs it, and drop what stops being used.
 
-from src.services.agent.adapter import seed_workspace
 from src.services.agent.conversations import (
     ConversationNotFound,
     InteractionNotFound,
@@ -50,7 +49,6 @@ __all__ = [
     "list_artifacts",
     "post_user_message",
     "receive_session_message",
-    "seed_workspace",
     "upload_files",
     "watch_messages",
 ]

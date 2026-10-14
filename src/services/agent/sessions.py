@@ -24,6 +24,7 @@ from src.constants import (
 )
 from src.dto.projects import Project
 from src.repositories import projects as projects_repo
+from src.services import devenv
 from src.services.agent import adapter
 from src.utils import http
 from src.utils.common import exponential_backoff, with_retries
@@ -38,8 +39,8 @@ async def ensure_session(project: Project, conversation_id: int) -> int:
     """Make sure the conversation's session is up and return its port, recording it as the project's
     current_port. Raises SessionUnavailable if it can't be brought up.
 
-    Goes through adapter.ensure_workspace, so a workspace that was never set up gets seeded before the
-    session starts in it. Idempotent -- safe on every visit and before every send.
+    Ensures the workspace first, so one that was never set up gets seeded before the session starts in
+    it. Idempotent -- safe on every visit and before every send.
 
     current_port is only a hint -- the running process is the truth. It's rewritten whenever the live
     port differs, and any OTHER project still holding this port (its session died and the OS handed the
@@ -47,7 +48,8 @@ async def ensure_session(project: Project, conversation_id: int) -> int:
     messages find their way back (receive_session_message). It lives on the project only because a
     project has one conversation for now; it moves to the conversation once there can be several."""
     try:
-        port = await adapter.ensure_workspace(project, conversation_id)
+        await devenv.ensure_workspace(project, conversation_id)
+        port = await adapter.ensure_session(project, conversation_id)
     except adapter.SessionStartFailed as error:
         raise SessionUnavailable(str(error), {"conversation_id": conversation_id}) from error
     stale_holders = [held for held in await projects_repo.find({"current_port": port}) if held["id"] != project["id"]]

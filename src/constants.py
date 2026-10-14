@@ -72,6 +72,12 @@ SESSION_COMMAND = ["claude", "--dangerously-load-development-channels", "server:
 SESSION_TRUST_PROMPT = "Yes, I trust this folder"
 SESSION_STARTUP_PROMPT = "I am using this for local development"
 SESSION_STARTUP_PROMPT_WAIT_SECONDS = 30
+# Sessions listen on a random port from this range (inclusive). The ranges below it belong to the
+# projects' apps, one fixed port each: dev backend 8000 + project id, dev frontend 16000 + id, prod
+# backend 24000 + id -- so a server fits ids below 8000. Everything else (db, redis, our API) stays
+# below 8000, and all of it stays below the OS's outgoing-connection ports (32768+), so nothing can
+# squat a project's port.
+SESSION_PORT_RANGE = (40000, 60000)
 # How long a freshly picked port stays reserved -- covers the gap until the session actually binds it.
 SESSION_PORT_LOCK_TTL_SECONDS = 300
 SESSION_PORT_MAX_ATTEMPTS = 1000

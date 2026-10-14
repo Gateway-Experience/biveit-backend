@@ -29,6 +29,7 @@ from src.dto.projects import Project
 from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
+from src.services import devenv
 from src.services.agent import mock, sessions, storage
 from src.services.agent.interactions import (
     InvalidSubmission,
@@ -129,7 +130,7 @@ async def list_artifacts(conversation: AiConversation) -> list[dict]:
         for block in message["content"]
         if block.get("type") == "tool_use" and block.get("name") == SHOW_ARTIFACT_TOOL_NAME
     }
-    conversation_dir = Path(storage.get_conversation_dir(project, conversation["id"]))
+    conversation_dir = Path(devenv.get_conversation_dir(project, conversation["id"]))
     return [
         {
             **file,

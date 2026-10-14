@@ -1,12 +1,9 @@
-# Intentions: where project and conversation files live on disk, and the file operations on them. The
-# one place that knows the layout:
+# Intentions: the chat's files inside a conversation's workspace (services/devenv owns the layout above
+# that), and the file operations on them:
 #
-#   <STORAGE_DIR>/<user_id>/<project_id>/                     the project (its agent workspace)
-#   <STORAGE_DIR>/<user_id>/<project_id>/<conversation_id>/
+#   <conversation dir>/
 #       uploads/      files the user attached, as <upload id>_<name>
 #       artifacts/    files the agent shows the user
-#
-# user_id is the project's OWNER (projects.user_id), so every conversation of a project shares its tree.
 #
 # Messages reference files by a path RELATIVE to the conversation dir ("uploads/3f2a91c0_logo.png"),
 # never an absolute one, so the storage root can move without touching the message log. Any path that
@@ -14,15 +11,14 @@
 
 import asyncio
 import mimetypes
-import os
 import re
 import shutil
 import uuid
 from pathlib import Path
 from typing import BinaryIO
 
-from src.config import settings
 from src.dto.projects import Project
+from src.services import devenv
 
 UPLOADS_DIR = "uploads"
 ARTIFACTS_DIR = "artifacts"
@@ -62,16 +58,6 @@ class FileNotAvailable(Exception):
     (missing, outside it, or in a folder that's off limits). 404 -- don't say which."""
 
 
-def get_project_dir(project: Project) -> str:
-    """[Pure-ish] <storage_dir>/<owner user_id>/<project_id>, absolute."""
-    return os.path.join(os.path.realpath(settings.storage_dir), str(project["user_id"]), str(project["id"]))
-
-
-def get_conversation_dir(project: Project, conversation_id: int) -> str:
-    """[Pure-ish] The conversation's folder inside its project's."""
-    return os.path.join(get_project_dir(project), str(conversation_id))
-
-
 def to_safe_file_name(name: str) -> str:
     """[Pure] A client's file name made safe to store: the last path component only (no "../" tricks),
     unsafe characters replaced, no leading dots (no hidden files), length capped. Never empty."""
@@ -85,7 +71,7 @@ async def save_upload(project: Project, conversation_id: int, name: str, source:
     Each upload gets a fresh id prefix, so the same name uploaded twice never overwrites the first --
     an older message keeps pointing at exactly the file it was sent with."""
     relative_path = f"{UPLOADS_DIR}/{uuid.uuid4().hex[:8]}_{to_safe_file_name(name)}"
-    destination = Path(get_conversation_dir(project, conversation_id), relative_path)
+    destination = Path(devenv.get_conversation_dir(project, conversation_id), relative_path)
     await asyncio.to_thread(_copy_to_new_file, source, destination)
     return relative_path
 
@@ -95,7 +81,7 @@ async def write_artifact(project: Project, conversation_id: int, name: str, cont
     this OVERWRITES a same-named file on purpose: an artifact is a living document (the spec gets
     revised), so every place that shows it opens the latest version."""
     relative_path = f"{ARTIFACTS_DIR}/{to_safe_file_name(name)}"
-    destination = Path(get_conversation_dir(project, conversation_id), relative_path)
+    destination = Path(devenv.get_conversation_dir(project, conversation_id), relative_path)
 
     def _write() -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -117,7 +103,7 @@ def resolve_conversation_file(
     """The absolute path of a client-given relative path, if it's an existing file directly inside one
     of the conversation's `folders` (default: every readable one). Raises FileNotAvailable otherwise. The check runs on the
     RESOLVED path, so "uploads/../../other" or a symlink pointing elsewhere can't get out."""
-    conversation_dir = Path(get_conversation_dir(project, conversation_id))
+    conversation_dir = Path(devenv.get_conversation_dir(project, conversation_id))
     resolved = (conversation_dir / relative_path).resolve()
     allowed_parents = [(conversation_dir / folder).resolve() for folder in folders]
     if resolved.parent not in allowed_parents or not resolved.is_file():
@@ -150,7 +136,7 @@ async def list_files(project: Project, conversation_id: int, folder: str) -> lis
     """Every file in one of the conversation's folders, described, by last modification (oldest first;
     files written within the same filesystem timestamp tick fall back to name order). Empty if the
     folder doesn't exist yet."""
-    folder_path = Path(get_conversation_dir(project, conversation_id), folder)
+    folder_path = Path(devenv.get_conversation_dir(project, conversation_id), folder)
 
     def _list() -> list[dict]:
         if not folder_path.is_dir():

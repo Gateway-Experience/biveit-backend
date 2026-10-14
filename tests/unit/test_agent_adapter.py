@@ -14,8 +14,9 @@ from contextlib import asynccontextmanager
 import pytest
 
 from src.config import settings
-from src.constants import SESSION_PORT_ENV, SESSION_STARTUP_PROMPT, SESSION_TRUST_PROMPT
-from src.services.agent import adapter, storage
+from src.constants import SESSION_PORT_ENV, SESSION_PORT_RANGE, SESSION_STARTUP_PROMPT, SESSION_TRUST_PROMPT
+from src.services import devenv
+from src.services.agent import adapter
 from src.utils import redis
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="process discovery reads /proc")
@@ -29,7 +30,7 @@ _CONVERSATION_ID = 5
 def workspace(tmp_path, monkeypatch):
     """Points STORAGE_DIR at a temp dir and returns the project's (created) workspace path."""
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path / "storage"))
-    pwd = storage.get_conversation_dir(_PROJECT, _CONVERSATION_ID)
+    pwd = devenv.get_conversation_dir(_PROJECT, _CONVERSATION_ID)
     os.makedirs(pwd)
     return pwd
 
@@ -167,49 +168,33 @@ async def test_ensure_session_starts_one_on_a_reserved_port(workspace, fake_redi
     assert f"agent_session_port:{port}" in fake_redis
 
 
-async def test_claim_free_port_retries_past_a_reserved_port(fake_redis, monkeypatch):
-    # The first probe lands on an already-reserved port; with_retries should move on to the next one.
-    ports = iter([5001, 5002])
+async def test_claim_free_port_retries_past_busy_and_reserved_ports(fake_redis, monkeypatch):
+    # Picks: one already reserved, one some other process holds, then a free one.
+    picks = iter([50001, 50002, 50003])
 
     class FakeSocket:
         def __enter__(self):
-            self.port = next(ports)
             return self
 
         def __exit__(self, *exc):
             return False
 
         def bind(self, address):
-            pass
+            if address[1] == 50002:
+                raise OSError("address already in use")
 
-        def getsockname(self):
-            return ("0.0.0.0", self.port)
-
-    fake_redis.add("agent_session_port:5001")
+    fake_redis.add("agent_session_port:50001")
+    monkeypatch.setattr(adapter.random, "randint", lambda low, high: next(picks))
     monkeypatch.setattr(adapter.socket, "socket", FakeSocket)
     monkeypatch.setattr(adapter, "start_session", lambda project, conversation_id, port: asyncio.sleep(0))
     monkeypatch.setattr(settings, "storage_dir", "/nonexistent-storage")
 
-    assert await adapter.ensure_session(_PROJECT, _CONVERSATION_ID) == 5002
+    assert await adapter.ensure_session(_PROJECT, _CONVERSATION_ID) == 50003
 
 
-# --- workspace seeding ---
-
-
-def test_copy_missing_files_never_overwrites(tmp_path):
-    template = tmp_path / "template"
-    (template / "src").mkdir(parents=True)
-    (template / "index.html").write_text("template index")
-    (template / "src" / "app.js").write_text("template app")
-
-    destination = tmp_path / "ws"
-    (destination).mkdir()
-    (destination / "index.html").write_text("user edited")
-
-    adapter._copy_missing_files(str(template), str(destination))
-
-    assert (destination / "index.html").read_text() == "user edited"
-    assert (destination / "src" / "app.js").read_text() == "template app"
+async def test_claim_free_port_stays_in_the_session_range(fake_redis):
+    port = await adapter._claim_free_port()
+    assert SESSION_PORT_RANGE[0] <= port <= SESSION_PORT_RANGE[1]
 
 
 # --- start_session ---

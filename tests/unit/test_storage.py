@@ -18,11 +18,6 @@ def _storage_root(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_layout_is_user_project_conversation(tmp_path):
-    assert storage.get_project_dir(_PROJECT) == f"{tmp_path}/7/42"
-    assert storage.get_conversation_dir(_PROJECT, 9) == f"{tmp_path}/7/42/9"
-
-
 @pytest.mark.parametrize(
     ("name", "safe"),
     [

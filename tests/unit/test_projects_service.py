@@ -5,6 +5,7 @@
 import pytest
 
 from src.repositories import projects as projects_repo
+from src.services import devenv
 from src.services.agent import adapter, sessions
 from src.utils import postgres
 
@@ -25,13 +26,17 @@ def _fake_session_on(monkeypatch, port, port_holders=()):
     """The session comes up on `port`; `port_holders` are the projects the db says hold that port."""
 
     async def fake_ensure_workspace(project, conversation_id):
+        pass
+
+    async def fake_ensure_session(project, conversation_id):
         return port
 
     async def fake_find(criteria):
         assert criteria == {"current_port": port}
         return list(port_holders)
 
-    monkeypatch.setattr(adapter, "ensure_workspace", fake_ensure_workspace)
+    monkeypatch.setattr(devenv, "ensure_workspace", fake_ensure_workspace)
+    monkeypatch.setattr(adapter, "ensure_session", fake_ensure_session)
     monkeypatch.setattr(projects_repo, "find", fake_find)
 
 

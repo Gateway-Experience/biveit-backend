@@ -1,7 +1,6 @@
 # Intentions: the bridge between a conversation and its agent session -- a long-running process working
-# inside the conversation's own directory (the workspace: <project dir>/<conversation_id>, next to its
-# uploads/ and artifacts/). ensure_workspace is the entry point: it makes sure the workspace exists
-# (seeded from the template) and that exactly one session is running in it, and hands back the port.
+# inside the conversation's workspace (services/devenv). ensure_session is the entry point: it makes sure
+# exactly one session is running there, and hands back its port.
 #
 # THERE'S NO SESSION TABLE on purpose. The OS is the source of truth: a session is "the process whose
 # cwd is the workspace and whose env has EVENT_CHANNEL_PORT=<port>". So nothing can drift out of sync
@@ -10,9 +9,9 @@
 
 import asyncio
 import os
+import random
 import re
 import shlex
-import shutil
 import socket
 import time
 from pathlib import Path
@@ -29,12 +28,13 @@ from src.constants import (
     SESSION_PORT_ENV,
     SESSION_PORT_LOCK_TTL_SECONDS,
     SESSION_PORT_MAX_ATTEMPTS,
+    SESSION_PORT_RANGE,
     SESSION_STARTUP_PROMPT,
     SESSION_STARTUP_PROMPT_WAIT_SECONDS,
     SESSION_TRUST_PROMPT,
 )
 from src.dto.projects import Project
-from src.services.agent import storage
+from src.services import devenv
 from src.utils import redis
 from src.utils.common import with_retries
 
@@ -53,36 +53,7 @@ class SessionStartFailed(Exception):
 
 
 class _PortTaken(Exception):
-    """Internal retry signal: the port we picked is already reserved by another session start."""
-
-
-async def ensure_workspace(project: Project, conversation_id: int) -> int:
-    """Make sure the conversation's workspace exists and is seeded, and that its session is running.
-    Returns the session's port. Safe to call on every visit -- each step is idempotent."""
-    await seed_workspace(project, conversation_id)
-    return await ensure_session(project, conversation_id)
-
-
-async def seed_workspace(project: Project, conversation_id: int) -> None:
-    """Create the conversation's workspace if needed and copy in any template files it's missing.
-    Idempotent, and never touches files the workspace already has."""
-    await asyncio.to_thread(
-        _copy_missing_files,
-        os.path.realpath(settings.template_dir),
-        storage.get_conversation_dir(project, conversation_id),
-    )
-
-
-def _copy_missing_files(source_dir: str, destination_dir: str) -> None:
-    """Copy every file under source_dir into destination_dir unless it already exists there, creating
-    directories as needed. Existing files are the project's own (likely edited) versions, so they're
-    never overwritten. A template file added later still reaches older workspaces on their next visit."""
-    shutil.copytree(
-        source_dir,
-        destination_dir,
-        dirs_exist_ok=True,
-        copy_function=lambda src, dst: None if os.path.exists(dst) else shutil.copy2(src, dst),
-    )
+    """Internal retry signal: the port we picked is in use, or already reserved by another session start."""
 
 
 async def get_all_processes(abs_dir: str) -> list[dict]:
@@ -131,7 +102,7 @@ async def ensure_session(project: Project, conversation_id: int) -> int:
     The port comes back as soon as the process is launched. Whether it's LISTENING yet is the caller's
     problem: connect with a retry."""
     async with redis.lock(f"agent_session:{conversation_id}", SESSION_LOCK_TTL_SECONDS, SESSION_LOCK_WAIT_SECONDS):
-        pwd = storage.get_conversation_dir(project, conversation_id)
+        pwd = devenv.get_conversation_dir(project, conversation_id)
         # A session's children (a dev server, say) inherit its cwd AND its env, so they match too. They
         # all share the session's OS session id though (start_session gives it its own), so count those.
         processes = await find_processes_in_dir(pwd, _SESSION_PORT_PATTERN)
@@ -152,12 +123,16 @@ async def ensure_session(project: Project, conversation_id: int) -> int:
 
 
 async def _claim_free_port() -> int:
-    """Pick a port the OS says is free and reserve it in redis for a few minutes. The OS check alone
-    races: the port stays "free" until the session actually binds it, so two session starts at once
-    could pick the same one. Raises _PortTaken if the reservation is already held, and the caller retries."""
-    with socket.socket() as probe:
-        probe.bind(("", 0))
-        port = probe.getsockname()[1]
+    """Pick a random port from SESSION_PORT_RANGE that's free right now, and reserve it in redis for a few
+    minutes. Free means we can bind it ourselves. That alone races though: the port stays "free" until the
+    session actually binds it, so two session starts at once could pick the same one -- hence the
+    reservation. Raises _PortTaken if either check fails, and the caller retries with another pick."""
+    port = random.randint(*SESSION_PORT_RANGE)
+    try:
+        with socket.socket() as probe:
+            probe.bind(("", port))
+    except OSError as error:
+        raise _PortTaken(port) from error
     if not await redis.set_if_absent(f"agent_session_port:{port}", SESSION_PORT_LOCK_TTL_SECONDS):
         raise _PortTaken(port)
     return port
@@ -176,7 +151,7 @@ async def start_session(project: Project, conversation_id: int, port: int) -> No
     `<project dir>/<conversation_id>.session.log`, next to the workspace rather than inside it; the
     session's output is in its tmux pane. Raises SessionStartFailed if tmux refuses, or the startup
     prompt never shows."""
-    pwd = storage.get_conversation_dir(project, conversation_id)
+    pwd = devenv.get_conversation_dir(project, conversation_id)
     tmux_session = _get_tmux_session_name(conversation_id)
     with await asyncio.to_thread(open, f"{pwd}.session.log", "ab") as session_log:
         # exec takes argv, not a shell line, so every argument is its own string; tmux itself takes the
