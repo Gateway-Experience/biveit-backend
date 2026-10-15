@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # per project -- it's how you tell two services apart in one log stream.
     app_name: str = "vib3-backend"
 
+    # Where the API listens. 127.0.0.1: on the server, nginx is the only way in (and locally nothing else
+    # needs it). Set 0.0.0.0 only if something off this machine must reach it directly.
+    api_host: str = "127.0.0.1"
     api_port: int = 3001
     # Hot-reload (uvicorn --reload). Dev convenience only -- MUST stay false in prod (it watches the
     # filesystem and spawns a reloader subprocess). Set API_RELOAD=true in .env.local.
@@ -93,7 +96,7 @@ class Settings(BaseSettings):
     # Dev environments (services/devenv), set up once a conversation's agent starts implementing.
     # boilerplate_dir: the app copied in (its backend/ and frontend/). devenv_templates_dir: the env, pm2
     # and nginx templates rendered for each project. ~ is expanded; relative paths resolve against the cwd.
-    boilerplate_dir: str = "~/workspace/vib3-boilerplate"
+    boilerplate_dir: str = "../vib3-boilerplate"
     devenv_templates_dir: str = "data/devenv_templates"
     # A project's dev site is https://<project hash>.<dev_domain>, behind nginx with a wildcard certificate
     # for *.<dev_domain> (set up once on the VPS, at /etc/letsencrypt/live/<dev_domain>/). Empty -> no
@@ -102,10 +105,11 @@ class Settings(BaseSettings):
     # Where each project's nginx site file goes (written with sudo, then nginx is reloaded).
     nginx_sites_dir: str = "/etc/nginx/conf.d"
     # What the projects' own apps connect to: one shared Mongo user (each project gets the databases
-    # db_project_dev_<id> / db_project_<id>), and the dev redis db shared by every project, each one
-    # prefixing its keys with project_<id>:.
+    # db_project_dev_<id> / db_project_<id>), and one Redis server where each project gets its own
+    # numbered databases (see PROJECT_REDIS_DEV_DB_BASE). The Redis URL has NO database number -- each
+    # project's is appended. That server needs `databases 16000` (Redis's default is 16).
     project_mongo_uri: str = "mongodb://localhost:27017"
-    project_redis_url_dev: str = "redis://localhost:6379/1"
+    project_redis_url: str = "redis://localhost:6379"
     # Every project secret (its JWT secret, admin token...) is derived from this plus the project id, so
     # nothing has to be stored, and re-rendering a project's env gives the same values. Effectively a
     # key: long, random, never shared. Empty -> rendering a template that asks for a secret fails.

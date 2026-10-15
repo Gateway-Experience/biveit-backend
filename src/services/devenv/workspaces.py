@@ -3,7 +3,8 @@
 #
 #   <STORAGE_DIR>/<user hash>/<project hash>/                    the project
 #   <STORAGE_DIR>/<user hash>/<project hash>/<conversation_id>/  a workspace, where its agent session works.
-#       CLAUDE.md, .mcp.json, .claude/   the agent's files, from TEMPLATE_DIR (from the start)
+#       CLAUDE.md, .claude/              the agent's files, from TEMPLATE_DIR (from the start)
+#       .mcp.json                        its MCP config, written by services/agent/adapter on each start
 #       backend/, frontend/              the app, from BOILERPLATE_DIR (once implementing starts), each
 #                                        with its own CLAUDE.md
 #       uploads/, artifacts/             the chat's files (services/agent/storage)

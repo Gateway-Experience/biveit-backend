@@ -65,6 +65,11 @@ class ConfigName(StrEnum):
 
 
 # --- Agent sessions (services/agent/adapter) ---
+# The MCP server each session runs to talk to us (src/mcps/communication): its name in the session's
+# MCP config, which is also what SESSION_COMMAND loads as a channel.
+COMMUNICATION_MCP_NAME = "communication"
+
+
 # A project's agent session is a long-running process found again by its working directory (the
 # project's workspace) plus this env var, which also carries the port it listens on.
 SESSION_PORT_ENV = "COMMUNICATION_PORT"
@@ -74,7 +79,16 @@ SESSION_OUTBOX_URL_ENV = "COMMUNICATION_OUTBOX_URL"
 SESSION_OUTBOX_TOKEN_ENV = "COMMUNICATION_OUTBOX_TOKEN"
 # What a session runs (argv, no shell), launched inside the project's workspace with SESSION_PORT_ENV set.
 # SESSION_COMMAND = ["doit", "--param", "1"]
-SESSION_COMMAND = ["claude", "--dangerously-load-development-channels", "server:communication"]
+# --permission-mode auto: nobody watches the session's terminal, so it must never stop to ask before a tool
+# use (it would wait forever). Auto mode decides on its own -- risky actions are blocked rather than asked
+# about. Set explicitly: otherwise the mode depends on the machine's Claude account settings.
+SESSION_COMMAND = [
+    "claude",
+    "--dangerously-load-development-channels",
+    f"server:{COMMUNICATION_MCP_NAME}",
+    "--permission-mode",
+    "auto",
+]
 # Added to SESSION_COMMAND when the workspace already has a Claude conversation, so a restarted session
 # picks up where the last one left off (same flags every time: they're not saved with the conversation).
 # Only then: with nothing to continue, `claude --continue` exits straight away. A workspace is meant to
@@ -124,6 +138,12 @@ SUBPROCESS_ENV_PASSTHROUGH = [
 # A project's dev servers listen on these + its id (see SESSION_PORT_RANGE above for the whole plan).
 PROJECT_DEV_BACKEND_PORT_BASE = 8000
 PROJECT_DEV_FRONTEND_PORT_BASE = 16000
+# Each project's own Redis databases (on PROJECT_REDIS_URL's server): dev = base + id, prod = base + id.
+# A whole database per project rather than key prefixes, so projects can't see each other's keys whatever
+# the generated code does with Redis. db 0 is the platform's. With ids below 8000 that's databases
+# 1-15999, so the server needs `databases 16000`.
+PROJECT_REDIS_DEV_DB_BASE = 0
+PROJECT_REDIS_PROD_DB_BASE = 8000
 # ...except on a local platform (ENV=local), where every project uses the same two fixed ports and there's
 # no nginx: open the dev site straight on the frontend port. So only one project's dev servers can run
 # at a time locally -- another project's would find the ports taken.

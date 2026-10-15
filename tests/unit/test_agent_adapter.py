@@ -3,6 +3,7 @@
 # Redis is faked: the lock is a no-op and port reservations live in a set.
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import pytest
 
@@ -335,3 +337,12 @@ async def test_start_answers_the_trust_dialog_once_then_the_prompt(workspace, fa
     pane_text = await adapter._run_tmux("capture-pane", "-p", "-t", f"conv_{_CONVERSATION_ID}")
     assert "trust answered" in pane_text
     assert "confirmation=[]" in pane_text  # a bare Enter -- no stray Down from a second trust answer
+
+
+def test_the_mcp_config_runs_our_communication_mcp(tmp_path):
+    adapter.write_mcp_config(str(tmp_path))
+    server = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["communication"]
+    assert server["command"] == sys.executable
+    assert server["args"] == ["-m", "src.mcps.communication.main"]
+    repo_dir = Path(adapter.__file__).resolve().parents[3]
+    assert server["env"]["PYTHONPATH"] == str(repo_dir) and (repo_dir / "src/mcps/communication/main.py").exists()

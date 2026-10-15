@@ -4,6 +4,7 @@
 # A template is any text file where `{{{<python expression>}}}` is replaced by its value. In scope:
 #   project_id, conversation_id
 #   dev_backend_port, dev_frontend_port, dev_host (None without DEV_DOMAIN), dev_url, workspace_dir
+#   dev_redis_db            the project's own Redis database for dev
 #   settings                the backend's settings, e.g. {{{settings.project_mongo_uri}}}
 #   secret(name, length=48) a secret DERIVED from PROJECT_SECRET_SEED, the project id and the name, so
 #                           it's the same every time it's rendered (dev and prod env files share it) and
@@ -53,6 +54,7 @@ def _get_scope(project: Project, conversation_id: int) -> dict:
         "dev_frontend_port": addresses.get_dev_frontend_port(project_id),
         "dev_host": addresses.get_dev_host(project),
         "dev_url": addresses.get_dev_url(project),
+        "dev_redis_db": addresses.get_dev_redis_db(project_id),
         "workspace_dir": workspaces.get_conversation_dir(project, conversation_id),
         "settings": settings,
         "secret": lambda name, length=48: derive_secret(f"project:{project_id}:{name}", length),

@@ -8,6 +8,7 @@ from src.constants import (
     LOCAL_DEV_FRONTEND_PORT,
     PROJECT_DEV_BACKEND_PORT_BASE,
     PROJECT_DEV_FRONTEND_PORT_BASE,
+    PROJECT_REDIS_DEV_DB_BASE,
 )
 from src.dto.projects import Project
 
@@ -18,6 +19,10 @@ def get_dev_backend_port(project_id: int) -> int:
 
 def get_dev_frontend_port(project_id: int) -> int:
     return LOCAL_DEV_FRONTEND_PORT if _is_local_platform() else PROJECT_DEV_FRONTEND_PORT_BASE + project_id
+
+
+def get_dev_redis_db(project_id: int) -> int:
+    return PROJECT_REDIS_DEV_DB_BASE + project_id
 
 
 def get_dev_host(project: Project) -> str | None:

@@ -228,23 +228,22 @@ async def _report_infra(project: Project, conversation_id: int) -> None:
         ]
     except Exception as error:
         locks = [("platform redis", f"unreachable: {error}")]
-    key_prefix = f"project_{project['id']}:"
-    project_redis = await _count_project_keys(settings.project_redis_url_dev, key_prefix)
+    redis_db = addresses.get_dev_redis_db(project["id"])
+    project_redis = await _count_db_keys(f"{settings.project_redis_url}/{redis_db}")
     _print_section(
         "Data & locks",
         [
             *locks,
             ("mongo dev db / prod db", f"db_project_dev_{project['id']} / db_project_{project['id']}"),
-            ("redis key prefix (dev)", f"{key_prefix} -- {project_redis}"),
+            ("redis dev db", f"{redis_db} -- {project_redis}"),
         ],
     )
 
 
-async def _count_project_keys(redis_url: str, key_prefix: str) -> str:
+async def _count_db_keys(redis_url: str) -> str:
     client = redis_lib.from_url(redis_url, socket_timeout=2)
     try:
-        keys = [key async for key in client.scan_iter(match=f"{key_prefix}*", count=500)]
-        return f"{len(keys)} key(s)"
+        return f"{await client.dbsize()} key(s)"
     except Exception as error:
         return f"unreachable: {error}"
     finally:
@@ -318,11 +317,22 @@ async def _report_shared_infra() -> None:
                 f"{_mask_url(settings.project_mongo_uri)} ({'reachable' if mongo_reachable else 'NOT reachable'})",
             ),
             (
-                "projects' redis (dev)",
-                f"{_mask_url(settings.project_redis_url_dev)} ({await _ping_redis(settings.project_redis_url_dev)})",
+                "projects' redis",
+                f"{_mask_url(settings.project_redis_url)} ({await _ping_redis(settings.project_redis_url)}, "
+                + f"{await _get_redis_database_count(settings.project_redis_url)} databases -- needs 16000)",
             ),
         ],
     )
+
+
+async def _get_redis_database_count(redis_url: str) -> str:
+    client = redis_lib.from_url(redis_url, socket_timeout=2)
+    try:
+        return (await client.config_get("databases")).get("databases", "?")
+    except Exception:
+        return "?"
+    finally:
+        await client.aclose()
 
 
 async def _ping_redis(redis_url: str) -> str:

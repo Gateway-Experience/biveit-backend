@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "communication": {
-      "command": "node",
-      "args": ["/home/anhlq/workspace/mcps/communication-mcp.js"]
-    }
-  }
-}

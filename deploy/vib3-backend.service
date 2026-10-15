@@ -1,0 +1,38 @@
+# systemd unit for the vib3 backend on a server (see docs/dev-server-guide.md). Fill in the <...> placeholders and
+# install it:   sudo cp deploy/vib3-backend.service /etc/systemd/system/
+#               sudo systemctl daemon-reload && sudo systemctl enable --now vib3-backend
+# Logs: journalctl -u vib3-backend -f
+
+[Unit]
+Description=vib3 backend
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User=<service user>
+WorkingDirectory=/home/<service user>/workspace/vib3-backend
+# Selects .env.prod (src/config.py loads it on top of .env.local).
+Environment=ENV=prod
+# systemd starts services with a bare PATH, but the backend runs claude, tmux, pm2, uv, npm and node
+# itself -- and passes this PATH on to the agent sessions and dev servers it starts. Point it at where
+# they're installed (with nvm, node/claude/pm2 live under ~/.nvm/versions/node/<version>/bin; uv under
+# ~/.local/bin; a snap-installed tmux under /snap/bin -- add it if that's how tmux got there).
+Environment=PATH=/home/<service user>/.nvm/versions/node/<node version>/bin:/home/<service user>/.local/bin:/usr/local/bin:/usr/bin:/bin
+# A system service gets no locale; without one, tmux and Claude garble non-ASCII text (the chat is
+# often Vietnamese).
+Environment=LANG=C.UTF-8
+# The venv's python directly (deploys run `uv sync` beforehand). It's also the interpreter the agent
+# sessions' communication MCP runs with (services/agent/adapter.write_mcp_config).
+ExecStart=/home/<service user>/workspace/vib3-backend/.venv/bin/python main.py
+Restart=always
+RestartSec=3
+# Only the backend process itself is stopped on a restart. The default kills the whole process group --
+# the tmux server holding every agent session and any pm2 daemon the backend started -- so each deploy
+# would cut off every user's agent and dev servers. They're meant to outlive the backend: it finds them
+# again by themselves (process discovery, pm2).
+KillMode=process
+# No MemoryMax/CPUQuota here: every agent session and its tools count against this unit, so a limit
+# would cap them all together.
+
+[Install]
+WantedBy=multi-user.target

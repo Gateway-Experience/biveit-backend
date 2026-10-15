@@ -10,12 +10,14 @@
 # process scan reads /proc, so this is Linux-only.
 
 import asyncio
+import json
 import os
 import random
 import re
 import shlex
 import signal
 import socket
+import sys
 import time
 from pathlib import Path
 
@@ -24,6 +26,7 @@ import pydash
 from src.config import settings
 from src.constants import (
     CLAUDE_PROJECTS_DIR,
+    COMMUNICATION_MCP_NAME,
     SESSION_COMMAND,
     SESSION_CONTINUE_ARGS,
     SESSION_LOCK_TTL_SECONDS,
@@ -46,6 +49,8 @@ from src.utils import redis
 from src.utils.common import with_retries
 from src.utils.processes import get_base_env
 
+# This repo's root (src/services/agent/adapter.py is 3 levels in) -- where the session's MCP is imported from.
+_REPO_DIR = str(Path(__file__).resolve().parents[3])
 # Matched against each `NAME=value` entry of a process's environment; group 1 is the port.
 _SESSION_PORT_PATTERN = re.compile(rf"^{SESSION_PORT_ENV}=(\d+)$")
 
@@ -207,7 +212,7 @@ async def start_session(project: Project, conversation_id: int, port: int) -> No
       - SESSION_PORT_ENV=<port> in its environment, on top of ours
     Living in tmux, it outlives a backend restart, and you can watch it: `tmux attach -t conv_<id>`.
     If Claude already had a conversation in the workspace, the session continues it (SESSION_CONTINUE_ARGS)
-    rather than starting from scratch.
+    rather than starting from scratch. Its MCP config is (re)written first (write_mcp_config).
 
     The tmux client's own output (its errors, e.g. a duplicate session name) goes to
     `<project dir>/<conversation_id>.session.log`, next to the workspace rather than inside it; the
@@ -215,6 +220,7 @@ async def start_session(project: Project, conversation_id: int, port: int) -> No
     prompt never shows."""
     pwd = devenv.get_conversation_dir(project, conversation_id)
     tmux_session = _get_tmux_session_name(conversation_id)
+    await asyncio.to_thread(write_mcp_config, pwd)
     with await asyncio.to_thread(open, f"{pwd}.session.log", "ab") as session_log:
         # exec takes argv, not a shell line, so every argument is its own string; tmux itself takes the
         # session command as ONE string, hence shlex.join.
@@ -251,6 +257,24 @@ async def start_session(project: Project, conversation_id: int, port: int) -> No
         if await tmux_client.wait() != 0:
             raise SessionStartFailed(f"tmux couldn't start {tmux_session}; see {pwd}.session.log")
     await _accept_startup_prompt(tmux_session)
+
+
+def write_mcp_config(workspace_dir: str) -> None:
+    """Write the workspace's .mcp.json: the communication MCP (src/mcps/communication), run by the very
+    interpreter running this backend, with this repo on its PYTHONPATH so it can import our code. Ours,
+    not the template's: it's rewritten before every session start, so a workspace always points at
+    wherever the platform lives now (a moved repo, a renamed server) instead of a stale copy."""
+    mcp_config = {
+        "mcpServers": {
+            COMMUNICATION_MCP_NAME: {
+                "command": sys.executable,
+                "args": ["-m", f"src.mcps.{COMMUNICATION_MCP_NAME}.main"],
+                "env": {"PYTHONPATH": _REPO_DIR},
+            }
+        }
+    }
+    with open(os.path.join(workspace_dir, ".mcp.json"), "w", encoding="utf-8") as config_file:
+        json.dump(mcp_config, config_file, indent=2)
 
 
 async def _accept_startup_prompt(tmux_session: str) -> None:
