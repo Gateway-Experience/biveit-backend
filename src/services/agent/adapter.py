@@ -263,7 +263,8 @@ def write_mcp_config(workspace_dir: str) -> None:
     """Write the workspace's .mcp.json: the communication MCP (src/mcps/communication), run by the very
     interpreter running this backend, with this repo on its PYTHONPATH so it can import our code. Ours,
     not the template's: it's rewritten before every session start, so a workspace always points at
-    wherever the platform lives now (a moved repo, a renamed server) instead of a stale copy."""
+    wherever the platform lives now (a moved repo, a renamed server) instead of a stale copy. (Claude
+    only uses it without asking because the template's .claude/settings.local.json enables project MCPs.)"""
     mcp_config = {
         "mcpServers": {
             COMMUNICATION_MCP_NAME: {

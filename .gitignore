@@ -27,3 +27,8 @@ wheels/
 
 # File storage (STORAGE_DIR) -- user project files, never committed
 data/storage_root/
+
+# The agent template's Claude settings ARE committed: a fresh clone needs them (enableAllProjectMcpServers,
+# or every session stops at startup to ask about its MCP). Re-included because settings.local.json is
+# commonly ignored globally (core.excludesFile) -- this repo's .gitignore takes precedence over that.
+!data/template/.claude/settings.local.json

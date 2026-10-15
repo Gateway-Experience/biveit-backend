@@ -346,3 +346,12 @@ def test_the_mcp_config_runs_our_communication_mcp(tmp_path):
     assert server["args"] == ["-m", "src.mcps.communication.main"]
     repo_dir = Path(adapter.__file__).resolve().parents[3]
     assert server["env"]["PYTHONPATH"] == str(repo_dir) and (repo_dir / "src/mcps/communication/main.py").exists()
+
+
+def test_the_template_lets_sessions_use_the_mcp_without_asking():
+    # Committed despite settings.local.json often being git-ignored globally -- see .gitignore.
+    settings = json.loads(
+        (Path(adapter.__file__).resolve().parents[3] / "data/template/.claude/settings.local.json").read_text()
+    )
+    assert settings["enableAllProjectMcpServers"] is True  # no "New MCP server found" prompt at startup
+    assert "Bash(pm2:*)" in settings["permissions"]["deny"]

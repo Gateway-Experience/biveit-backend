@@ -183,7 +183,7 @@ macOS.
 |---|---|
 | Opening a project fails with 503 | the session couldn't start. Check `tmux ls` and the `<conversation id>.session.log` next to the workspace. `claude` or `tmux` not on the backend's `PATH` is the usual cause |
 | The agent never replies | attach to its tmux session and look: a startup screen nobody answered, or an error. `scripts.project_status <id>` shows whether the channel port is listening |
-| A session sits on "New MCP server found" | the workspace lacks `.claude/settings.local.json` (`enableAllProjectMcpServers`). It comes from `data/template/`; copy it in |
+| A session sits on "New MCP server found" | the workspace lacks `.claude/settings.local.json` (`enableAllProjectMcpServers`). It comes from `data/template/` and is copied only where missing: copy it in, then restart the session (`scripts.stop_project <id>`, then open the project) |
 | The preview never comes up | `scripts.project_status <id>` shows the dev servers. Their logs are in the workspace's `logs/`. Ports 10101/10102 held by another project is common |
 | Login always 401s | `JWT_SECRET` is empty |
 | `Too many sessions` | two Claude processes in one workspace (e.g. one started by hand). `scripts.stop_project <id>` clears them |
