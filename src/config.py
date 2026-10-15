@@ -107,7 +107,7 @@ class Settings(BaseSettings):
     # What the projects' own apps connect to: one shared Mongo user (each project gets the databases
     # db_project_dev_<id> / db_project_<id>), and one Redis server where each project gets its own
     # numbered databases (see PROJECT_REDIS_DEV_DB_BASE). The Redis URL has NO database number -- each
-    # project's is appended. That server needs `databases 16000` (Redis's default is 16).
+    # project's is appended. That server needs `databases 18000` (Redis's default is 16).
     project_mongo_uri: str = "mongodb://localhost:27017"
     project_redis_url: str = "redis://localhost:6379"
     # Every project secret (its JWT secret, admin token...) is derived from this plus the project id, so

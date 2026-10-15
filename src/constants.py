@@ -140,10 +140,12 @@ PROJECT_DEV_BACKEND_PORT_BASE = 8000
 PROJECT_DEV_FRONTEND_PORT_BASE = 16000
 # Each project's own Redis databases (on PROJECT_REDIS_URL's server): dev = base + id, prod = base + id.
 # A whole database per project rather than key prefixes, so projects can't see each other's keys whatever
-# the generated code does with Redis. db 0 is the platform's. With ids below 8000 that's databases
-# 1-15999, so the server needs `databases 16000`.
-PROJECT_REDIS_DEV_DB_BASE = 0
-PROJECT_REDIS_PROD_DB_BASE = 8000
+# the generated code does with Redis. db 0 is the platform's. The bases start at 1000 so a Redis server
+# shared with other apps keeps 1-999 for them (on the VPS, the gx projects use db = their id, 1-255).
+# With ids below 8000 that's databases 1001-17999, so the server needs PROJECT_REDIS_DATABASES_NEEDED.
+PROJECT_REDIS_DEV_DB_BASE = 1000
+PROJECT_REDIS_PROD_DB_BASE = 10000
+PROJECT_REDIS_DATABASES_NEEDED = 18000
 # ...except on a local platform (ENV=local), where every project uses the same two fixed ports and there's
 # no nginx: open the dev site straight on the frontend port. So only one project's dev servers can run
 # at a time locally -- another project's would find the ports taken.

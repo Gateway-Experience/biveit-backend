@@ -43,12 +43,12 @@ since agent sessions run in auto mode and nobody answers their screens.
 docker run -d --name vib3-postgres --restart unless-stopped -p 127.0.0.1:5432:5432 \
   -e POSTGRES_PASSWORD=<pg password> -e POSTGRES_DB=vib3 postgres:16
 docker run -d --name vib3-redis --restart unless-stopped -p 127.0.0.1:6379:6379 \
-  redis:7 redis-server --databases 16000 --requirepass <redis password>
+  redis:7 redis-server --databases 18000 --requirepass <redis password>
 docker run -d --name vib3-mongo --restart unless-stopped -p 127.0.0.1:27017:27017 \
   -e MONGO_INITDB_ROOT_USERNAME=root -e MONGO_INITDB_ROOT_PASSWORD=<mongo password> mongo:7
 ```
 
-`--databases 16000`: every project gets its own Redis databases (dev: `id`, prod: `8000 + id`).
+`--databases 18000`: every project gets its own Redis databases (dev: `1000 + id`, prod: `10000 + id`).
 
 ## 4. Code and config
 

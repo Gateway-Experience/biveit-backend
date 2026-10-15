@@ -29,6 +29,7 @@ from src.constants import (
     DEVENV_APP_DIRS,
     DEVENV_BACKEND_HEALTH_PATH,
     DEVENV_ENV_FILES,
+    PROJECT_REDIS_DATABASES_NEEDED,
     SESSION_PORT_ENV,
     SESSION_PORT_RANGE,
 )
@@ -319,7 +320,7 @@ async def _report_shared_infra() -> None:
             (
                 "projects' redis",
                 f"{_mask_url(settings.project_redis_url)} ({await _ping_redis(settings.project_redis_url)}, "
-                + f"{await _get_redis_database_count(settings.project_redis_url)} databases -- needs 16000)",
+                + f"{await _get_redis_database_count(settings.project_redis_url)} databases -- needs {PROJECT_REDIS_DATABASES_NEEDED})",
             ),
         ],
     )

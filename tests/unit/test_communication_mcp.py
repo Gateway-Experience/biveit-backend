@@ -80,7 +80,7 @@ async def session_mcp(fake_backend):
     async def notify(method: str) -> None:
         await _write({"jsonrpc": "2.0", "method": method})
 
-    yield {"call": call, "notify": notify, "read": read, "inbox_port": inbox_port, "process": process}
+    yield {"call": call, "notify": notify, "read": read, "write": _write, "inbox_port": inbox_port, "process": process}
     if process.returncode is None:
         process.kill()
         await process.wait()
@@ -101,6 +101,30 @@ async def _initialize(session_mcp) -> dict:
 
 async def _call_tool(session_mcp, name: str, arguments: dict) -> dict:
     return await session_mcp["call"]("tools/call", {"name": name, "arguments": arguments})
+
+
+async def test_it_turns_down_the_discover_probe_so_claude_falls_back_to_initialize(session_mcp):
+    # Claude Code only takes channel notifications on the handshake-era protocol, and opens with a
+    # 2026-07-28 server/discover probe -- answered, it would lock the connection to the newer protocol.
+    await session_mcp["write"](
+        {
+            "jsonrpc": "2.0",
+            "id": "probe",
+            "method": "server/discover",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": {"name": "test", "version": "0"},
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                }
+            },
+        }
+    )
+    refused = await session_mcp["read"]()
+    initialized = await _initialize(session_mcp)
+
+    assert refused["id"] == "probe" and refused["error"]["code"] == -32601
+    assert initialized["capabilities"]["experimental"] == {"claude/channel": {}}
 
 
 async def test_it_is_a_channel_with_the_platforms_tools(session_mcp):

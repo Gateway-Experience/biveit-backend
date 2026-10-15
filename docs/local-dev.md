@@ -61,7 +61,7 @@ docker run -d --name vib3-postgres --restart unless-stopped \
   -p 127.0.0.1:5432:5432 postgres:16
 
 docker run -d --name vib3-redis --restart unless-stopped \
-  -p 127.0.0.1:6379:6379 redis:7 redis-server --databases 16000
+  -p 127.0.0.1:6379:6379 redis:7 redis-server --databases 18000
 
 docker run -d --name vib3-mongo --restart unless-stopped \
   -p 127.0.0.1:27017:27017 mongo:7
@@ -70,7 +70,7 @@ docker run -d --name vib3-mongo --restart unless-stopped \
 - **Postgres** and **Redis** (db 0) are the platform's own.
 - **Mongo** and the rest of Redis are what the users' generated apps use: each project gets its own Redis
   database (dev: db `<project id>`, prod: db `8000 + <project id>`). Redis only has 16 by default, hence
-  `--databases 16000`. Using a Redis you already run? Set `databases 16000` in its config (e.g.
+  `--databases 18000`. Using a Redis you already run? Set `databases 18000` in its config (e.g.
   `/etc/redis/redis.conf`) and restart it, or projects with an id above 15 can't use Redis.
 
 These match the defaults in `.env.example`. If you already run any of them locally on those ports,

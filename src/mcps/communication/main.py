@@ -19,6 +19,7 @@ import os
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Literal
 
+import anyio
 import mcp.types as mcp_types
 from aiohttp import web
 from mcp.server.mcpserver import MCPServer
@@ -41,6 +42,8 @@ _DEFAULT_OUTBOX_URL = "http://localhost:3001"
 # the notification that pushes a message into the session.
 _CHANNEL_CAPABILITY = "claude/channel"
 _CHANNEL_NOTIFICATION = "notifications/claude/channel"
+# The 2026-07-28 protocol's opening probe -- refused, see serve().
+_DISCOVER_METHOD = "server/discover"
 
 _INSTRUCTIONS = (
     "External events and messages are pushed into this session, treat it as a normal user message. You can "
@@ -264,12 +267,34 @@ def to_channel_notification(content: list) -> SessionMessage:
     return SessionMessage(notification)
 
 
+def is_discover_request(message: SessionMessage | Exception) -> bool:
+    """[Pure] Whether this message from Claude is a `server/discover` request."""
+    return (
+        isinstance(message, SessionMessage)
+        and isinstance(message.message, mcp_types.JSONRPCRequest)
+        and message.message.method == _DISCOVER_METHOD
+    )
+
+
+def to_method_not_found(request: mcp_types.JSONRPCRequest) -> SessionMessage:
+    """[Pure] The error answer that tells Claude we don't speak `server/discover`."""
+    error = mcp_types.ErrorData(code=mcp_types.METHOD_NOT_FOUND, message=f"{request.method} is not supported")
+    return SessionMessage(mcp_types.JSONRPCError(jsonrpc="2.0", id=request.id, error=error))
+
+
 async def serve(port: int, outbox_url: str, token: str | None) -> None:
-    """Run the MCP over stdio and the inbox on `port` until Claude closes stdio."""
+    """Run the MCP over stdio and the inbox on `port` until Claude closes stdio.
+
+    Gotcha: this has to stay on the handshake-era protocol (initialize), because Claude Code only takes
+    channel notifications there -- on 2026-07-28+ over stdio it logs "Channel notifications skipped ... no
+    unsolicited notification path" and silently drops every message the inbox pushes. Claude opens with a
+    `server/discover` probe, and the SDK locks a connection to the era of its first request, so we answer
+    that probe ourselves with "method not found" before the SDK sees it. Claude then falls back to
+    initialize, and the SDK serves the connection in the handshake era."""
     await http.connect()
     server = create_server(make_post_to_backend(outbox_url, token))
     lowlevel = server._lowlevel_server  # the SDK only takes experimental capabilities at this level
-    async with stdio_server() as (read_stream, write_stream):
+    async with stdio_server() as (stdio_read_stream, write_stream):
         # Pushes write straight onto the stdio stream the server answers on: a notification needs no request
         # to hang off, and that stream is ours.
         inbox = web.AppRunner(
@@ -277,12 +302,24 @@ async def serve(port: int, outbox_url: str, token: str | None) -> None:
         )
         await inbox.setup()
         await web.TCPSite(inbox, "127.0.0.1", port).start()
+        relay_send_stream, read_stream = anyio.create_memory_object_stream[SessionMessage | Exception](0)
+
+        async def _relay_without_discover() -> None:
+            async with stdio_read_stream, relay_send_stream:
+                async for message in stdio_read_stream:
+                    if is_discover_request(message):
+                        await write_stream.send(to_method_not_found(message.message))
+                    else:
+                        await relay_send_stream.send(message)
+
         try:
-            await lowlevel.run(
-                read_stream,
-                write_stream,
-                lowlevel.create_initialization_options(experimental_capabilities={_CHANNEL_CAPABILITY: {}}),
-            )
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(_relay_without_discover)
+                await lowlevel.run(
+                    read_stream,
+                    write_stream,
+                    lowlevel.create_initialization_options(experimental_capabilities={_CHANNEL_CAPABILITY: {}}),
+                )
         finally:
             await inbox.cleanup()
             await http.close()
