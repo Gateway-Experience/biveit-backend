@@ -20,6 +20,7 @@ Build: the whole process of defining, finalizing specification, writing code, co
 Implement: actually writing code for the website (which will mainly be done by the Agent).
 
 The Building Process: the process of user working with the Agent to build the website, following through the structured steps/stages defined by the platform (of course allowing some degree of freedom). Involves the project building page on the platform.
+- Sometimes when the term `building` might be mentioned as an activity surfaced to the user. For the user it might mean implementing or making updates, and that they should wait will it's in progress. It's something surfaced to the user only, for friendliness reason, but really we're most likely in Implementing stage at that point.
 
 Stage: a stage in the building process. Currently there are 3. See The Building Process below.
 
