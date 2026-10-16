@@ -1,5 +1,5 @@
-# Agent adapter tests (services/agent/adapter). Sessions are found by scanning /proc, so these spawn
-# REAL throwaway processes (`sleep`) inside temp workspaces. Linux-only, like the code under test.
+# Agent adapter tests (services/agent/adapter). Sessions are found by scanning the OS's processes, so these
+# spawn REAL throwaway processes (`sleep`) inside temp workspaces. Linux and macOS, like the code under test.
 # Redis is faked: the lock is a no-op and port reservations live in a set.
 
 import asyncio
@@ -22,8 +22,14 @@ from src.services import devenv
 from src.services.agent import adapter, tokens
 from src.utils import redis
 
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="process discovery reads /proc")
+pytestmark = pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="process discovery is Linux/macOS")
 needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="sessions run inside tmux")
+
+# Stand-in processes are Python, not `sleep`/`sh`: macOS hides the environment of its own system binaries
+# (/bin/*) from other processes, so a `sleep` there would never be recognized as a session. Our venv's
+# Python isn't one of those, and neither is a real `claude`.
+_SLEEP_CODE = "import time; time.sleep(30)"
+_SLEEPER = [sys.executable, "-c", _SLEEP_CODE]
 
 _PROJECT = {"id": 42, "hash": "p42hash", "user_id": 7, "user_hash": "u7hash"}
 _CONVERSATION_ID = 5
@@ -64,13 +70,13 @@ def fake_redis(monkeypatch):
 
 @pytest.fixture
 async def spawn_in():
-    """spawn_in(cwd, env) -> a `sleep` process running there, in its own OS session like a real one
+    """spawn_in(cwd, env) -> a sleeping process running there, in its own OS session like a real one
     (start_session); all are killed at teardown."""
     processes = []
 
     async def _spawn(cwd, env):
         process = await asyncio.create_subprocess_exec(
-            "sleep", "30", cwd=cwd, env={**os.environ, **env}, start_new_session=True
+            *_SLEEPER, cwd=cwd, env={**os.environ, **env}, start_new_session=True
         )
         processes.append(process)
         return process
@@ -115,11 +121,11 @@ def isolated_tmux(monkeypatch):
     shutil.rmtree(socket_dir, ignore_errors=True)
 
 
-def _claude_like(then: str) -> list[str]:
+def _claude_like(then: str = _SLEEP_CODE) -> list[str]:
     """A stand-in session command that behaves like Claude at startup: shows the confirmation prompt and
-    waits for Enter, then runs `then` (shell). `then` must not `exec`: the shell has to stay the running
-    process, since sessions are recognized by their command line (find_session_processes)."""
-    return ["sh", "-c", f'echo "{SESSION_STARTUP_PROMPT}"; read confirmation; echo accepted; {then}']
+    waits for Enter, then runs `then` (Python). It must stay the running process -- sessions are recognized
+    by their command line (find_session_processes) -- so `then` should end by sleeping, not exec."""
+    return [sys.executable, "-c", f"print({SESSION_STARTUP_PROMPT!r}); input(); print('accepted'); {then}"]
 
 
 async def _wait_for_sessions(workspace, count, timeout_seconds=5.0):
@@ -137,7 +143,7 @@ async def _wait_for_sessions(workspace, count, timeout_seconds=5.0):
 
 
 async def test_ensure_session_reuses_the_running_session(workspace, spawn_in, fake_redis, monkeypatch):
-    monkeypatch.setattr(adapter, "SESSION_COMMAND", ["sleep", "30"])  # what spawn_in runs
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _SLEEPER)  # what spawn_in runs
     await spawn_in(workspace, {SESSION_PORT_ENV: "8899"})
 
     async def fail_start(project, conversation_id, port):
@@ -151,16 +157,20 @@ async def test_ensure_session_reuses_the_running_session(workspace, spawn_in, fa
 async def test_ensure_session_ignores_what_the_session_launches(workspace, fake_redis, isolated_tmux, monkeypatch):
     # The session launches things that inherit its cwd and env: a dev server, and a browser that puts
     # itself in its own OS session (setsid -- what Chrome does). Neither runs the session's command.
-    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("sleep 30 & setsid sleep 30 & sleep 30"))
+    launch_children = (
+        "import subprocess, sys; "
+        f"[subprocess.Popen([sys.executable, '-c', {_SLEEP_CODE!r}], start_new_session=own) for own in (False, True)]; "
+    )
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like(launch_children + _SLEEP_CODE))
     port = await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
-    processes = await _wait_for_sessions(workspace, 4)
-    assert len(processes) == 4  # the session shell, and the three sleeps
+    processes = await _wait_for_sessions(workspace, 3)
+    assert len(processes) == 3  # the session, the dev server, and the browser
     assert len(await adapter.find_session_processes(workspace)) == 1
     assert await adapter.ensure_session(_PROJECT, _CONVERSATION_ID) == port  # one session, not TooManySessions
 
 
 async def test_ensure_session_refuses_when_several_are_running(workspace, spawn_in, fake_redis, monkeypatch):
-    monkeypatch.setattr(adapter, "SESSION_COMMAND", ["sleep", "30"])  # two real sessions, as far as it knows
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _SLEEPER)  # two real sessions, as far as it knows
     await spawn_in(workspace, {SESSION_PORT_ENV: "8899"})
     await spawn_in(workspace, {SESSION_PORT_ENV: "8900"})
 
@@ -217,7 +227,7 @@ async def test_claim_free_port_stays_in_the_session_range(fake_redis):
 async def test_started_session_is_found_again(workspace, fake_redis, isolated_tmux, monkeypatch):
     # The launch contract end to end: whatever start_session runs, ensure_session must find it next time --
     # which takes the port reaching the pane (tmux -e) and the pane running in the workspace (tmux -c).
-    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("sleep 30"))
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like())
 
     port = await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
     await _wait_for_sessions(workspace, 1)
@@ -251,8 +261,10 @@ async def test_start_continues_an_existing_claude_conversation(
         transcripts_dir = tmp_path / "claude-projects" / re.sub(r"[^a-zA-Z0-9]", "-", workspace)
         transcripts_dir.mkdir(parents=True)
         (transcripts_dir / "abc.jsonl").write_text("{}")
-    # sh -c '<script>' <extra args>: the first extra arg lands in $0, so the stand-in can echo it.
-    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like('echo "extra:$0"; sleep 30'))
+    # python -c '<code>' <extra args>: the extra args land in sys.argv[1:], so the stand-in can print them.
+    monkeypatch.setattr(
+        adapter, "SESSION_COMMAND", _claude_like(f"import sys; print('extra:' + ' '.join(sys.argv[1:])); {_SLEEP_CODE}")
+    )
     await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
     await asyncio.sleep(0.2)
     pane_text = await adapter._run_tmux("capture-pane", "-p", "-t", f"conv_{_CONVERSATION_ID}")
@@ -261,15 +273,15 @@ async def test_start_continues_an_existing_claude_conversation(
 
 @needs_tmux
 async def test_stop_session_stops_everything_and_is_idempotent(workspace, fake_redis, isolated_tmux, monkeypatch):
-    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("sleep 30"))
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like())
     port = await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
     # Something that outlived its tmux session -- an MCP server whose parent died, say: same workspace,
     # same port in its env, but in no tmux session at all.
     orphan = await asyncio.create_subprocess_exec(
-        "sleep", "30", cwd=workspace, env={**os.environ, SESSION_PORT_ENV: str(port)}, start_new_session=True
+        *_SLEEPER, cwd=workspace, env={**os.environ, SESSION_PORT_ENV: str(port)}, start_new_session=True
     )
-    # The session's shell, the sleep it runs, and the orphan.
-    assert len(await _wait_for_sessions(workspace, 3)) == 3
+    # The session and the orphan.
+    assert len(await _wait_for_sessions(workspace, 2)) == 2
 
     stopped = await adapter.stop_session(_PROJECT, _CONVERSATION_ID)
 
@@ -282,7 +294,11 @@ async def test_stop_session_stops_everything_and_is_idempotent(workspace, fake_r
 async def test_stop_session_sigkills_what_ignores_sigterm(workspace, fake_redis, monkeypatch):
     monkeypatch.setattr(adapter, "SESSION_STOP_WAIT_SECONDS", 0.3)
     stubborn = await asyncio.create_subprocess_exec(
-        "sh", "-c", "trap '' TERM; sleep 30", cwd=workspace, env={**os.environ, SESSION_PORT_ENV: "47001"}
+        sys.executable,
+        "-c",
+        f"import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); {_SLEEP_CODE}",
+        cwd=workspace,
+        env={**os.environ, SESSION_PORT_ENV: "47001"},
     )
     await _wait_for_sessions(workspace, 1)
     await adapter.stop_session(_PROJECT, _CONVERSATION_ID)
@@ -291,7 +307,7 @@ async def test_stop_session_sigkills_what_ignores_sigterm(workspace, fake_redis,
 
 @needs_tmux
 async def test_start_presses_enter_on_the_startup_prompt(workspace, fake_redis, isolated_tmux, monkeypatch):
-    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("sleep 30"))
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like())
     await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
     # ensure_session returned, so Enter was already sent -- the stand-in printed "accepted" after reading it.
     await asyncio.sleep(0.2)
@@ -309,7 +325,7 @@ async def test_start_fails_if_the_prompt_never_shows(workspace, fake_redis, isol
 
 @needs_tmux
 async def test_start_fails_on_a_duplicate_tmux_session(workspace, fake_redis, isolated_tmux, monkeypatch):
-    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like("sleep 30"))
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", _claude_like())
     await adapter._run_tmux("new-session", "-d", "-s", f"conv_{_CONVERSATION_ID}", "sleep 30")  # a leftover
     with pytest.raises(adapter.SessionStartFailed, match="couldn't start"):
         await adapter.start_session(_PROJECT, _CONVERSATION_ID, 8899)

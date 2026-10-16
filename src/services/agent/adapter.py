@@ -6,8 +6,9 @@
 # SESSION_COMMAND, whose cwd is the workspace and whose env has COMMUNICATION_PORT=<port>". (Everything it
 # launches -- MCP servers, dev servers, a browser -- inherits that cwd and env too, but runs some other
 # command, so only the session itself matches.) So nothing can drift out of sync
-# (a crashed session simply stops being found, and the next call starts a fresh one). The cost: the
-# process scan reads /proc, so this is Linux-only.
+# (a crashed session simply stops being found, and the next call starts a fresh one). The process scan
+# goes through psutil, so it works on Linux and macOS alike. It only sees processes we're allowed to read
+# (our own user's), which is all a session ever is.
 
 import asyncio
 import json
@@ -21,6 +22,7 @@ import sys
 import time
 from pathlib import Path
 
+import psutil
 import pydash
 
 from src.config import settings
@@ -71,32 +73,30 @@ class _PortTaken(Exception):
 
 async def get_all_processes(abs_dir: str) -> list[dict]:
     """Every process whose working directory is abs_dir, as {pid, cmdline, environ} (cmdline/environ are
-    lists of strings). Both paths go through realpath, so trailing slashes and symlinks don't matter.
-    Processes we can't read (other users') or that exit mid-scan are skipped."""
+    lists of strings, environ as `NAME=value` entries). Both paths go through realpath, so trailing slashes
+    and symlinks (macOS's /var -> /private/var, say) don't matter. Processes we can't read (other users')
+    or that exit mid-scan are skipped."""
     target_cwd = os.path.realpath(abs_dir)
-    pids = [entry for entry in os.listdir("/proc") if entry.isdigit()]
-    # /proc reads are blocking, and there's one round of them per process on the box.
-    return await asyncio.to_thread(lambda: pydash.compact([_read_process_in_dir(pid, target_cwd) for pid in pids]))
+    # Blocking reads, one round per process on the box -- off the event loop.
+    return await asyncio.to_thread(
+        lambda: pydash.compact([_read_process_in_dir(process, target_cwd) for process in psutil.process_iter()])
+    )
 
 
-def _read_process_in_dir(pid: str, target_cwd: str) -> dict | None:
-    """[Pure-ish] One /proc entry as {pid, cmdline, environ} if its cwd is target_cwd, else None.
-    The cwd check comes first so we only read the env of processes we actually care about."""
-    proc_dir = Path("/proc", pid)
+def _read_process_in_dir(process: psutil.Process, target_cwd: str) -> dict | None:
+    """[Pure-ish] One process as {pid, cmdline, environ} if its cwd is target_cwd, else None. The cwd check
+    comes first so we only read the env of processes we actually care about. On macOS a process's env is
+    the one it STARTED with -- fine here, since a session's port is set at launch and never changes."""
     try:
-        if os.readlink(proc_dir / "cwd") != target_cwd:
+        if os.path.realpath(process.cwd()) != target_cwd:
             return None
         return {
-            "pid": int(pid),
-            "cmdline": _read_nul_separated(proc_dir / "cmdline"),
-            "environ": _read_nul_separated(proc_dir / "environ"),
+            "pid": process.pid,
+            "cmdline": process.cmdline(),
+            "environ": [f"{name}={value}" for name, value in process.environ().items()],
         }
-    except (FileNotFoundError, PermissionError):
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return None
-
-
-def _read_nul_separated(path: Path) -> list[str]:
-    return pydash.compact(path.read_bytes().decode(errors="replace").split("\0"))
 
 
 async def find_processes_in_dir(abs_dir: str, regex: re.Pattern) -> list[dict]:
@@ -172,11 +172,19 @@ def _signal_all(pids: list[int], signal_number: int) -> None:
 
 async def _wait_for_exit(pids: list[int], deadline: float) -> list[int]:
     """Recursive: the pids still alive, checked every 0.1s until none are or the deadline passes."""
-    alive = [pid for pid in pids if os.path.exists(f"/proc/{pid}")]
+    alive = [pid for pid in pids if _is_running(pid)]
     if not alive or time.monotonic() >= deadline:
         return alive
     await asyncio.sleep(0.1)
     return await _wait_for_exit(alive, deadline)
+
+
+def _is_running(pid: int) -> bool:
+    """[Pure-ish] Whether the process is still around. A zombie (exited, not yet reaped) counts as gone."""
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
 
 
 async def _claim_free_port() -> int:

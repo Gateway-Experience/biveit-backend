@@ -4,8 +4,8 @@
 #
 # PASSWORD HANDLING is the one thing to be careful about here: `password_hash` (bcrypt) is stored on the
 # row but left out of every read's column list, so the User interface genuinely never carries it. The
-# single exception is get_auth_by_username, which exists precisely to hand the hash to the auth service
-# and is named so its call sites are greppable. Never widen a normal read to include it.
+# exceptions are get_auth_by_username / get_auth, which exist precisely to hand the hash to the auth
+# service and are named so their call sites are greppable. Never widen a normal read to include it.
 #
 # Writes take only real columns (_WRITABLE_COLUMNS); anything else is dropped. Deciding which of those
 # a CLIENT may set is the service's job (services/users vets FE input) -- this layer trusts its caller.
@@ -82,6 +82,7 @@ async def get_by_platform(platform: str, platform_id: str) -> User | None:
 
 
 _GET_AUTH_BY_USERNAME = "SELECT id, password_hash FROM users WHERE username = $username AND deleted_at IS NULL"
+_GET_AUTH = "SELECT id, password_hash FROM users WHERE id = $user_id AND deleted_at IS NULL"
 
 
 async def get_auth_by_username(username: str) -> dict | None:
@@ -89,6 +90,12 @@ async def get_auth_by_username(username: str) -> dict | None:
     User never exposes. Returns just what the auth service needs to verify a credential (id + the hash),
     or None if no such user. Keep the result inside the auth service; never let the hash travel upward."""
     return await postgres.fetchrow(_GET_AUTH_BY_USERNAME, {"username": username})
+
+
+async def get_auth(user_id: int) -> dict | None:
+    """get_auth_by_username's twin, by id: id + password_hash, or None. Same rule -- the hash stays inside
+    the auth service."""
+    return await postgres.fetchrow(_GET_AUTH, {"user_id": user_id})
 
 
 async def insert(data: dict[str, Any]) -> User:

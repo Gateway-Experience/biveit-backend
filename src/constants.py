@@ -37,6 +37,14 @@ class Charset(StrEnum):
 # The httpOnly cookie carrying the user's access token (utils/auth) -- the session, Passport-style.
 ACCESS_TOKEN_COOKIE = "access_token"
 
+# Password rules + reset. The FE mirrors MIN_PASSWORD_LENGTH (vib3-frontend authForm.ts).
+MIN_PASSWORD_LENGTH = 8
+PASSWORD_RESET_TOKEN_TTL_SECONDS = 30 * 60
+# One reset email per address per window, so the endpoint can't be used to flood someone's inbox.
+PASSWORD_RESET_THROTTLE_SECONDS = 60
+# The FE page the emailed link opens, with ?token=<token> appended.
+PASSWORD_RESET_FE_PATH = "/reset-password"
+
 
 class GoogleLoginError(StrEnum):
     """Codes on the FE redirect when Google login fails: FRONTEND_URL/login?error=<code>."""

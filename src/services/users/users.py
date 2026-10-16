@@ -68,7 +68,7 @@ def to_profile(user_data: dict[str, Any] | None) -> dict[str, Any]:
     return {**pydash.pick(user_data or {}, *_CLIENT_PROFILE_FIELDS), **({"meta": extras} if extras else {})}
 
 
-async def _hash_password(password: str) -> str:
+async def hash_password(password: str) -> str:
     hashed = await asyncio.to_thread(bcrypt.hashpw, password.encode(), bcrypt.gensalt())
     return hashed.decode()
 
@@ -90,7 +90,7 @@ async def register(username: str, password: str, user_data: dict[str, Any] | Non
         {
             **to_profile(user_data),
             **_to_web_identity(username),
-            "password_hash": await _hash_password(password),
+            "password_hash": await hash_password(password),
             "user_type": UserType.USER,
         }
     )
@@ -116,7 +116,7 @@ async def promote_guest(guest: User, username: str, password: str, user_data: di
         {
             **to_profile(user_data),
             **_to_web_identity(username),
-            "password_hash": await _hash_password(password),
+            "password_hash": await hash_password(password),
             "user_type": UserType.USER,
         },
     )

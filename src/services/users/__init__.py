@@ -13,11 +13,13 @@
 # Layout:
 #   users.py   the core: password signup/login, guests, profile edits, the shared sign-in response
 #   google.py  signin_google (from Authlib-verified OIDC claims)
+#   password_reset.py  forgot password: the emailed link, and setting a new password from it
 #
 # Callers import THIS package (`from src.services import users as user_service`), not the files, so the
 # layout can move without touching them. Add to __all__ when a new function is meant for outside use.
 
 from src.services.users.google import GoogleEmailNotVerified, GoogleEmailTaken, signin_google
+from src.services.users.password_reset import InvalidResetToken, request_password_reset, reset_password
 from src.services.users.users import (
     DuplicateUser,
     InvalidCredentials,
@@ -35,12 +37,15 @@ __all__ = [
     "GoogleEmailNotVerified",
     "GoogleEmailTaken",
     "InvalidCredentials",
+    "InvalidResetToken",
     "NotAGuest",
     "UserNotFound",
     "authenticate",
     "promote_guest",
     "register",
     "register_guest",
+    "request_password_reset",
+    "reset_password",
     "signin_google",
     "update",
 ]

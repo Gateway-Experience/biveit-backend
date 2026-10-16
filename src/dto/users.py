@@ -6,9 +6,9 @@
 
 from typing import Any, TypedDict
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
-from src.constants import UserLanguage
+from src.constants import MIN_PASSWORD_LENGTH, UserLanguage
 
 
 class User(TypedDict):
@@ -44,6 +44,19 @@ class RegisterRequest(BaseModel):
 class AuthenticateRequest(BaseModel):
     username: str
     password: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    """POST /user/forgot-password body. `email` is the username."""
+
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    """POST /user/reset-password body: the token from the emailed link, and the new password."""
+
+    token: str
+    password: str = Field(min_length=MIN_PASSWORD_LENGTH)
 
 
 class PromoteRequest(BaseModel):

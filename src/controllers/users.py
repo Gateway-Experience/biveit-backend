@@ -5,6 +5,8 @@
 #   POST  /user/authenticate     (public) log in
 #   POST  /user/register-guest   (public) mint an anonymous guest account
 #   POST  /user/promote          (guest)  the calling guest -> credentialed user, in place
+#   POST  /user/forgot-password  (public) email a password-reset link
+#   POST  /user/reset-password   (public) set a new password from that link, and log in
 # Google login lives in controllers/auth (a redirect flow, not a JSON endpoint).
 # Protocol-only: parse, authenticate, delegate to services/users, map outcomes to HTTP. The guest
 # lifecycle these endpoints expose is explained in services/users.
@@ -15,7 +17,15 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
-from src.dto.users import AuthenticateRequest, PromoteRequest, RegisterRequest, UpdateMeRequest, User
+from src.dto.users import (
+    AuthenticateRequest,
+    ForgotPasswordRequest,
+    PromoteRequest,
+    RegisterRequest,
+    ResetPasswordRequest,
+    UpdateMeRequest,
+    User,
+)
 from src.services import users as user_service
 from src.utils.auth import get_current_user, set_access_cookie
 from src.utils.logging import log_http_error
@@ -103,6 +113,31 @@ async def promote(
         raise HTTPException(status_code=404, detail="USER_NOT_FOUND") from error
     except user_service.DuplicateUser as error:
         raise HTTPException(status_code=400, detail="DUPLICATE_USERNAME") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+    set_access_cookie(response, result["token"])
+    return result
+
+
+@router.post("/user/forgot-password", status_code=204)
+async def forgot_password(body: ForgotPasswordRequest, request: Request) -> None:
+    """Email a reset link if the address has a password account. Always 204, account or not, so this
+    can't be used to find out who has one."""
+    try:
+        await user_service.request_password_reset(body.email)
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.post("/user/reset-password")
+async def reset_password(body: ResetPasswordRequest, request: Request, response: Response) -> dict:
+    """Set a new password from an emailed link, then sign the user in like any other login."""
+    try:
+        result = await user_service.reset_password(body.token, body.password)
+    except user_service.InvalidResetToken as error:
+        raise HTTPException(status_code=400, detail="INVALID_RESET_TOKEN") from error
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error

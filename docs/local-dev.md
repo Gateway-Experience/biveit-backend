@@ -3,10 +3,10 @@
 How to get the whole vib3 platform running on your machine: the backend (this repo), the frontend, and
 the agent sessions that build users' websites.
 
-> **macOS vs Linux.** Everything works on Linux. On macOS the platform runs, but **real agent sessions
-> don't**: the backend finds a conversation's running Claude session by reading `/proc`, which macOS
-> doesn't have. On a Mac, use the mock agent (see [Mock mode](#mock-mode-no-real-agent)), or run the
-> backend inside a Linux VM.
+> **macOS vs Linux.** Both work, real agent sessions included: the backend finds a conversation's
+> running Claude session through psutil, which reads processes on either. One macOS quirk: it hides the
+> environment of Apple's own binaries (`/bin/sleep`, `/bin/sh`...) from other processes, so a session
+> must be a non-system binary -- `claude` is, and the adapter tests use Python stand-ins for that reason.
 
 ## What runs where
 
@@ -163,8 +163,7 @@ started; a stand-in agent answers in the chat instead:
 - `artifact`: writes and shows a file;
 - an attachment: lists the uploads.
 
-It's for working on the chat UI without spending model turns, and it's the way to run the platform on
-macOS.
+It's for working on the chat UI without spending model turns.
 
 ## Things to know
 
