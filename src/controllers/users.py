@@ -1,6 +1,10 @@
 # Intentions: the user + password-auth API.
 #   GET   /me                    (auth)   the current user
 #   PATCH /me                    (auth)   self-service profile edit
+#   POST  /me/password           (auth)   change my password (or set a first one, for Google-only accounts)
+#   PUT   /me/avatar             (auth)   upload my profile picture (multipart `file`)
+#   DELETE /me/avatar            (auth)   back to no profile picture
+#   GET   /avatars/{hash}/{file} (public) an uploaded profile picture
 #   POST  /user/register         (public) sign up with username + password
 #   POST  /user/authenticate     (public) log in
 #   POST  /user/register-guest   (public) mint an anonymous guest account
@@ -15,10 +19,13 @@
 # all login methods land in the same session. The token is still returned in the body for the FE's
 # current localStorage model -- drop it once the FE runs purely on the cookie.
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse
 
+from src.constants import AVATAR_MAX_BYTES
 from src.dto.users import (
     AuthenticateRequest,
+    ChangePasswordRequest,
     ForgotPasswordRequest,
     PromoteRequest,
     RegisterRequest,
@@ -55,11 +62,83 @@ async def update_me(body: UpdateMeRequest, request: Request, user: User = Depend
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
 
 
+@router.post("/me/password", status_code=204)
+async def change_password(
+    body: ChangePasswordRequest, request: Request, user: User = Depends(get_current_user)
+) -> None:
+    """Change the caller's password. 400 WRONG_PASSWORD if the current one doesn't match. The session
+    stays as it is -- the caller is the one who just changed it."""
+    try:
+        await user_service.change_password(user["id"], body.current_password, body.new_password)
+    except user_service.WrongPassword as error:
+        raise HTTPException(status_code=400, detail="WRONG_PASSWORD") from error
+    except user_service.UserNotFound as error:
+        raise HTTPException(status_code=404, detail="USER_NOT_FOUND") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.put("/me/avatar")
+async def upload_avatar(request: Request, file: UploadFile = File(...), user: User = Depends(get_current_user)) -> User:
+    """Make the uploaded image the caller's profile picture; returns the user, bare like GET /me. 400
+    INVALID_AVATAR for anything but a PNG / JPEG / GIF / WebP within the size limit."""
+    try:
+        # One byte over the limit is enough to know it's too big, without reading a huge file whole.
+        return await user_service.save_avatar(user, await file.read(AVATAR_MAX_BYTES + 1))
+    except user_service.InvalidAvatar as error:
+        raise HTTPException(status_code=400, detail="INVALID_AVATAR") from error
+    except user_service.UserNotFound as error:
+        raise HTTPException(status_code=404, detail="USER_NOT_FOUND") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.delete("/me/avatar")
+async def delete_avatar(request: Request, user: User = Depends(get_current_user)) -> User:
+    try:
+        return await user_service.remove_avatar(user)
+    except user_service.UserNotFound as error:
+        raise HTTPException(status_code=404, detail="USER_NOT_FOUND") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.get("/avatars/{user_hash}/{file_name}")
+async def get_avatar(user_hash: str, file_name: str, request: Request) -> FileResponse:
+    """Public, like a Google picture URL: an <img> has to load it, and the random hash + file name make
+    it unguessable. A file never changes (a new upload gets a new name), so it's cacheable for good.
+    nosniff + sandbox: it was checked to be an image on the way in, and must never run as anything else."""
+    try:
+        path, mime = user_service.resolve_avatar_file(user_hash, file_name)
+    except user_service.AvatarNotFound as error:
+        raise HTTPException(status_code=404, detail="AVATAR_NOT_FOUND") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+    return FileResponse(
+        path,
+        media_type=mime,
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "Content-Security-Policy": "sandbox",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+def _with_names(body: RegisterRequest | PromoteRequest) -> dict:
+    """[Pure] The signup's profile data, with the names (top-level, validated fields) folded in."""
+    return {**body.user_data, "first_name": body.first_name, "last_name": body.last_name}
+
+
 @router.post("/user/register")
 async def register(body: RegisterRequest, request: Request, response: Response) -> dict:
     """Sign up with a username and password; returns the user and a token."""
     try:
-        result = await user_service.register(body.username, body.password, body.user_data)
+        result = await user_service.register(body.username, body.password, _with_names(body))
     except user_service.DuplicateUser as error:
         raise HTTPException(status_code=400, detail="DUPLICATE_USERNAME") from error
     except Exception as error:
@@ -106,7 +185,7 @@ async def promote(
     """Promote the CALLING guest to a credentialed user, keeping their id and everything attached to it.
     Which guest comes from the session, never the body -- ids are guessable."""
     try:
-        result = await user_service.promote_guest(user, body.username, body.password, body.user_data)
+        result = await user_service.promote_guest(user, body.username, body.password, _with_names(body))
     except user_service.NotAGuest as error:
         raise HTTPException(status_code=409, detail="NOT_A_GUEST") from error
     except user_service.UserNotFound as error:

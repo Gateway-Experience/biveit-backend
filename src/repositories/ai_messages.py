@@ -88,3 +88,34 @@ async def insert(data: dict[str, Any]) -> AiMessage:
         should_retry=lambda error, _: isinstance(error, asyncpg.UniqueViolationError),
     )
     return cast("AiMessage", inserted)
+
+
+# Everything the user typed to describe their project: the starting form's description (their very first
+# prompt, kept on the project) and the text of their chat messages. Answers to the agent's questions
+# (tool_result blocks) are picks from its own options, so they're left out. One row per project -- its
+# earliest match. No text index yet: this scans the user's own messages, fine while those stay small.
+_FIND_PROMPT_MATCHES = """
+    WITH matches AS (
+        SELECT projects.id AS project_id, projects.bootstrap_data->>'description' AS matched_text, 0 AS seq
+        FROM projects
+        WHERE projects.user_id = $user_id AND projects.deleted_at IS NULL
+          AND projects.bootstrap_data->>'description' ILIKE $pattern ESCAPE '\\'
+        UNION ALL
+        SELECT conversations.project_id, block->>'text', messages.seq
+        FROM ai_conversations conversations
+        JOIN projects ON projects.id = conversations.project_id AND projects.deleted_at IS NULL
+        JOIN ai_messages messages ON messages.conversation_id = conversations.id AND messages.role = 'user'
+        CROSS JOIN LATERAL jsonb_array_elements(messages.content) block
+        WHERE conversations.user_id = $user_id AND conversations.deleted_at IS NULL
+          AND block->>'type' = 'text' AND block->>'text' ILIKE $pattern ESCAPE '\\'
+    )
+    SELECT DISTINCT ON (project_id) project_id, matched_text FROM matches ORDER BY project_id, seq
+"""
+
+
+async def find_prompt_matches(user_id: int, text: str) -> list[dict]:
+    """The user's projects whose prompts contain `text` (case-insensitive, taken literally -- % and _
+    match themselves), as [{project_id, matched_text}] where matched_text is the whole prompt it was
+    found in."""
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return await postgres.fetch(_FIND_PROMPT_MATCHES, {"user_id": user_id, "pattern": f"%{escaped}%"})

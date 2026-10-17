@@ -13,6 +13,9 @@
 -- username and (platform, platform_id) are UNIQUE but nullable: Postgres treats NULLs as distinct, so
 -- any number of guests coexist while real values stay unique.
 -- password_hash is bcrypt, never raw, and NULL for guests and Google-only accounts.
+-- first_name / last_name: what the user goes by, asked for at signup (Google sign-ups take Google's
+-- given/family name). The app shows these instead of the email. last_name can be empty (mononyms, and
+-- Google profiles without one); guests have neither.
 -- language: the one the user picked in the FE's language picker (it saves it here). The agent talks to
 -- them in it.
 -- meta: free-form app-level data, including any FE-sent profile keys that have no column of their own.
@@ -31,7 +34,8 @@ CREATE TABLE IF NOT EXISTS users
     password_hash   varchar(255),
     platform        varchar(32),                           -- WEB | GOOGLE (UserPlatform); NULL for guests
     platform_id     varchar(255),                          -- WEB: the username; GOOGLE: the `sub`
-    full_name       varchar(255),
+    first_name      varchar(100),
+    last_name       varchar(100),
     profile_picture varchar(1000),
     language        varchar(16)  NOT NULL DEFAULT 'en',    -- UserLanguage: the FE's language picker
     tags            text[]       NOT NULL DEFAULT '{}',

@@ -109,6 +109,26 @@ async def post_message(
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
 
 
+@router.post("/conversations/{conversation_id}/resend")
+async def resend_message(conversation_id: int, request: Request, user: User = Depends(get_current_user)) -> AiMessage:
+    """Hands the user's latest message to the agent again, after posting it came back 503
+    (AGENT_UNAVAILABLE: stored, but it didn't get through). Returns that message; nothing new is stored.
+    409 NOTHING_TO_RESEND when the latest message isn't the user's."""
+    try:
+        conversation = await agent_service.get_owned_conversation(conversation_id, user["id"])
+        return await agent_service.resend_last_user_message(conversation)
+    except agent_service.ConversationNotFound as error:
+        raise HTTPException(status_code=404, detail="CONVERSATION_NOT_FOUND") from error
+    except agent_service.NothingToResend as error:
+        raise HTTPException(status_code=409, detail="NOTHING_TO_RESEND") from error
+    except agent_service.SessionUnavailable as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=503, detail="AGENT_UNAVAILABLE") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
 @router.get("/conversations/{conversation_id}/events")
 async def stream_events(
     conversation_id: int,

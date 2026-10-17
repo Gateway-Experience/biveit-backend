@@ -19,10 +19,11 @@ from src.constants import UserType
 from src.dto.users import User
 from src.utils import postgres
 
-# Everything a caller may see. `password_hash` is absent on purpose -- see the module note.
+# Everything a caller may see. `password_hash` is absent on purpose -- see the module note. Only whether
+# there IS one comes out (has_password), so the profile page knows to ask for the current password.
 _COLUMNS = """
-    id, hash, user_type, username, platform, platform_id, full_name, profile_picture, language,
-    tags, meta, created_at, updated_at, deleted_at
+    id, hash, user_type, username, platform, platform_id, first_name, last_name, profile_picture, language,
+    tags, meta, created_at, updated_at, deleted_at, (password_hash IS NOT NULL) AS has_password
 """
 
 # What a caller may write. Anything outside this set is dropped.
@@ -32,7 +33,8 @@ _WRITABLE_COLUMNS = [
     "password_hash",
     "platform",
     "platform_id",
-    "full_name",
+    "first_name",
+    "last_name",
     "profile_picture",
     "language",
     "tags",

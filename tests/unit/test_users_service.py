@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from src.config import settings
 from src.constants import UserType
-from src.dto.users import UpdateMeRequest
+from src.dto.users import RegisterRequest, UpdateMeRequest
 from src.repositories import users as users_repo
 from src.services import users as user_service
 from src.services.users.users import to_profile
@@ -125,15 +125,15 @@ async def test_master_password_is_off_when_unset(monkeypatch):
 
 
 def test_to_profile_never_lets_a_client_pick_a_privileged_column():
-    profile = to_profile({"full_name": "Alice", "platform_id": "victim-sub", "user_type": "USER", "colour": "red"})
+    profile = to_profile({"first_name": "Alice", "platform_id": "victim-sub", "user_type": "USER", "colour": "red"})
     assert profile == {
-        "full_name": "Alice",
+        "first_name": "Alice",
         "meta": {"platform_id": "victim-sub", "user_type": "USER", "colour": "red"},
     }
 
 
 def test_to_profile_without_extras_has_no_meta():
-    assert to_profile({"full_name": "Alice"}) == {"full_name": "Alice"}
+    assert to_profile({"first_name": "Alice"}) == {"first_name": "Alice"}
     assert to_profile(None) == {}
 
 
@@ -145,10 +145,10 @@ async def test_register_vets_user_data(monkeypatch):
         return _user(**data)
 
     monkeypatch.setattr(users_repo, "insert", fake_insert)
-    await user_service.register("alice", "hunter2", {"platform_id": "victim-sub", "full_name": "Alice"})
+    await user_service.register("alice", "hunter2", {"platform_id": "victim-sub", "first_name": "Alice"})
     assert captured["platform_id"] == "alice"  # the WEB identity, not the injected value
     assert captured["platform"] == "WEB"
-    assert captured["full_name"] == "Alice"
+    assert captured["first_name"] == "Alice"
 
 
 # --- the guest lifecycle ---
@@ -267,6 +267,13 @@ async def test_google_existing_sub_signs_in_without_duplicating(fake_repo):
     assert len(repo.rows) == 1
 
 
+async def test_google_leaves_an_uploaded_avatar_alone(fake_repo):
+    uploaded = "/avatars/u7hash/avatar-0123456789abcdef.png"
+    fake_repo([_user(id=7, platform="GOOGLE", platform_id="1234567890", username="a@b.c", profile_picture=uploaded)])
+    result = await user_service.signin_google(_claims(picture="https://new-pic"))
+    assert result["user"]["profile_picture"] == uploaded
+
+
 async def test_google_promotes_the_guest_when_sub_is_new(fake_repo):
     repo = fake_repo([_user(id=3, username=None, user_type=UserType.GUEST, tags=["EARLY"])])
     result = await user_service.signin_google(_claims(), guest_id=3)
@@ -349,3 +356,55 @@ def test_the_language_can_be_set_to_a_supported_one(body, valid):
     else:
         with pytest.raises(ValidationError):
             UpdateMeRequest(**body)
+
+
+# --- names ---
+
+
+def test_signup_needs_a_first_name_but_not_a_last_one():
+    request = RegisterRequest(username="a@b.c", password="password1", first_name="  Ana ")
+    assert (request.first_name, request.last_name) == ("Ana", "")
+    with pytest.raises(ValidationError):
+        RegisterRequest(username="a@b.c", password="password1", first_name="   ")
+    with pytest.raises(ValidationError):
+        RegisterRequest(username="a@b.c", password="password1")
+
+
+def test_profile_edit_refuses_a_null_name():
+    assert UpdateMeRequest(last_name="").model_dump(exclude_unset=True) == {"last_name": ""}
+    with pytest.raises(ValidationError):
+        UpdateMeRequest(first_name=None)
+
+
+# --- change_password ---
+
+
+def _patch_auth(monkeypatch, password_hash):
+    state = {"password_hash": password_hash}
+
+    async def fake_auth(user_id):
+        return {"id": 1, "password_hash": state["password_hash"]} if user_id == 1 else None
+
+    async def fake_update(user_id, updates):
+        state["password_hash"] = updates["password_hash"]
+        return _user()
+
+    monkeypatch.setattr(users_repo, "get_auth", fake_auth)
+    monkeypatch.setattr(users_repo, "update", fake_update)
+    return state
+
+
+async def test_change_password_needs_the_current_one(monkeypatch):
+    state = _patch_auth(monkeypatch, bcrypt.hashpw(b"old-password", bcrypt.gensalt()).decode())
+    with pytest.raises(user_service.WrongPassword):
+        await user_service.change_password(1, "not-it", "new-password")
+    with pytest.raises(user_service.WrongPassword):
+        await user_service.change_password(1, None, "new-password")
+    await user_service.change_password(1, "old-password", "new-password")
+    assert bcrypt.checkpw(b"new-password", state["password_hash"].encode())
+
+
+async def test_a_google_only_account_sets_its_first_password_without_one(monkeypatch):
+    state = _patch_auth(monkeypatch, None)
+    await user_service.change_password(1, None, "first-password")
+    assert bcrypt.checkpw(b"first-password", state["password_hash"].encode())

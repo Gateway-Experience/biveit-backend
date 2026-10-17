@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.app import create_app
 from src.config import settings
+from src.repositories import project_folders as project_folders_repo
 from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
 from src.services import projects as project_service
@@ -28,6 +29,8 @@ def _project(**overrides):
         "bootstrap_data": {},
         "implementation_done_at": None,
         "current_port": None,
+        "pinned_at": None,
+        "folder_id": None,
         "meta": {},
         "created_at": "2026-10-01T00:00:00Z",
         "updated_at": "2026-10-02T00:00:00Z",
@@ -172,3 +175,104 @@ def test_a_workspace_that_fails_to_start_is_503(client, owned_project, monkeypat
     monkeypatch.setattr(project_service, "AGENT_MOCK_REPLIES", False)
     monkeypatch.setattr(agent_service, "ensure_session", broken)
     assert client.post("/api/projects/1/open").status_code == 503
+
+
+# --- PATCH / DELETE /projects/{id} ---
+
+
+def test_rename_trims_the_name_and_counts_as_an_edit(client, owned_project, monkeypatch):
+    calls = {}
+
+    async def fake_update(project_id, updates, expected=None):
+        calls["update"] = (project_id, updates)
+        return _project(name=updates["name"])
+
+    monkeypatch.setattr(projects_repo, "update", fake_update)
+
+    response = client.patch("/api/projects/1", json={"name": "  Perfume shop  "})
+    assert response.status_code == 200
+    assert response.json()["name"] == "Perfume shop"
+    project_id, updates = calls["update"]
+    assert project_id == 1
+    assert updates["name"] == "Perfume shop"
+    assert "updated_at" in updates
+
+
+@pytest.mark.parametrize("body", [{"name": ""}, {"name": "x" * 201}, {"name": "ok", "user_id": 9}, {}])
+def test_rename_rejects_bad_bodies(body, client, owned_project):
+    assert client.patch("/api/projects/1", json=body).status_code == 422
+
+
+def test_pinning_sets_pinned_at_without_counting_as_an_edit(client, owned_project, monkeypatch):
+    updates_seen = []
+
+    async def fake_update(project_id, updates, expected=None):
+        updates_seen.append(updates)
+        return _project(**updates)
+
+    monkeypatch.setattr(projects_repo, "update", fake_update)
+
+    assert client.patch("/api/projects/1", json={"is_pinned": True}).json()["pinned_at"] is not None
+    assert client.patch("/api/projects/1", json={"is_pinned": False}).json()["pinned_at"] is None
+    assert [list(updates) for updates in updates_seen] == [["pinned_at"], ["pinned_at"]]
+
+
+def test_filing_into_a_folder_checks_the_folder_is_the_owners(client, owned_project, monkeypatch):
+    updates_seen = []
+
+    async def fake_find_folders(criteria):
+        return [{"id": 5, "user_id": _CALLER["id"], "name": "Shops"}] if criteria == {"id": 5, "user_id": 7} else []
+
+    async def fake_update(project_id, updates, expected=None):
+        updates_seen.append(updates)
+        return _project(**updates)
+
+    monkeypatch.setattr(project_folders_repo, "find", fake_find_folders)
+    monkeypatch.setattr(projects_repo, "update", fake_update)
+
+    assert client.patch("/api/projects/1", json={"folder_id": 5}).json()["folder_id"] == 5
+    response = client.patch("/api/projects/1", json={"folder_id": 6})
+    assert (response.status_code, response.json()["detail"]) == (404, "FOLDER_NOT_FOUND")
+    # null takes it back out, and needs no folder lookup.
+    assert client.patch("/api/projects/1", json={"folder_id": None}).json()["folder_id"] is None
+    assert updates_seen == [{"folder_id": 5}, {"folder_id": None}]
+
+
+def test_rename_or_delete_someone_elses_project_is_404(client, owned_project):
+    assert client.patch("/api/projects/2", json={"name": "mine now"}).status_code == 404
+    assert client.delete("/api/projects/2").status_code == 404
+
+
+def test_delete_stops_what_runs_then_soft_deletes(client, owned_project, monkeypatch):
+    calls = []
+
+    async def fake_close(project):
+        calls.append(("close", project["id"]))
+        return {}
+
+    async def fake_update(project_id, updates, expected=None):
+        calls.append(("update", project_id, list(updates)))
+        return _project(**updates)
+
+    monkeypatch.setattr(project_service, "close_project", fake_close)
+    monkeypatch.setattr(projects_repo, "update", fake_update)
+
+    assert client.delete("/api/projects/1").status_code == 204
+    assert calls == [("close", 1), ("update", 1, ["deleted_at"])]
+
+
+def test_delete_still_deletes_when_stopping_fails(client, owned_project, monkeypatch):
+    deleted = []
+
+    async def failing_close(project):
+        raise RuntimeError("pm2 is having a bad day")
+
+    async def fake_update(project_id, updates, expected=None):
+        deleted.append(project_id)
+        return _project(**updates)
+
+    monkeypatch.setattr(project_service, "close_project", failing_close)
+    monkeypatch.setattr(projects_repo, "update", fake_update)
+
+    assert client.delete("/api/projects/1").status_code == 204
+    assert deleted == [1]

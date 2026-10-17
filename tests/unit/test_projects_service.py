@@ -4,6 +4,7 @@
 
 import pytest
 
+from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
 from src.services import devenv
 from src.services import projects as projects_service
@@ -215,3 +216,29 @@ async def test_stopping_a_session_clears_the_current_port(monkeypatch, updates):
     await sessions.stop_session({"id": 1, "current_port": 47000}, 5)
     await sessions.stop_session({"id": 2, "current_port": None}, 5)
     assert updates == [(1, {"current_port": None})]
+
+
+# --- search_prompts ---
+
+
+def test_excerpt_shows_the_match_with_some_context():
+    text = "i want a shop selling niche perfumes from brands like Amouage and Diptyque, and also a blog " * 3
+    excerpt = projects_service.to_excerpt(text, "diptyque")
+    assert "Diptyque" in excerpt
+    assert excerpt.startswith("…") and excerpt.endswith("…")
+    assert len(excerpt) < len(text)
+
+
+async def test_search_ignores_too_short_queries_and_trims_whitespace(monkeypatch):
+    calls = []
+
+    async def fake_find(user_id, text):
+        calls.append(text)
+        return [{"project_id": 3, "matched_text": "Selling niche perfumes online"}]
+
+    monkeypatch.setattr(ai_messages_repo, "find_prompt_matches", fake_find)
+    assert await projects_service.search_prompts(7, " a ") == []
+    assert await projects_service.search_prompts(7, "  niche   perfumes ") == [
+        {"project_id": 3, "excerpt": "Selling niche perfumes online"}
+    ]
+    assert calls == ["niche perfumes"]

@@ -63,6 +63,11 @@ class InteractionNotFound(Exception):
     """The submission names an interaction that isn't pending (wrong id, or already answered). 409."""
 
 
+class NothingToResend(Exception):
+    """A resend was asked for, but the conversation's latest message isn't the user's (the agent has
+    already replied, or nothing's been said yet). 409."""
+
+
 # --- Reading ---------------------------------------------------------------------------------------
 
 
@@ -250,17 +255,38 @@ async def post_user_message(conversation: AiConversation, body: dict[str, Any]) 
     )
 
 
+async def resend_last_user_message(conversation: AiConversation) -> AiMessage:
+    """Hand the conversation's latest message to the agent again, if it's the user's, and return it.
+    It's for a message that was stored but never got through (post_user_message's 503: the session was
+    down). Nothing new is stored, so the chat doesn't get a duplicate -- the user just presses "try
+    again" instead of retyping. Raises NothingToResend, or SessionUnavailable if it still can't get through.
+
+    Original purpose: the FE's "try again" banner after a failed delivery."""
+    # The newest page; it may reach back a little (pages never start on an answer), but its last
+    # message is always the latest.
+    latest = pydash.last(await ai_messages_repo.find_before(conversation["id"], None, 1))
+    if not latest or latest["role"] != AiMessageRole.USER:
+        raise NothingToResend("the latest message isn't the user's", {"conversation_id": conversation["id"]})
+    await _deliver(conversation, latest)
+    return latest
+
+
 async def _append_user(conversation: AiConversation, content: list[dict]) -> AiMessage:
-    """Store an (already checked) user message, then hand it to whoever answers: the mock, while
-    AGENT_MOCK_REPLIES is on, or the project's real agent session."""
+    """Store an (already checked) user message, then hand it to whoever answers (_deliver)."""
     user_message = await _append(conversation["id"], AiMessageRole.USER, content)
+    await _deliver(conversation, user_message)
+    return user_message
+
+
+async def _deliver(conversation: AiConversation, user_message: AiMessage) -> None:
+    """Hand a stored user message to whoever answers: the mock, while AGENT_MOCK_REPLIES is on, or the
+    project's real agent session. Raises sessions.SessionUnavailable if the session can't be reached."""
     if not AGENT_MOCK_REPLIES:
         await _send_to_agent(conversation, user_message)
-        return user_message
+        return
     reply = await _get_mock_reply(conversation, user_message)
     if reply:
         spawn(_append_mock_reply(conversation["id"], reply))
-    return user_message
 
 
 async def _send_to_agent(conversation: AiConversation, user_message: AiMessage) -> None:

@@ -4,11 +4,11 @@
 #    returns it except through the one deliberate auth lookup (users.get_auth_by_username).
 #  - The request CONTRACTS (Pydantic) validating untrusted HTTP bodies.
 
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 
-from src.constants import MIN_PASSWORD_LENGTH, UserLanguage
+from src.constants import MIN_PASSWORD_LENGTH, USER_NAME_MAX_LENGTH, UserLanguage
 
 
 class User(TypedDict):
@@ -19,7 +19,8 @@ class User(TypedDict):
     hash: str  # random public handle; names the user's storage folder (see 0001_users.sql)
     username: str | None  # the email; None for guests
     user_type: str  # UserType -- USER | GUEST
-    full_name: str | None
+    first_name: str | None  # None for guests (and accounts from before names were asked for)
+    last_name: str | None  # can be empty: not everyone has one
     profile_picture: str | None
     language: str  # UserLanguage -- the FE's language picker
     platform: str | None  # UserPlatform -- WEB | GOOGLE; None for guests
@@ -29,15 +30,23 @@ class User(TypedDict):
     created_at: Any  # datetime
     updated_at: Any  # datetime
     deleted_at: Any  # datetime | None -- always None on anything a read returns (reads skip deleted rows)
+    has_password: bool  # derived from password_hash (which itself never leaves the repo); False for Google-only
+
+
+# Signup asks for both names; last_name may be blank (not everyone has one). Whitespace is trimmed first.
+_FirstName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=USER_NAME_MAX_LENGTH)]
+_LastName = Annotated[str, StringConstraints(strip_whitespace=True, max_length=USER_NAME_MAX_LENGTH)]
 
 
 class RegisterRequest(BaseModel):
     """POST /user/register body. `user_data` is the free-form profile blob the FE sends alongside the
-    credentials. Only full_name/profile_picture become columns; anything else is kept under `meta`
-    (services/users._to_profile) -- a client can never set a privileged column through it."""
+    credentials. Only the profile columns (services/users.to_profile) are written as such; anything else
+    is kept under `meta` -- a client can never set a privileged column through it."""
 
     username: str
     password: str
+    first_name: _FirstName
+    last_name: _LastName = ""
     user_data: dict[str, Any] = {}
 
 
@@ -66,7 +75,17 @@ class PromoteRequest(BaseModel):
 
     username: str
     password: str
+    first_name: _FirstName
+    last_name: _LastName = ""
     user_data: dict[str, Any] = {}
+
+
+class ChangePasswordRequest(BaseModel):
+    """POST /me/password body. `current_password` is required for an account that has a password, and
+    ignored for one that doesn't yet (Google-only) -- that's how such an account sets its first one."""
+
+    current_password: str | None = None
+    new_password: str = Field(min_length=MIN_PASSWORD_LENGTH)
 
 
 class UpdateMeRequest(BaseModel):
@@ -77,16 +96,18 @@ class UpdateMeRequest(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    full_name: str | None = None
+    first_name: _FirstName | None = None
+    last_name: _LastName | None = None
     profile_picture: str | None = None
     # Sent by the FE's language picker whenever the user switches language.
     language: UserLanguage | None = None
 
-    @field_validator("language")
+    @field_validator("first_name", "last_name", "language")
     @classmethod
-    def _refuse_null_language(cls, language: UserLanguage | None) -> UserLanguage:
-        """Leaving `language` out keeps it as is; an explicit null is refused (422) -- a user always has
-        one. (Validators only run on values actually sent, so the None default is unaffected.)"""
-        if language is None:
-            raise ValueError("language can't be null")
-        return language
+    def _refuse_null(cls, value: Any) -> Any:
+        """Leaving a field out keeps it as is; an explicit null is refused (422) -- a user always has a
+        language and a first name, and "no last name" is an empty one. (Validators only run on values
+        actually sent, so the None defaults are unaffected.)"""
+        if value is None:
+            raise ValueError("can't be null")
+        return value

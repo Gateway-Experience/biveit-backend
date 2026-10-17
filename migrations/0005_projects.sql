@@ -26,6 +26,10 @@
 -- to the agent to start the chat with.
 -- updated_at: when the USER last edited the project (the list sorts by it). Never bumped implicitly --
 -- only user-facing edit flows set it, so system writes (current_port) don't reshuffle the list.
+-- pinned_at: when the user pinned the project to the top of their sidebar; NULL = not pinned. Pinned
+-- projects are listed by it, newest pin first. Organising, not editing: it never touches updated_at.
+-- folder_id: the user's folder it's filed under (project_folders); NULL = not in one. Added by
+-- 0008_project_folders.sql, since that table comes after this one. Same rule: never touches updated_at.
 -- meta: free-form app-level data (settings, flags) until a field earns its own column.
 -- Project content (pages, source files, assets, deployments) belongs in its own tables pointing at
 -- projects.id, not in columns here.
@@ -41,6 +45,7 @@ CREATE TABLE IF NOT EXISTS projects
     bootstrap_data jsonb      NOT NULL DEFAULT '{}',          -- the starting form's answers
     implementation_done_at TIMESTAMPTZ,                        -- NULL until the user signed off a version
     current_port integer,                                      -- NULL until a session has run
+    pinned_at   TIMESTAMPTZ,                                   -- NULL = not pinned
     meta        jsonb        NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),

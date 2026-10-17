@@ -14,10 +14,12 @@
 #   users.py   the core: password signup/login, guests, profile edits, the shared sign-in response
 #   google.py  signin_google (from Authlib-verified OIDC claims)
 #   password_reset.py  forgot password: the emailed link, and setting a new password from it
+#   avatars.py  profile pictures uploaded from the profile page: stored, served, replaced
 #
 # Callers import THIS package (`from src.services import users as user_service`), not the files, so the
 # layout can move without touching them. Add to __all__ when a new function is meant for outside use.
 
+from src.services.users.avatars import AvatarNotFound, InvalidAvatar, remove_avatar, resolve_avatar_file, save_avatar
 from src.services.users.google import GoogleEmailNotVerified, GoogleEmailTaken, signin_google
 from src.services.users.password_reset import InvalidResetToken, request_password_reset, reset_password
 from src.services.users.users import (
@@ -25,7 +27,9 @@ from src.services.users.users import (
     InvalidCredentials,
     NotAGuest,
     UserNotFound,
+    WrongPassword,
     authenticate,
+    change_password,
     promote_guest,
     register,
     register_guest,
@@ -33,19 +37,26 @@ from src.services.users.users import (
 )
 
 __all__ = [
+    "AvatarNotFound",
     "DuplicateUser",
     "GoogleEmailNotVerified",
     "GoogleEmailTaken",
+    "InvalidAvatar",
     "InvalidCredentials",
     "InvalidResetToken",
     "NotAGuest",
     "UserNotFound",
+    "WrongPassword",
     "authenticate",
+    "change_password",
     "promote_guest",
     "register",
     "register_guest",
+    "remove_avatar",
     "request_password_reset",
     "reset_password",
+    "resolve_avatar_file",
+    "save_avatar",
     "signin_google",
     "update",
 ]

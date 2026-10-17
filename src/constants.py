@@ -37,6 +37,21 @@ class Charset(StrEnum):
 # The httpOnly cookie carrying the user's access token (utils/auth) -- the session, Passport-style.
 ACCESS_TOKEN_COOKIE = "access_token"
 
+# Project search (services/projects.search_prompts): the shortest query worth running, and how much of
+# the matching prompt to show around the match, in characters before / after it.
+PROJECT_SEARCH_MIN_LENGTH = 2
+PROJECT_SEARCH_EXCERPT_CONTEXT = (40, 90)
+
+# Profile pictures uploaded from the profile page (services/users/avatars). profile_picture then holds
+# AVATAR_URL_PREFIX/<user hash>/<file>, a path on this API (the FE puts its API base in front); Google's
+# pictures are full URLs, so the prefix also tells the two apart.
+AVATAR_MAX_BYTES = 5 * 1024 * 1024
+AVATAR_URL_PREFIX = "/avatars"
+AVATAR_DIR = "profile"  # inside the user's storage folder
+
+# A user's first / last name: the columns' varchar limit (migrations/0001_users.sql).
+USER_NAME_MAX_LENGTH = 100
+
 # Password rules + reset. The FE mirrors MIN_PASSWORD_LENGTH (vib3-frontend authForm.ts).
 MIN_PASSWORD_LENGTH = 8
 PASSWORD_RESET_TOKEN_TTL_SECONDS = 30 * 60

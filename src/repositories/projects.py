@@ -16,12 +16,13 @@ from src.dto.projects import Project
 from src.utils import postgres
 
 _COLUMNS = """
-    id, hash, user_id, name, description, stage, bootstrap_data, implementation_done_at, current_port, meta,
-    created_at, updated_at, deleted_at
+    id, hash, user_id, name, description, stage, bootstrap_data, implementation_done_at, current_port,
+    pinned_at, folder_id, meta, created_at, updated_at, deleted_at
 """
 
 # `updated_at` IS writable, and never set implicitly: it means "the user last edited this project" (the
-# list sorts by it), so only user-facing edit flows pass it. System writes like current_port must not.
+# list sorts by it), so only user-facing edit flows pass it. System writes like current_port must not, and
+# neither do pinning or filing into a folder -- those organise the list, they don't edit the project.
 _WRITABLE_COLUMNS = [
     "user_id",
     "name",
@@ -30,6 +31,8 @@ _WRITABLE_COLUMNS = [
     "bootstrap_data",
     "implementation_done_at",
     "current_port",
+    "pinned_at",
+    "folder_id",
     "meta",
     "updated_at",
     "deleted_at",

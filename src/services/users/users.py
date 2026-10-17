@@ -27,7 +27,9 @@ __all__ = [
     "InvalidCredentials",
     "NotAGuest",
     "UserNotFound",
+    "WrongPassword",
     "authenticate",
+    "change_password",
     "issue_session",
     "promote_guest",
     "register",
@@ -38,7 +40,7 @@ __all__ = [
 
 # The profile fields a client may set about itself (mirrors dto.users.UpdateMeRequest). Everything else
 # a client sends is kept under `meta`, never written to a column.
-_CLIENT_PROFILE_FIELDS = ["full_name", "profile_picture"]
+_CLIENT_PROFILE_FIELDS = ["first_name", "last_name", "profile_picture"]
 
 
 class InvalidCredentials(Exception):
@@ -49,6 +51,11 @@ class InvalidCredentials(Exception):
 class UserNotFound(Exception):
     """A user the caller named doesn't exist -- a master-password lookup that matched nothing, or a
     user deleted mid-request. 404."""
+
+
+class WrongPassword(Exception):
+    """A password change gave the wrong current password. 400 -- the caller is signed in, so unlike a
+    failed login it's fine to say exactly what was wrong."""
 
 
 class NotAGuest(Exception):
@@ -157,6 +164,21 @@ async def authenticate(username: str, password: str) -> dict:
     if user is None:
         raise UserNotFound("no such user", {"username": username})
     return issue_session(user)
+
+
+async def change_password(user_id: int, current_password: str | None, new_password: str) -> None:
+    """Set a signed-in user's new password, from their profile page. An account that has a password must
+    give it (WrongPassword otherwise); one that has none yet (Google-only) is setting its first, so
+    there's nothing to check -- they're already signed in. UserNotFound if the row vanished.
+
+    Changing the hash also spends any password-reset link still out there (see password_reset)."""
+    auth_row = await users_repo.get_auth(user_id)
+    if auth_row is None:
+        raise UserNotFound("no such user", {"user_id": user_id})
+    if auth_row.get("password_hash") and not await _check_password(current_password or "", auth_row["password_hash"]):
+        raise WrongPassword("current password doesn't match", {"user_id": user_id})
+    if await users_repo.update(user_id, {"password_hash": await hash_password(new_password)}) is None:
+        raise UserNotFound("no such user", {"user_id": user_id})
 
 
 async def update(user_id: int, updates: dict[str, Any]) -> User:

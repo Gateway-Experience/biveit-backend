@@ -16,8 +16,9 @@ from typing import Any
 
 import pydash
 
-from src.constants import UserPlatform, UserType
+from src.constants import USER_NAME_MAX_LENGTH, UserPlatform, UserType
 from src.repositories import users as users_repo
+from src.services.users.avatars import is_uploaded_avatar
 from src.services.users.users import issue_session
 
 
@@ -46,6 +47,9 @@ async def signin_google(claims: dict[str, Any], guest_id: int | None = None) -> 
 
     existing = await users_repo.get_by_platform(UserPlatform.GOOGLE, claims["sub"])
     if existing:
+        # Keep Google's picture current -- unless the user uploaded their own, which wins.
+        if is_uploaded_avatar(existing.get("profile_picture")):
+            return {**issue_session(existing), "is_new": False}
         refreshed = await users_repo.update(existing["id"], {"profile_picture": claims.get("picture")})
         return {**issue_session(refreshed or existing), "is_new": False}
 
@@ -58,7 +62,10 @@ async def signin_google(claims: dict[str, Any], guest_id: int | None = None) -> 
     signup = {
         "platform": UserPlatform.GOOGLE,
         "platform_id": claims["sub"],
-        "full_name": claims.get("name"),
+        # Google's own split of the name. family_name is often missing (single-name profiles) -> "".
+        # Cut to the columns' size: Google doesn't promise a length, and an overflow would fail the login.
+        "first_name": (claims.get("given_name") or claims.get("name") or "")[:USER_NAME_MAX_LENGTH],
+        "last_name": (claims.get("family_name") or "")[:USER_NAME_MAX_LENGTH],
         "profile_picture": claims.get("picture"),
         "user_type": UserType.USER,
         "username": claims["email"],

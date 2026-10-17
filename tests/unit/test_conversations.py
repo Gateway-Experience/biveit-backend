@@ -260,6 +260,32 @@ async def test_an_abort_closes_the_question_without_a_reply(client, db):
     assert (await _say_and_settle(client, db, conversation_id, "back to chatting")).status_code == 201
 
 
+async def test_resend_hands_the_latest_user_message_over_again_without_storing_a_copy(client, db):
+    conversation_id = _open_conversation(client)
+    _say(client, conversation_id, "make it blue")
+    # Pretend that first delivery never got through: drop the mock's reply (closed, so it isn't left unawaited).
+    for job in db["spawned"]:
+        job.close()
+    db["spawned"] = []
+
+    response = client.post(f"/api/conversations/{conversation_id}/resend")
+    assert response.status_code == 200
+    assert response.json()["content"] == [{"type": "text", "text": "make it blue"}]
+    await _settle(db)
+    assert [(m["role"], m["content"][0]["text"]) for m in db["messages"]] == [
+        ("user", "make it blue"),
+        ("assistant", "(mock agent) You said: make it blue"),
+    ]
+
+
+async def test_resend_is_409_once_the_agent_has_replied(client, db):
+    conversation_id = _open_conversation(client)
+    await _say_and_settle(client, db, conversation_id, "hello")
+    response = client.post(f"/api/conversations/{conversation_id}/resend")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "NOTHING_TO_RESEND"
+
+
 async def test_submission_to_an_unknown_interaction_is_409(client, db):
     conversation_id = _open_conversation(client)
     await _say_and_settle(client, db, conversation_id, "question")

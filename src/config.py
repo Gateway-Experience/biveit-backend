@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     s3_bucket: str = ""
-    # Email -- the From address for outgoing mail (utils/aws/ses), e.g. "Vib3 <no-reply@example.com>". It (or its
+    # Email -- the From address for outgoing mail (utils/aws/ses), e.g. "VibeIt <no-reply@example.com>". It (or its
     # domain) must be verified in SES. Empty -> nothing is sent; locally, the password-reset link is printed to
     # the log instead so the flow can still be tried.
     email_from: str = ""
