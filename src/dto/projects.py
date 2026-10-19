@@ -23,7 +23,7 @@ class Project(TypedDict):
     implementation_done_at: Any  # datetime | None
     current_port: int | None  # last seen agent-session port; bookkeeping, can be stale (see 0005_projects.sql)
     pinned_at: Any  # datetime | None -- when the user pinned it to the top of their sidebar
-    # The folder it's filed under, or None. Can point at a since-deleted folder: that counts as none.
+    # The folder it sits directly in, or None (the root). Always a live folder: deleting one clears this.
     folder_id: int | None
     meta: dict[str, Any]
     created_at: Any  # datetime
@@ -69,17 +69,39 @@ class ProjectFolder(TypedDict):
 
     id: int
     user_id: int  # the owner
+    parent_id: int | None  # the folder it sits in; None = the root
     name: str
     created_at: Any  # datetime
     updated_at: Any  # datetime
     deleted_at: Any  # datetime | None -- always None on anything a read returns
 
 
-class SaveProjectFolderRequest(BaseModel):
-    """POST /project-folders and PATCH /project-folders/{id} body: the folder's name -- all there is to
-    a folder. extra="forbid", same reason as CreateProjectRequest."""
+# 200 = the column's varchar limit. Trimmed first, so a name of only spaces is refused.
+_FolderName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+
+
+class CreateProjectFolderRequest(BaseModel):
+    """POST /project-folders body: the new folder's name, and the folder to make it in (omitted or null =
+    the root). extra="forbid", same reason as CreateProjectRequest."""
 
     model_config = {"extra": "forbid"}
 
-    # 200 = the column's varchar limit. Trimmed first, so a name of only spaces is refused.
-    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    name: _FolderName
+    parent_id: int | None = None
+
+
+class UpdateProjectFolderRequest(BaseModel):
+    """PATCH /project-folders/{id} body: rename it, move it (parent_id; null = to the root), or both. Send
+    only what changes; an omitted field is left alone. extra="forbid", same reason as CreateProjectRequest."""
+
+    model_config = {"extra": "forbid"}
+
+    name: _FolderName | None = None
+    parent_id: int | None = None
+
+    @model_validator(mode="after")
+    def _refuse_empty(self) -> "UpdateProjectFolderRequest":
+        """Same as UpdateProjectRequest's: an edit that changes nothing is a FE bug, so 422."""
+        if not self.model_fields_set:
+            raise ValueError("nothing to update")
+        return self

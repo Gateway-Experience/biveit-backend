@@ -28,8 +28,9 @@
 -- only user-facing edit flows set it, so system writes (current_port) don't reshuffle the list.
 -- pinned_at: when the user pinned the project to the top of their sidebar; NULL = not pinned. Pinned
 -- projects are listed by it, newest pin first. Organising, not editing: it never touches updated_at.
--- folder_id: the user's folder it's filed under (project_folders); NULL = not in one. Added by
--- 0008_project_folders.sql, since that table comes after this one. Same rule: never touches updated_at.
+-- folder_id: the user's folder it sits directly in (project_folders); NULL = at the root. Always a live
+-- folder or NULL: deleting a folder clears it. Added by 0008_project_folders.sql, since that table comes
+-- after this one. Same rule: never touches updated_at.
 -- meta: free-form app-level data (settings, flags) until a field earns its own column.
 -- Project content (pages, source files, assets, deployments) belongs in its own tables pointing at
 -- projects.id, not in columns here.
