@@ -129,6 +129,11 @@ CLAUDE_PROJECTS_DIR = "~/.claude/projects"
 SESSION_TRUST_PROMPT = "Yes, I trust this folder"
 SESSION_STARTUP_PROMPT = "I am using this for local development"
 SESSION_STARTUP_PROMPT_WAIT_SECONDS = 30
+# A session that dies during startup is started again, up to this many attempts in all, this long apart.
+# It happens on a brand-new workspace's first launch, around the trust dialog, and a second launch gets
+# through -- so we retry rather than make the user press "Try again". Kept well inside SESSION_LOCK_TTL_SECONDS.
+SESSION_START_ATTEMPTS = 5
+SESSION_START_RETRY_WAIT_SECONDS = 2
 # Sessions listen on a random port from this range (inclusive). The ranges below it belong to the
 # projects' apps, one fixed port each: dev backend 8000 + project id, dev frontend 16000 + id, prod
 # backend 24000 + id -- so a server fits ids below 8000. Everything else (db, redis, our API) stays

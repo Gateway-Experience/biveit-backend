@@ -191,6 +191,51 @@ async def test_ensure_session_starts_one_on_a_reserved_port(workspace, fake_redi
     assert f"agent_session_port:{port}" in fake_redis
 
 
+async def test_ensure_session_restarts_a_session_that_died_on_startup(workspace, fake_redis, monkeypatch):
+    attempted_ports = []
+
+    async def die_twice(project, conversation_id, port):
+        attempted_ports.append(port)
+        if len(attempted_ports) <= 2:
+            raise adapter.SessionDiedOnStartup("died")
+
+    monkeypatch.setattr(adapter, "start_session", die_twice)
+    monkeypatch.setattr(adapter, "SESSION_START_RETRY_WAIT_SECONDS", 0)
+
+    port = await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
+    assert attempted_ports == [port, port, port]
+
+
+async def test_ensure_session_gives_up_after_the_last_start_attempt(workspace, fake_redis, monkeypatch):
+    attempted_ports = []
+
+    async def always_die(project, conversation_id, port):
+        attempted_ports.append(port)
+        raise adapter.SessionDiedOnStartup("died")
+
+    monkeypatch.setattr(adapter, "start_session", always_die)
+    monkeypatch.setattr(adapter, "SESSION_START_RETRY_WAIT_SECONDS", 0)
+
+    with pytest.raises(adapter.SessionDiedOnStartup):
+        await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
+    assert len(attempted_ports) == adapter.SESSION_START_ATTEMPTS
+
+
+async def test_ensure_session_doesnt_retry_other_start_failures(workspace, fake_redis, monkeypatch):
+    attempted_ports = []
+
+    async def never_prompt(project, conversation_id, port):
+        attempted_ports.append(port)
+        raise adapter.SessionStartFailed("never showed its startup prompt")
+
+    monkeypatch.setattr(adapter, "start_session", never_prompt)
+    monkeypatch.setattr(adapter, "SESSION_START_RETRY_WAIT_SECONDS", 0)
+
+    with pytest.raises(adapter.SessionStartFailed, match="never showed"):
+        await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
+    assert len(attempted_ports) == 1
+
+
 async def test_claim_free_port_retries_past_busy_and_reserved_ports(fake_redis, monkeypatch):
     # Picks: one already reserved, one some other process holds, then a free one.
     picks = iter([50001, 50002, 50003])
@@ -321,6 +366,13 @@ async def test_start_fails_if_the_prompt_never_shows(workspace, fake_redis, isol
     monkeypatch.setattr(adapter, "SESSION_STARTUP_PROMPT_WAIT_SECONDS", 2)
     with pytest.raises(adapter.SessionStartFailed, match="never showed"):
         await adapter.ensure_session(_PROJECT, _CONVERSATION_ID)
+
+
+@needs_tmux
+async def test_start_reports_a_session_that_exits_during_startup(workspace, fake_redis, isolated_tmux, monkeypatch):
+    monkeypatch.setattr(adapter, "SESSION_COMMAND", ["true"])  # exits right away, taking its pane with it
+    with pytest.raises(adapter.SessionDiedOnStartup):
+        await adapter.start_session(_PROJECT, _CONVERSATION_ID, 8899)
 
 
 @needs_tmux

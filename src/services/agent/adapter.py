@@ -39,6 +39,8 @@ from src.constants import (
     SESSION_PORT_LOCK_TTL_SECONDS,
     SESSION_PORT_MAX_ATTEMPTS,
     SESSION_PORT_RANGE,
+    SESSION_START_ATTEMPTS,
+    SESSION_START_RETRY_WAIT_SECONDS,
     SESSION_STARTUP_PROMPT,
     SESSION_STARTUP_PROMPT_WAIT_SECONDS,
     SESSION_STOP_WAIT_SECONDS,
@@ -65,6 +67,11 @@ class TooManySessions(Exception):
 
 class SessionStartFailed(Exception):
     """The session couldn't be brought up: tmux refused, or it never got to (or past) its startup prompt."""
+
+
+class SessionDiedOnStartup(SessionStartFailed):
+    """The session exited before getting past its startup screens (its tmux pane is gone). Nothing of it
+    is left running, so ensure_session just starts it again."""
 
 
 class _PortTaken(Exception):
@@ -118,7 +125,11 @@ async def ensure_session(project: Project, conversation_id: int) -> int:
     workspace, so two tabs opening the same conversation at once can't both start a session.
 
     The port comes back as soon as the process is launched. Whether it's LISTENING yet is the caller's
-    problem: connect with a retry."""
+    problem: connect with a retry.
+
+    A session that dies during startup (SessionDiedOnStartup) is started again, see SESSION_START_ATTEMPTS.
+    Other start failures aren't retried: a session stuck before its prompt is still there, and another
+    start would only hit a duplicate tmux session."""
     async with redis.lock(f"agent_session:{conversation_id}", SESSION_LOCK_TTL_SECONDS, SESSION_LOCK_WAIT_SECONDS):
         pwd = devenv.get_conversation_dir(project, conversation_id)
         sessions = await find_session_processes(pwd)
@@ -133,7 +144,12 @@ async def ensure_session(project: Project, conversation_id: int) -> int:
             retries=SESSION_PORT_MAX_ATTEMPTS,
             should_retry=lambda error, _: isinstance(error, _PortTaken),
         )
-        await start_session(project, conversation_id, port)
+        await with_retries(
+            lambda: start_session(project, conversation_id, port),
+            retries=SESSION_START_ATTEMPTS,
+            calculate_backoff=lambda _: SESSION_START_RETRY_WAIT_SECONDS,
+            should_retry=lambda error, _: isinstance(error, SessionDiedOnStartup),
+        )
         return port
 
 
@@ -290,7 +306,8 @@ async def _accept_startup_prompt(tmux_session: str) -> None:
     """Answer Claude's startup screens in the session's terminal (see SESSION_TRUST_PROMPT /
     SESSION_STARTUP_PROMPT): the folder-trust dialog if it shows, then the development-channels
     confirmation. Raises SessionStartFailed if the confirmation hasn't shown within
-    SESSION_STARTUP_PROMPT_WAIT_SECONDS, or the pane is gone (the session died during startup)."""
+    SESSION_STARTUP_PROMPT_WAIT_SECONDS, or SessionDiedOnStartup if the pane is gone (the session died
+    during startup)."""
     await _answer_startup_screens(tmux_session, time.monotonic() + SESSION_STARTUP_PROMPT_WAIT_SECONDS)
 
 
@@ -301,7 +318,10 @@ async def _answer_startup_screens(tmux_session: str, deadline: float, trust_answ
     `trust_answered`: whether we've already answered the trust dialog. It's answered at most ONCE -- the
     screen can still show it for a moment after (or, in a plain terminal, keep it scrolled up), and
     answering again would send Down+Enter into the NEXT prompt, which selects "Exit"."""
-    pane_text = await _run_tmux("capture-pane", "-p", "-t", tmux_session)
+    try:
+        pane_text = await _run_tmux("capture-pane", "-p", "-t", tmux_session)
+    except SessionStartFailed as error:
+        raise SessionDiedOnStartup(f"{tmux_session} exited during startup") from error
     if SESSION_STARTUP_PROMPT in pane_text:
         await _run_tmux("send-keys", "-t", tmux_session, "Enter")
         return
