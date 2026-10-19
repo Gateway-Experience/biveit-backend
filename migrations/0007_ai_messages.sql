@@ -5,6 +5,10 @@
 -- content is the API's own array of content blocks (text, thinking, tool_use, tool_result, image, ...),
 -- stored VERBATIM -- no type whitelist. Some blocks are opaque state the API wants back byte-for-byte
 -- (thinking signatures, compaction), so flattening or filtering would break replaying the conversation.
+-- One platform-only block type lives here too: `signal` ({type, slug, description?, meta?}, alone in an
+-- assistant message) -- a timestamped marker like BUILDING or IMPLEMENTATION_DONE that the FE reads state
+-- off (see AiSignal in constants.py). The LLM API knows no such block: a replay of the conversation into
+-- an API must drop them.
 -- seq numbers messages 1, 2, 3... within a conversation. UNIQUE (conversation_id, seq) doubles as the
 -- concurrency guard: two writers racing for the same next seq can't both win.
 -- model / stop_reason / usage are the facts the API returns with an assistant message (NULL otherwise);

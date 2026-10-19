@@ -1,19 +1,21 @@
 # Intentions: the communication MCP -- how an agent session talks to the user and to the platform. Claude
 # loads it as a development channel (SESSION_COMMAND), which lets it do two things over one stdio
 # connection:
-#   out of the session:  tools the agent calls. send_message posts its messages for the user; the others
-#                        ask the platform for things (set up the dev environment, control the dev
-#                        servers, the building flag, implementing done). Each posts to an /api/agent/...
-#                        endpoint (controllers/agent) with the session's token.
+#   out of the session:  tools the agent calls. send_message posts its messages for the user (text, plus
+#                        questions or actions for them to answer), send_signal records a signal in the
+#                        chat's log (BUILDING...), dev_servers controls the project's dev servers. Each
+#                        posts to an /api/agent/... endpoint (controllers/agent) with the session's token.
 #   into the session:    an HTTP listener on COMMUNICATION_PORT. Whatever the backend POSTs there
-#                        ({content: [...]}) is pushed into Claude as a channel notification, which it
-#                        treats like a user message (services/agent/sessions.send).
+#                        ({content: [...]}, with the session's token as bearer) is pushed into Claude as
+#                        a channel notification, which it treats like a user message
+#                        (services/agent/sessions.send). Anything without the token is refused.
 #
 # Run by the session's MCP config (services/agent/adapter writes it): python -m src.mcps.communication.main
-# with this repo on PYTHONPATH. Reads COMMUNICATION_PORT, COMMUNICATION_OUTBOX_URL, COMMUNICATION_OUTBOX_TOKEN.
+# with this repo on PYTHONPATH. Reads COMMUNICATION_PORT, COMMUNICATION_OUTBOX_URL, COMMUNICATION_TOKEN.
 # Exits when Claude closes stdio.
 
 import asyncio
+import hmac
 import json
 import os
 from collections.abc import Awaitable, Callable
@@ -29,10 +31,12 @@ from mcp.shared.message import SessionMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.constants import (
+    AGENT_SIGNALS,
     COMMUNICATION_MCP_NAME,
-    SESSION_OUTBOX_TOKEN_ENV,
     SESSION_OUTBOX_URL_ENV,
     SESSION_PORT_ENV,
+    SESSION_TOKEN_ENV,
+    AgentAction,
     DevServerAction,
 )
 from src.utils import http
@@ -62,7 +66,9 @@ _INSTRUCTIONS = (
     "same order. "
     'An answer to a question is { status: "submitted", value: { selected: [selected option texts], custom: '
     "typed answer or null } }. "
-    'An answer to an action is { status: "submitted", value: whatever the action returned }. '
+    'An answer to an action is { status: "submitted", value: { decision: "approved" | "iterate" } } -- the user '
+    "clicked Approve or Keep iterating. An approval takes effect on the platform's side by itself (approving the "
+    "spec starts implementing, approving the implementation signs it off): you only ask, and hear the answer. "
     'Any question or action can instead be answered with { status: "aborted" } (the user aborted at this item) '
     'or { status: "skipped" } (the item was skipped, intentionally or because an earlier abort ended the '
     "batch). Treat aborted and skipped items as unanswered; do not assume a choice for them."
@@ -91,8 +97,15 @@ class Question(BaseModel):
 class Action(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(description="Action name")  # TODO: restrict name/params once the action list is provided
-    params: dict[str, Any] = Field(description="Action parameters")
+    name: AgentAction = Field(
+        description=(
+            "APPROVE_SPEC: ask the user to approve the spec -- approving starts implementing (the dev environment "
+            "gets set up and you'll get a message when it's ready). APPROVE_IMPLEMENTATION: ask the user to sign off "
+            "the implemented site (only once implementing has started) -- approving offers them payment and "
+            "deployment. The user sees Approve / Keep iterating buttons."
+        )
+    )
+    params: dict[str, Any] = Field(default_factory=dict, description="Action parameters (none for now)")
 
 
 class QuestionsInput(BaseModel):
@@ -167,20 +180,6 @@ def create_server(post_to_backend: PostToBackend) -> MCPServer:
 
     @server.tool(
         description=(
-            "Call this once the plan is agreed with the user and you are ready to start building. It sets up the "
-            "project's app (backend/ and frontend/ from the boilerplate, their env files, dependencies, and both "
-            "dev servers). It only starts the setup: end your turn after calling it. A message will arrive over "
-            'this channel when it is done -- "[Dev environment ready]" with the ports, the dev server processes, '
-            'their log files and the site URL, or "[Dev environment failed]" with the reason. Only start '
-            "implementing after the ready message. Calling it again is safe: it keeps whatever was already set up."
-        )
-    )
-    async def start_implementation() -> str:
-        await post_to_backend("/api/agent/devenv", None)
-        return "Setup started. End your turn and wait for the message saying how it went."
-
-    @server.tool(
-        description=(
             "Check, start, restart or stop this project's dev servers (its backend and its frontend), which are "
             "managed for you -- never run pm2 yourself, other projects share it. Both servers already reload on "
             "save; restart only when one is stuck, crashed, or needs to pick up an env change. Their logs are the "
@@ -195,34 +194,28 @@ def create_server(post_to_backend: PostToBackend) -> MCPServer:
 
     @server.tool(
         description=(
-            "Tell the user's screen you're in the middle of a big change (the first build, a new feature, a "
-            "redesign), so it shows the site as being built while the preview may be half-done. Small tweaks "
-            "don't need it. Call it with active: true when you start (with a one-line summary of what you're "
-            "building), and ALWAYS with active: false when you're done -- progress messages to the user in "
-            "between don't end it. It switches itself off after an hour, so for a longer build call active: true "
-            "again to keep it on."
+            "Record a signal in the chat: a timestamped marker the user's screen reacts to, not a message. "
+            "BUILDING: you're starting a big change (the first build, a new feature, a redesign), so the screen "
+            "shows the site as being built while the preview may be half-done -- give a one-line description of "
+            "what you're building. Small tweaks don't need it. BUILDING_DONE: the big change is done -- ALWAYS "
+            "send it when you finish; progress messages to the user in between don't end it."
         )
     )
-    async def building(
-        active: Annotated[bool, Field(description="true: a big change is starting (or still going); false: it's done")],
-        summary: Annotated[
-            str | None, Field(max_length=200, description="One line on what you're building, shown to the user")
+    async def send_signal(
+        # A Literal built from AGENT_SIGNALS, so the schema offers the agent only its own signals and stays in
+        # step with the list. Type checkers can't follow a computed Literal, hence the ignore.
+        slug: Annotated[
+            Literal[tuple(AGENT_SIGNALS)], Field(description="Which signal")  # type: ignore[valid-type]
+        ],
+        description: Annotated[
+            str | None,
+            Field(max_length=200, description="BUILDING: one line on what you're building, shown to the user"),
         ] = None,
     ) -> str:
-        await post_to_backend("/api/agent/building", {"active": active, **({"summary": summary} if summary else {})})
-        return "Building status on." if active else "Building status off."
-
-    @server.tool(
-        description=(
-            "Call this once the user has confirmed they're happy with the implemented site. It records that the "
-            "project has a finished version, so the user is offered payment and deployment from now on (even if "
-            "they later want more changes), and it turns the building status off. Only after implementing has "
-            "started; calling it again is harmless."
+        await post_to_backend(
+            "/api/agent/signals", {"slug": slug, **({"description": description} if description else {})}
         )
-    )
-    async def implementing_done() -> str:
-        await post_to_backend("/api/agent/implementing-done", None)
-        return "Recorded: the user signed off this version."
+        return f"Signal {slug} recorded."
 
     return server
 
@@ -245,10 +238,15 @@ def make_post_to_backend(outbox_url: str, token: str | None) -> PostToBackend:
 # --- the inbox: messages pushed into the session --------------------------------------------------
 
 
-def create_inbox(push: Callable[[list], Awaitable[None]]) -> web.Application:
-    """The HTTP app on COMMUNICATION_PORT: a POST with {content: [...]} pushes it into the session (202)."""
+def create_inbox(push: Callable[[list], Awaitable[None]], token: str | None) -> web.Application:
+    """The HTTP app on COMMUNICATION_PORT: a POST with {content: [...]} pushes it into the session (202).
+    It must carry `Bearer <token>` (the session's own token) or it's a 401 and nothing is pushed -- the
+    port alone is guessable, and any process on the box can reach it. Fail closed: with no token, every
+    push is refused."""
 
     async def _receive(request: web.Request) -> web.Response:
+        if not is_authorized(request.headers.get("Authorization", ""), token):
+            return web.Response(status=401, text="unauthorized\n")
         body = await request.json()
         await push(body["content"])
         return web.Response(status=202, text="pushed\n")
@@ -256,6 +254,12 @@ def create_inbox(push: Callable[[list], Awaitable[None]]) -> web.Application:
     app = web.Application()
     app.router.add_post("/{path:.*}", _receive)  # any path, like the original; other methods get a 405
     return app
+
+
+def is_authorized(authorization: str, token: str | None) -> bool:
+    """[Pure] Whether an Authorization header is `Bearer <token>`. Constant-time, so timing can't leak the
+    token a byte at a time. Never true without a token."""
+    return bool(token) and hmac.compare_digest(authorization.encode(), f"Bearer {token}".encode())
 
 
 def to_channel_notification(content: list) -> SessionMessage:
@@ -298,7 +302,8 @@ async def serve(port: int, outbox_url: str, token: str | None) -> None:
         # Pushes write straight onto the stdio stream the server answers on: a notification needs no request
         # to hang off, and that stream is ours.
         inbox = web.AppRunner(
-            create_inbox(lambda content: write_stream.send(to_channel_notification(content))), access_log=None
+            create_inbox(lambda content: write_stream.send(to_channel_notification(content)), token),
+            access_log=None,
         )
         await inbox.setup()
         await web.TCPSite(inbox, "127.0.0.1", port).start()
@@ -330,6 +335,6 @@ if __name__ == "__main__":
         serve(
             int(os.environ[SESSION_PORT_ENV]),
             os.environ.get(SESSION_OUTBOX_URL_ENV, _DEFAULT_OUTBOX_URL),
-            os.environ.get(SESSION_OUTBOX_TOKEN_ENV),
+            os.environ.get(SESSION_TOKEN_ENV),
         )
     )

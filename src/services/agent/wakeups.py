@@ -4,8 +4,8 @@
 # (a message's seq) for the message log. Best effort, like all pub/sub -- a lost one only delays a tab
 # until its next periodic check or reconnect.
 #
-# Its own file so everything that changes what tabs show can wake them (conversations, building,
-# devenvs) without importing each other.
+# Its own file so everything that changes what tabs show can wake them (conversations, signals,
+# devenvs, implementation) without importing each other.
 
 from src.constants import DEVENV_WAKEUP
 from src.utils import redis
@@ -26,6 +26,6 @@ async def publish_wakeup(conversation_id: int, payload: str) -> None:
 
 
 async def publish_devenv_changed(conversation_id: int) -> None:
-    """Tell the conversation's open tabs its dev environment (or the agent's building flag) changed, so
-    they re-read its status."""
+    """Tell the conversation's open tabs its dev environment (or the project's stage) changed, so they
+    re-read its status."""
     await publish_wakeup(conversation_id, DEVENV_WAKEUP)

@@ -1,14 +1,16 @@
 # The agent service package -- everything about a project's AI agent:
 #   adapter.py        the long-running session process working inside the workspace (services/devenv)
 #   conversations.py  the chat: messages in from the session and the user, out to the user's tabs
-#   interactions.py   the rules of the agent's questions to the user (pending, valid answers)
+#   interactions.py   the rules of the agent's questions/actions to the user (pending, valid answers),
+#                     and of what the agent may send at all
+#   signals.py        timestamped markers in the log (BUILDING, IMPLEMENTATION_DONE...), state read off its tail
+#   implementation.py the implementing milestones the user's approvals set off (start, sign-off)
 #   storage.py        the chat's files in the workspace (uploads, artifacts) and the guards
 #                     on client-given names and paths
 #   sessions.py       the session as the app sees it: keeping it running + its port recorded, and talking
 #                     to it over its communication channel (translating to and from the channel's format)
-#   devenvs.py        the conversation's dev environment as the chat sees it: the session's setup and
-#                     dev server requests, and its status for the user's preview screen
-#   building.py       the agent's "building" flag: a big change underway, for the FE's building state
+#   devenvs.py        the conversation's dev environment as the chat sees it: the session's dev server
+#                     requests, and its status for the user's preview screen
 #   tokens.py         the token a session calls back into us with -- good for its own conversation only
 #   mock.py           a stand-in agent, used while AGENT_MOCK_REPLIES is on
 #
@@ -22,6 +24,7 @@ from src.services.agent.conversations import (
     InteractionPending,
     NothingToResend,
     ProjectNotFound,
+    SignalNotAllowed,
     UploadRejected,
     get_conversation_file,
     get_current_conversation,
@@ -29,6 +32,7 @@ from src.services.agent.conversations import (
     list_artifacts,
     post_user_message,
     receive_session_message,
+    receive_session_signal,
     resend_last_user_message,
     upload_files,
     watch_messages,
@@ -37,13 +41,10 @@ from src.services.agent.devenvs import (
     ImplementationNotStarted,
     control_dev_servers,
     get_devenv_status,
-    mark_implementing_done,
     restore_devenv,
-    set_building_status,
-    start_implementation,
     stop_devenv,
 )
-from src.services.agent.interactions import InvalidSubmission
+from src.services.agent.interactions import InvalidSessionMessage, InvalidSubmission
 from src.services.agent.sessions import SessionUnavailable, ensure_introduced, ensure_session, stop_session
 from src.services.agent.storage import FileNotAvailable
 from src.services.agent.tokens import get_token_conversation_id
@@ -54,10 +55,12 @@ __all__ = [
     "ImplementationNotStarted",
     "InteractionNotFound",
     "InteractionPending",
+    "InvalidSessionMessage",
     "InvalidSubmission",
     "NothingToResend",
     "ProjectNotFound",
     "SessionUnavailable",
+    "SignalNotAllowed",
     "UploadRejected",
     "control_dev_servers",
     "ensure_introduced",
@@ -68,13 +71,11 @@ __all__ = [
     "get_owned_conversation",
     "get_token_conversation_id",
     "list_artifacts",
-    "mark_implementing_done",
     "post_user_message",
     "receive_session_message",
+    "receive_session_signal",
     "resend_last_user_message",
     "restore_devenv",
-    "set_building_status",
-    "start_implementation",
     "stop_devenv",
     "stop_session",
     "upload_files",

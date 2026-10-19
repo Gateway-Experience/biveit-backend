@@ -123,9 +123,9 @@ Its committed `.env` already points at `http://localhost:3001/api`.
 1. Open http://localhost:5173 and register.
 2. Create a project and fill in the starting form. The page waits a few seconds for the agent to come
    up, then the agent opens the chat with a welcome and a first question.
-3. Chat until the plan is agreed. The agent then calls `start_implementation`, which copies the
-   boilerplate into the project, installs its dependencies and starts its dev servers. The preview
-   then appears next to the chat.
+3. Chat until the plan is agreed. The agent then asks you to approve the spec (Approve / Keep
+   iterating buttons). Approving copies the boilerplate into the project, installs its dependencies and
+   starts its dev servers. The preview then appears next to the chat.
 
 The first time a session starts in a new folder, Claude shows two startup screens: the folder-trust
 dialog and the development-channels warning. The backend answers both on its own.

@@ -1,16 +1,20 @@
-# Interaction rules + mock agent tests -- all pure, no fakes needed. What's under test: which tool calls
-# count as pending, what a valid submission looks like, and the mock's replies.
+# Interaction rules + signals + mock agent tests -- all pure, no fakes needed. What's under test: which
+# tool calls count as pending, what a valid submission looks like (questions and actions), what the agent
+# may send, which approvals a submission carries, reading signals off the log, and the mock's replies.
 
 
 import pytest
 
-from src.constants import ASK_USER_TOOL_NAME
-from src.services.agent import mock
+from src.constants import ASK_USER_TOOL_NAME, REQUEST_ACTIONS_TOOL_NAME, AgentAction, ProjectStage
+from src.services.agent import mock, signals
 from src.services.agent.interactions import (
+    InvalidSessionMessage,
     InvalidSubmission,
     find_pending_interactions,
+    get_approved_actions,
     to_tool_result_block,
-    validate_question_results,
+    validate_interaction_results,
+    validate_session_content,
 )
 
 _SINGLE = {"question": "Style?", "options": ["Minimal", "Bold"], "multi_select": False, "allow_custom": True}
@@ -22,8 +26,25 @@ def _ask(tool_id="toolu_1", name=ASK_USER_TOOL_NAME):
     return {"type": "tool_use", "id": tool_id, "name": name, "input": {"questions": [_SINGLE]}}
 
 
+def _approve(tool_id="toolu_a", *names):
+    actions = [{"name": name, "params": {}} for name in names or [AgentAction.APPROVE_SPEC]]
+    return {"type": "tool_use", "id": tool_id, "name": REQUEST_ACTIONS_TOOL_NAME, "input": {"actions": actions}}
+
+
 def _msg(role, *blocks):
     return {"role": role, "content": list(blocks)}
+
+
+def _signal(slug):
+    return _msg("assistant", signals.to_signal_block(slug))
+
+
+def _validate_questions(questions, results):
+    validate_interaction_results({"name": ASK_USER_TOOL_NAME, "input": {"questions": questions}}, results)
+
+
+def _decided(decision):
+    return {"status": "submitted", "value": {"decision": decision}}
 
 
 def _submitted(selected=(), custom=None):
@@ -46,14 +67,33 @@ def test_an_answered_question_is_not_pending():
     assert find_pending_interactions(messages) == []
 
 
-def test_only_the_latest_assistant_message_counts():
-    # An old unanswered ask (shouldn't happen, but) is superseded once the agent has spoken again.
+def test_only_what_came_after_the_latest_user_message_counts():
+    # An old unanswered ask (shouldn't happen, but) is superseded once the user has said something since.
     messages = [
         _msg("assistant", _ask("toolu_old")),
         _msg("user", {"type": "text", "text": "x"}),
         _msg("assistant", {"type": "text", "text": "ok"}),
     ]
     assert find_pending_interactions(messages) == []
+
+
+def test_signals_and_text_after_the_question_dont_hide_it():
+    messages = [
+        _msg("user", {"type": "text", "text": "hi"}),
+        _msg("assistant", _approve()),
+        _signal("BUILDING_DONE"),
+        _msg("assistant", {"type": "text", "text": "take your time"}),
+    ]
+    assert [block["id"] for block in find_pending_interactions(messages)] == ["toolu_a"]
+
+
+def test_every_ask_since_the_user_last_spoke_is_pending_in_order():
+    messages = [
+        _msg("user", {"type": "text", "text": "hi"}),
+        _msg("assistant", _ask("toolu_1")),
+        _msg("assistant", _approve()),
+    ]
+    assert [block["id"] for block in find_pending_interactions(messages)] == ["toolu_1", "toolu_a"]
 
 
 def test_tools_the_server_runs_are_never_pending():
@@ -64,19 +104,15 @@ def test_no_messages_nothing_pending():
     assert find_pending_interactions([]) == []
 
 
-# --- validate_question_results ---
+# --- validate_interaction_results ---
 
 
 def test_accepts_every_valid_shape():
     questions = [_SINGLE, _SINGLE_NO_CUSTOM, _MULTI]
-    validate_question_results(
-        questions, [_submitted(custom="Earthy"), _submitted(["No"]), _submitted()]
-    )  # multi: none ok
-    validate_question_results(questions, [_submitted(["Bold"]), {"status": "aborted"}, {"status": "untouched"}])
-    validate_question_results(questions, [{"status": "aborted"}, {"status": "untouched"}, {"status": "untouched"}])
-    validate_question_results(
-        questions, [_submitted(["Minimal"]), _submitted(["Yes"]), _submitted(["Menu", "Map"], "Blog")]
-    )
+    _validate_questions(questions, [_submitted(custom="Earthy"), _submitted(["No"]), _submitted()])  # multi: none ok
+    _validate_questions(questions, [_submitted(["Bold"]), {"status": "aborted"}, {"status": "untouched"}])
+    _validate_questions(questions, [{"status": "aborted"}, {"status": "untouched"}, {"status": "untouched"}])
+    _validate_questions(questions, [_submitted(["Minimal"]), _submitted(["Yes"]), _submitted(["Menu", "Map"], "Blog")])
 
 
 @pytest.mark.parametrize(
@@ -104,7 +140,83 @@ def test_accepts_every_valid_shape():
 )
 def test_rejects_invalid_submissions(results, reason):
     with pytest.raises(InvalidSubmission, match=reason):
-        validate_question_results([_SINGLE, _SINGLE_NO_CUSTOM, _MULTI], results)
+        _validate_questions([_SINGLE, _SINGLE_NO_CUSTOM, _MULTI], results)
+
+
+def test_action_answers_are_a_decision():
+    two = _approve("toolu_a", AgentAction.APPROVE_SPEC, AgentAction.APPROVE_IMPLEMENTATION)
+    validate_interaction_results(two, [_decided("approved"), _decided("iterate")])
+    validate_interaction_results(two, [{"status": "aborted"}, {"status": "untouched"}])
+    with pytest.raises(InvalidSubmission, match="decision"):
+        validate_interaction_results(two, [_decided("maybe"), _decided("iterate")])
+    with pytest.raises(InvalidSubmission, match="expected 2 results"):
+        validate_interaction_results(two, [_decided("approved")])
+
+
+# --- get_approved_actions ---
+
+
+def test_only_submitted_approvals_count():
+    answered = [
+        (_ask(), [_submitted(["Bold"])]),
+        (_approve("toolu_a", AgentAction.APPROVE_SPEC), [_decided("approved")]),
+        (_approve("toolu_b", AgentAction.APPROVE_IMPLEMENTATION), [_decided("iterate")]),
+    ]
+    assert get_approved_actions(answered) == [AgentAction.APPROVE_SPEC]
+    assert get_approved_actions([(_approve(), [{"status": "aborted"}])]) == []
+
+
+# --- validate_session_content ---
+
+
+def _channel_actions(*names):
+    return {"type": "tool_use", "input": {"actions": [{"name": name, "params": {}} for name in names]}}
+
+
+def test_the_agent_may_ask_for_approvals_that_fit_the_stage():
+    validate_session_content(
+        [{"type": "text", "text": "ready?"}, _channel_actions("APPROVE_SPEC")], ProjectStage.SPECING
+    )
+    validate_session_content([_channel_actions("APPROVE_IMPLEMENTATION")], ProjectStage.IMPLEMENTING)
+
+
+@pytest.mark.parametrize(
+    ("content", "stage", "reason"),
+    [
+        ([{"type": "signal", "slug": "IMPLEMENTATION_DONE"}], ProjectStage.IMPLEMENTING, "send_signal"),
+        ([_channel_actions("DEPLOY_NOW")], ProjectStage.IMPLEMENTING, "unknown actions"),
+        ([_channel_actions("APPROVE_IMPLEMENTATION")], ProjectStage.SPECING, "approve the spec first"),
+    ],
+)
+def test_the_agent_may_not_send(content, stage, reason):
+    with pytest.raises(InvalidSessionMessage, match=reason):
+        validate_session_content(content, stage)
+
+
+# --- signals ---
+
+
+def test_signal_messages_are_told_apart_from_said_ones():
+    assert signals.is_signal_message(_signal("BUILDING"))
+    assert not signals.is_signal_message(_msg("assistant", {"type": "text", "text": "hi"}))
+
+
+def test_signal_block_leaves_out_what_wasnt_given():
+    assert signals.to_signal_block("BUILDING") == {"type": "signal", "slug": "BUILDING"}
+    assert signals.to_signal_block("BUILDING", "Menu page", {"a": 1}) == {
+        "type": "signal",
+        "slug": "BUILDING",
+        "description": "Menu page",
+        "meta": {"a": 1},
+    }
+
+
+def test_a_build_is_open_until_its_done():
+    text = _msg("assistant", {"type": "text", "text": "working on it"})
+    assert signals.is_build_open([_signal("BUILDING"), text])
+    assert signals.is_build_open([_signal("BUILDING_DONE"), _signal("BUILDING")])
+    assert not signals.is_build_open([_signal("BUILDING"), text, _signal("BUILDING_DONE")])
+    assert not signals.is_build_open([text, _signal("IMPLEMENTATION_DONE")])
 
 
 # --- to_tool_result_block ---
@@ -137,7 +249,7 @@ def test_mock_asks_every_question_combination():
 def test_mock_questions_are_valid_against_its_own_rules():
     questions = mock.reply_to_text("questions")[-1]["input"]["questions"]
     results = [_submitted([question["options"][0]]) for question in questions]
-    validate_question_results(questions, results)  # doesn't raise
+    _validate_questions(questions, results)  # doesn't raise
 
 
 def test_mock_echoes_answers_but_not_aborts():

@@ -17,13 +17,16 @@ import pydash
 
 from src.constants import (
     AGENT_MOCK_REPLIES,
+    AGENT_SIGNALS,
     AI_CONVERSATION_LOCK_TTL_SECONDS,
     AI_CONVERSATION_LOCK_WAIT_SECONDS,
     DEVENV_WAKEUP,
     SHOW_ARTIFACT_TOOL_NAME,
+    SIGNAL_TAIL_SIZE,
     UPLOAD_MAX_BYTES,
     UPLOAD_MAX_FILES,
     AiMessageRole,
+    AiSignal,
 )
 from src.dto.ai_conversations import AiConversation, AiMessage
 from src.dto.projects import Project
@@ -31,12 +34,14 @@ from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
 from src.services import devenv
-from src.services.agent import mock, sessions, storage, wakeups
+from src.services.agent import implementation, mock, sessions, signals, storage, wakeups
 from src.services.agent.interactions import (
     InvalidSubmission,
     find_pending_interactions,
+    get_approved_actions,
     to_tool_result_block,
-    validate_question_results,
+    validate_interaction_results,
+    validate_session_content,
 )
 from src.utils import redis
 from src.utils.common import spawn
@@ -66,6 +71,10 @@ class InteractionNotFound(Exception):
 class NothingToResend(Exception):
     """A resend was asked for, but the conversation's latest message isn't the user's (the agent has
     already replied, or nothing's been said yet). 409."""
+
+
+class SignalNotAllowed(Exception):
+    """The agent sent a signal only we may write (see AGENT_SIGNALS). 403."""
 
 
 # --- Reading ---------------------------------------------------------------------------------------
@@ -180,9 +189,22 @@ async def receive_session_message(conversation_id: int, content: list[dict[str, 
     """Append a message from the conversation's session, and return the stored message. Everything a
     session posts is the agent talking, so it's an ASSISTANT message; its tool_use items get the id and
     name the channel leaves out (sessions.to_stored_content). Raises ConversationNotFound if the
-    conversation is gone (deleted while its session ran on)."""
+    conversation is gone (deleted while its session ran on), InvalidSessionMessage for content the agent
+    may not send (interactions.validate_session_content)."""
     conversation = await get_live_conversation(conversation_id)
+    validate_session_content(content, (await get_conversation_project(conversation))["stage"])
     return await _append(conversation["id"], AiMessageRole.ASSISTANT, sessions.to_stored_content(content), {})
+
+
+async def receive_session_signal(
+    conversation_id: int, slug: AiSignal, description: str | None, meta: dict[str, Any] | None
+) -> AiMessage:
+    """Record a signal the conversation's session sent (its send_signal tool) and return it. Raises
+    ConversationNotFound, or SignalNotAllowed for one of the signals only we write."""
+    conversation = await get_live_conversation(conversation_id)
+    if slug not in AGENT_SIGNALS:
+        raise SignalNotAllowed(f"{slug} isn't the agent's to send", {"slug": slug, "allowed": AGENT_SIGNALS})
+    return await signals.append_signal(conversation["id"], slug, description, meta)
 
 
 async def upload_files(conversation: AiConversation, files: list[dict]) -> list[dict]:
@@ -220,10 +242,14 @@ async def post_user_message(conversation: AiConversation, body: dict[str, Any]) 
     Attachments are paths from upload_files; each becomes an `attachment` block ({path, name, mime, size},
     re-described from disk rather than trusting the client), placed before the text.
 
-    A submission must answer EVERY pending interaction of the agent's message, each exactly once (409 for
-    an id that isn't pending, InvalidSubmission for a missing or repeated one), with results that fit. It's
-    stored as one message holding a tool_result per interaction, in the order they were asked. Text is
-    refused while an interaction is pending."""
+    A submission must answer EVERY pending interaction, each exactly once (409 for an id that isn't
+    pending, InvalidSubmission for a missing or repeated one), with results that fit. It's stored as one
+    message holding a tool_result per interaction, in the order they were asked. Text is refused while an
+    interaction is pending.
+
+    Approvals take effect once the answer is stored and BEFORE it's handed to the agent
+    (implementation.apply_approvals): the user's click is what counts, so it holds even if the session
+    can't be reached right then (the 503 still comes, and resending only re-delivers)."""
     pending = find_pending_interactions(await ai_messages_repo.find(conversation["id"]))
 
     if body["type"] == "text":
@@ -246,13 +272,22 @@ async def post_user_message(conversation: AiConversation, body: dict[str, Any]) 
     unanswered_ids = [tool_use["id"] for tool_use in pending if tool_use["id"] not in results_by_id]
     if unanswered_ids or len(results_by_id) != len(body["answers"]):
         raise InvalidSubmission(f"answer every pending interaction exactly once (missing: {unanswered_ids})")
-    for tool_use in pending:
-        validate_question_results(tool_use["input"]["questions"], results_by_id[tool_use["id"]])
+    answered = [(tool_use, results_by_id[tool_use["id"]]) for tool_use in pending]
+    for tool_use, results in answered:
+        validate_interaction_results(tool_use, results)
     # One tool_result per pending tool_use, in the order the agent asked them -- a complete answer to its
     # message, which is how both the session's channel and the LLM API want it.
-    return await _append_user(
-        conversation, [to_tool_result_block(tool_use["id"], results_by_id[tool_use["id"]]) for tool_use in pending]
+    user_message = await _append(
+        conversation["id"],
+        AiMessageRole.USER,
+        [to_tool_result_block(tool_use["id"], results) for tool_use, results in answered],
     )
+    approved_actions = get_approved_actions(answered)
+    if approved_actions:
+        project = await get_conversation_project(conversation)
+        await implementation.apply_approvals(project, conversation["id"], approved_actions)
+    await _deliver(conversation, user_message)
+    return user_message
 
 
 async def resend_last_user_message(conversation: AiConversation) -> AiMessage:
@@ -261,10 +296,12 @@ async def resend_last_user_message(conversation: AiConversation) -> AiMessage:
     down). Nothing new is stored, so the chat doesn't get a duplicate -- the user just presses "try
     again" instead of retyping. Raises NothingToResend, or SessionUnavailable if it still can't get through.
 
+    "Latest" skips signals: an approval writes some right after the user's answer, and those aren't the
+    agent replying.
+
     Original purpose: the FE's "try again" banner after a failed delivery."""
-    # The newest page; it may reach back a little (pages never start on an answer), but its last
-    # message is always the latest.
-    latest = pydash.last(await ai_messages_repo.find_before(conversation["id"], None, 1))
+    tail = await ai_messages_repo.find_before(conversation["id"], None, SIGNAL_TAIL_SIZE)
+    latest = pydash.find_last(tail, lambda message: not signals.is_signal_message(message))
     if not latest or latest["role"] != AiMessageRole.USER:
         raise NothingToResend("the latest message isn't the user's", {"conversation_id": conversation["id"]})
     await _deliver(conversation, latest)
@@ -298,7 +335,7 @@ async def _send_to_agent(conversation: AiConversation, user_message: AiMessage) 
     Raises sessions.SessionUnavailable if the session can't be reached. The message stays stored either
     way -- it just didn't get through."""
     port = await sessions.ensure_session(await get_conversation_project(conversation), conversation["id"])
-    await sessions.send(port, sessions.to_session_content(user_message))
+    await sessions.send(conversation["id"], port, sessions.to_session_content(user_message))
 
 
 async def _get_mock_reply(conversation: AiConversation, user_message: AiMessage) -> list[dict] | None:

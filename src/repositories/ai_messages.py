@@ -32,10 +32,12 @@ async def find(conversation_id: int, after_seq: int = 0, limit: int | None = Non
     return cast("list[AiMessage]", await postgres.fetch(sql, params))
 
 
-# The page is the `limit` messages before the cursor (newest_before), pulled back to `start_seq` when it
-# would begin on the user's answers: the nearest message at/before its first that isn't a tool_result.
-# Since the agent only continues once everything it asked is answered, that's always the assistant
-# message holding the questions. $before_seq NULL = no cursor (the newest page). LIMIT NULL = no limit.
+# The page is the `limit` messages before the cursor (newest_before), pulled back to the start of the turn
+# its first message is in, so it never begins between the agent asking and the user answering: the
+# answer would come without its question. A turn starts at a user message that isn't an answer, or at the
+# first message after any user message -- i.e. the questions (plus any signals/text the agent added after
+# them) and their answer always land on the same page. $before_seq NULL = no cursor (the newest page).
+# LIMIT NULL = no limit.
 _FIND_BEFORE = f"""
     WITH newest_before AS (
         SELECT seq FROM ai_messages
@@ -43,15 +45,19 @@ _FIND_BEFORE = f"""
         ORDER BY seq DESC
         LIMIT $limit
     ),
-    start_seq AS (
-        SELECT max(seq) AS seq FROM ai_messages
-        WHERE conversation_id = $conversation_id
-          AND seq <= (SELECT min(seq) FROM newest_before)
-          AND NOT content @> '[{{"type": "tool_result"}}]'
+    turn_starts AS (
+        SELECT seq FROM (
+            SELECT seq, role, content, lag(role) OVER (ORDER BY seq) AS previous_role
+            FROM ai_messages
+            WHERE conversation_id = $conversation_id AND seq <= (SELECT min(seq) FROM newest_before)
+        ) earlier
+        WHERE (role = 'user' AND NOT content @> '[{{"type": "tool_result"}}]')
+           OR previous_role = 'user'
+           OR previous_role IS NULL
     )
     SELECT {_COLUMNS} FROM ai_messages
     WHERE conversation_id = $conversation_id
-      AND seq >= coalesce((SELECT seq FROM start_seq), (SELECT min(seq) FROM newest_before))
+      AND seq >= coalesce((SELECT max(seq) FROM turn_starts), (SELECT min(seq) FROM newest_before))
       AND ($before_seq::int IS NULL OR seq < $before_seq::int)
     ORDER BY seq
 """
@@ -61,9 +67,9 @@ async def find_before(conversation_id: int, before_seq: int | None, limit: int) 
     """One page of history going BACKWARDS, for scrolling up: the `limit` messages before `before_seq`
     (or the newest `limit` when it's None), in seq order.
 
-    A page never starts on the user's answers (tool_result messages): it reaches back to include the
-    question they answer, so whoever holds the page can always show an answer with its question. Such
-    a page can come back a little longer than `limit`."""
+    A page never starts between the agent asking and the user answering: it reaches back to the start
+    of the turn, so whoever holds the page can always show an answer with its question. Such a page can
+    come back a little longer than `limit`."""
     params = {"conversation_id": conversation_id, "before_seq": before_seq, "limit": limit}
     return cast("list[AiMessage]", await postgres.fetch(_FIND_BEFORE, params))
 

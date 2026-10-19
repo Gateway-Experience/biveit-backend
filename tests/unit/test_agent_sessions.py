@@ -4,7 +4,8 @@
 
 import pytest
 
-from src.services.agent import sessions
+from src.config import settings
+from src.services.agent import sessions, tokens
 from src.utils import http
 
 
@@ -77,11 +78,16 @@ def test_a_tool_use_that_already_has_an_id_and_name_keeps_them():
 # --- send ---
 
 
+@pytest.fixture(autouse=True)
+def _session_token_secret(monkeypatch):
+    monkeypatch.setattr(settings, "session_token_secret", "session-token-secret-for-tests")
+
+
 async def test_send_retries_until_a_fresh_session_listens(monkeypatch):
     calls = []
 
-    async def flaky_request(method, url, json=None, **_):
-        calls.append((method, url, json))
+    async def flaky_request(method, url, json=None, headers=None, **_):
+        calls.append((method, url, json, headers))
         if len(calls) < 3:
             raise ConnectionRefusedError("not listening yet")
         return 202, {}, {}
@@ -90,9 +96,15 @@ async def test_send_retries_until_a_fresh_session_listens(monkeypatch):
     monkeypatch.setattr(sessions, "SESSION_SEND_ATTEMPTS", 5)
     monkeypatch.setattr(sessions, "exponential_backoff", lambda *a, **k: lambda attempt: 0)
 
-    await sessions.send(8899, [{"type": "text", "text": "hi"}])
+    await sessions.send(5, 8899, [{"type": "text", "text": "hi"}])
     assert len(calls) == 3
-    assert calls[-1] == ("POST", "http://127.0.0.1:8899/", {"content": [{"type": "text", "text": "hi"}]})
+    # Every push carries the conversation's session token -- the inbox refuses anything without it.
+    assert calls[-1] == (
+        "POST",
+        "http://127.0.0.1:8899/",
+        {"content": [{"type": "text", "text": "hi"}]},
+        {"Authorization": f"Bearer {tokens.to_session_token(5)}"},
+    )
 
 
 @pytest.mark.parametrize("outcome", ["unreachable", "rejected"])
@@ -105,7 +117,7 @@ async def test_send_raises_session_unavailable(outcome, monkeypatch):
     monkeypatch.setattr(http, "request", request)
     monkeypatch.setattr(sessions, "exponential_backoff", lambda *a, **k: lambda attempt: 0)
     with pytest.raises(sessions.SessionUnavailable):
-        await sessions.send(8899, [{"type": "text", "text": "hi"}])
+        await sessions.send(5, 8899, [{"type": "text", "text": "hi"}])
 
 
 async def test_the_introduction_carries_the_form_and_the_owners_language(monkeypatch):
@@ -118,7 +130,7 @@ async def test_the_introduction_carries_the_form_and_the_owners_language(monkeyp
     async def fake_ensure_session(project, conversation_id):
         return 47000
 
-    async def fake_send(port, content):
+    async def fake_send(conversation_id, port, content):
         pushed.append(content[0]["text"])
 
     monkeypatch.setattr(sessions.users_repo, "get", fake_get_user)

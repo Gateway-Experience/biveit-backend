@@ -16,7 +16,7 @@ from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
 from src.services import devenv as conversations_devenv
-from src.services.agent import building, conversations, mock, sessions, tokens, wakeups
+from src.services.agent import conversations, mock, sessions, tokens, wakeups
 from src.utils import redis
 from src.utils.auth import get_current_user
 
@@ -399,18 +399,13 @@ async def test_the_devenv_status_route_checks_ownership(client, db, monkeypatch)
     async def fake_status(project, conversation_id):
         return {"busy": False, "preview_url": "http://localhost:10102", "servers": []}
 
-    async def not_building(conversation_id):
-        return None
-
     monkeypatch.setattr(conversations_devenv, "get_devenv_status", fake_status)
-    monkeypatch.setattr(building, "get_building", not_building)
     conversation_id = _open_conversation(client)
     response = client.get(f"/api/conversations/{conversation_id}/devenv")
     assert response.status_code == 200
     assert response.json() == {
         "stage": "implementing",
         "implementation_done_at": None,
-        "building": None,
         "busy": False,
         "preview_url": "http://localhost:10102",
         "servers": [],
@@ -630,7 +625,7 @@ def real_agent(monkeypatch):
     async def fake_ensure_session(project, conversation_id):
         return 8899
 
-    async def fake_send(port, content):
+    async def fake_send(conversation_id, port, content):
         pushed.append(content)
 
     monkeypatch.setattr(conversations, "AGENT_MOCK_REPLIES", False)
@@ -677,7 +672,7 @@ def test_session_questions_can_be_answered_and_the_answers_go_back_in(client, db
 
 
 def test_an_unreachable_session_is_503_but_the_message_is_kept(client, db, real_agent, monkeypatch):
-    async def unreachable(port, content):
+    async def unreachable(conversation_id, port, content):
         raise sessions.SessionUnavailable("nobody home")
 
     monkeypatch.setattr(sessions, "send", unreachable)
@@ -738,3 +733,93 @@ def test_a_batch_must_answer_every_pending_question_exactly_once(answers, client
     response = client.post(f"/api/conversations/{conversation_id}/messages", json=_submission(*answers))
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "INVALID_SUBMISSION"
+
+
+# --- approvals (request_actions) ---
+
+
+def _agent_requests_approval(client, conversation_id, action_name):
+    """The session asks for an approval through its channel; returns the stored tool_use."""
+    asked = client.post(
+        "/api/agent/messages",
+        json={"content": [{"type": "tool_use", "input": {"actions": [{"name": action_name, "params": {}}]}}]},
+        headers={"Authorization": f"Bearer {tokens.to_session_token(conversation_id)}"},
+    )
+    assert asked.status_code == 201
+    return asked.json()["content"][0]
+
+
+@pytest.fixture
+def approvals(monkeypatch):
+    """Records what the user's approvals set off, instead of setting anything up."""
+    applied = []
+
+    async def fake_apply(project, conversation_id, approved_actions):
+        applied.append((project["id"], conversation_id, approved_actions))
+
+    monkeypatch.setattr(settings, "session_token_secret", "session-token-secret-for-tests")
+    monkeypatch.setattr(conversations.implementation, "apply_approvals", fake_apply)
+    return applied
+
+
+def test_approving_takes_effect_and_the_agent_hears_it(client, db, real_agent, approvals):
+    conversation_id = _open_conversation(client)
+    tool_use = _agent_requests_approval(client, conversation_id, "APPROVE_IMPLEMENTATION")  # project 3 implements
+    approved = [{"status": "submitted", "value": {"decision": "approved"}}]
+    response = client.post(
+        f"/api/conversations/{conversation_id}/messages", json=_submission((tool_use["id"], approved))
+    )
+    assert response.status_code == 201
+    assert approvals == [(3, conversation_id, ["APPROVE_IMPLEMENTATION"])]
+    assert real_agent == [[{"type": "tool_result", "content": approved}]]
+
+
+def test_keep_iterating_has_no_effect_beyond_the_answer(client, db, real_agent, approvals):
+    conversation_id = _open_conversation(client)
+    tool_use = _agent_requests_approval(client, conversation_id, "APPROVE_IMPLEMENTATION")
+    iterate = [{"status": "submitted", "value": {"decision": "iterate"}}]
+    client.post(f"/api/conversations/{conversation_id}/messages", json=_submission((tool_use["id"], iterate)))
+    assert approvals == [] and real_agent == [[{"type": "tool_result", "content": iterate}]]
+
+
+def test_an_approval_holds_even_when_the_session_is_down(client, db, real_agent, approvals, monkeypatch):
+    async def unreachable(conversation_id, port, content):
+        raise sessions.SessionUnavailable("nobody home")
+
+    conversation_id = _open_conversation(client)
+    tool_use = _agent_requests_approval(client, conversation_id, "APPROVE_SPEC")
+    monkeypatch.setattr(sessions, "send", unreachable)
+    approved = [{"status": "submitted", "value": {"decision": "approved"}}]
+    response = client.post(
+        f"/api/conversations/{conversation_id}/messages", json=_submission((tool_use["id"], approved))
+    )
+    assert response.status_code == 503
+    assert approvals == [(3, conversation_id, ["APPROVE_SPEC"])]  # the click counted anyway
+
+
+def test_a_signal_after_the_question_doesnt_hide_it(client, db, real_agent, approvals):
+    conversation_id = _open_conversation(client)
+    tool_use = _agent_requests_approval(client, conversation_id, "APPROVE_SPEC")
+    client.post(
+        "/api/agent/signals",
+        json={"slug": "BUILDING_DONE"},
+        headers={"Authorization": f"Bearer {tokens.to_session_token(conversation_id)}"},
+    )
+    assert _say(client, conversation_id, "just text").status_code == 409  # still pending: answer it first
+    approved = [{"status": "submitted", "value": {"decision": "approved"}}]
+    response = client.post(
+        f"/api/conversations/{conversation_id}/messages", json=_submission((tool_use["id"], approved))
+    )
+    assert response.status_code == 201
+
+
+def test_resend_skips_the_signals_written_after_the_users_message(client, db, real_agent, approvals):
+    conversation_id = _open_conversation(client)
+    _say(client, conversation_id, "make it blue")
+    client.post(
+        "/api/agent/signals",
+        json={"slug": "BUILDING"},
+        headers={"Authorization": f"Bearer {tokens.to_session_token(conversation_id)}"},
+    )
+    response = client.post(f"/api/conversations/{conversation_id}/resend")
+    assert response.status_code == 200 and response.json()["content"] == [{"type": "text", "text": "make it blue"}]

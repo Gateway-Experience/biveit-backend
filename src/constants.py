@@ -96,10 +96,12 @@ COMMUNICATION_MCP_NAME = "communication"
 # A project's agent session is a long-running process found again by its working directory (the
 # project's workspace) plus this env var, which also carries the port it listens on.
 SESSION_PORT_ENV = "COMMUNICATION_PORT"
-# Where the session's communication MCP posts the agent's messages back (POST /api/agent/messages)
-# and the bearer token it sends. Both are handed to the session at launch (services/agent/adapter).
+# Where the session's communication MCP posts the agent's messages back (POST /api/agent/messages), and
+# the session's token (services/agent/tokens). The token goes BOTH ways: the MCP sends it as its bearer
+# token, and its inbox only takes pushes that carry it -- so nothing else on the box can feed a session
+# fake user messages. Both are handed to the session at launch (services/agent/adapter).
 SESSION_OUTBOX_URL_ENV = "COMMUNICATION_OUTBOX_URL"
-SESSION_OUTBOX_TOKEN_ENV = "COMMUNICATION_OUTBOX_TOKEN"
+SESSION_TOKEN_ENV = "COMMUNICATION_TOKEN"
 # What a session runs (argv, no shell), launched inside the project's workspace with SESSION_PORT_ENV set.
 # SESSION_COMMAND = ["doit", "--param", "1"]
 # --permission-mode auto: nobody watches the session's terminal, so it must never stop to ask before a tool
@@ -259,12 +261,53 @@ ASK_USER_TOOL_NAME = "ask_user"
 # The tool the agent shows the user a file with: input {"path": "artifacts/<name>", "title": "..."}. Not
 # user-facing -- it never waits on the user; the FE just renders it as a button opening the file.
 SHOW_ARTIFACT_TOOL_NAME = "show_artifact"
-# The tool the agent proposes externally declared actions with: input {"actions": [{name, params}]}. The
-# session's channel sends these; the FE can't answer them yet.
+# The tool the agent asks the user to DO something in the UI with: input {"actions": [{name, params}]}, each
+# name an AgentAction. The answer comes back like ask_user's: a tool_result with one result per action.
 REQUEST_ACTIONS_TOOL_NAME = "request_actions"
 # Tools whose "execution" is the user answering. A tool_use of one of these pauses the conversation
 # until a matching tool_result arrives (services/agent/interactions).
-USER_FACING_TOOLS = [ASK_USER_TOOL_NAME]
+USER_FACING_TOOLS = [ASK_USER_TOOL_NAME, REQUEST_ACTIONS_TOOL_NAME]
+
+
+class AgentAction(StrEnum):
+    """What the agent can ask the user to do (request_actions). The FE renders each by name; we act on
+    the answer ourselves (services/agent/implementation), so the user's click is the decision on record,
+    not the agent's reading of it. Answered with {decision: ApprovalDecision}."""
+
+    APPROVE_SPEC = "APPROVE_SPEC"  # the spec is done: approving starts implementing
+    APPROVE_IMPLEMENTATION = "APPROVE_IMPLEMENTATION"  # the built site is done: approving signs it off
+
+
+class ApprovalDecision(StrEnum):
+    """The answer to an approval action -- the user's two buttons."""
+
+    APPROVED = "approved"
+    ITERATE = "iterate"  # "keep iterating": nothing happens beyond the agent hearing it
+
+
+# A signal: a timestamped marker in the conversation's log ({type: SIGNAL_BLOCK_TYPE, slug, description?,
+# meta?}, alone in an ASSISTANT message). Not a chat message -- the FE reads whatever state it needs off
+# the log's tail (e.g. "building": the latest BUILDING with no BUILDING_DONE after it, less than an hour
+# old). Platform-only: an LLM API replay of the conversation must drop these blocks.
+SIGNAL_BLOCK_TYPE = "signal"
+
+
+class AiSignal(StrEnum):
+    """A signal's slug. Extensible: the FE ignores slugs it doesn't know."""
+
+    BUILDING = "BUILDING"  # the agent started (or refreshed) a big change; description = what's being built
+    BUILDING_DONE = "BUILDING_DONE"  # it's over (the agent says so, or we do when the session stops)
+    IMPLEMENTATION_STARTED = "IMPLEMENTATION_STARTED"  # the user approved the spec
+    IMPLEMENTATION_DONE = "IMPLEMENTATION_DONE"  # the user signed off the implementation
+    DEVENV_FAILED = "DEVENV_FAILED"  # the dev environment setup failed; description = why
+
+
+# The signals the agent may send itself (its send_signal tool). The rest are ours alone: they stand for
+# facts we made happen, so the agent saying them wouldn't make them true.
+AGENT_SIGNALS = [AiSignal.BUILDING, AiSignal.BUILDING_DONE]
+# How many of a conversation's newest messages are read to work out its current signals (e.g. whether a
+# build is open). Signals that matter sit near the end of the log, so a short tail is enough.
+SIGNAL_TAIL_SIZE = 50
 
 
 class InteractionStatus(StrEnum):
@@ -275,10 +318,6 @@ class InteractionStatus(StrEnum):
     ABORTED = "aborted"
     UNTOUCHED = "untouched"  # never reached, because an earlier item was aborted
 
-
-# How long the agent's "building" flag lasts (services/agent/building) unless it clears or refreshes it --
-# so a flag the agent forgot about can't leave a project "building" forever.
-BUILDING_TTL_SECONDS = 3600
 
 # Pages of GET /conversations/{id}/messages (infinite scroll up).
 MESSAGES_PAGE_DEFAULT = 50

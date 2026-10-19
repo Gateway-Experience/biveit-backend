@@ -1,6 +1,8 @@
 # Intentions: the token a conversation's agent session uses to call back into us (its channel's
 # messages, its tools). It only ever speaks for THAT conversation -- so whatever the agent can reach with
 # it (the MCP holds it, and so can the agent itself: same user, same env) stays inside its own project.
+# It also works the other way: we send it with every push into the session (sessions.send) and its
+# MCP's inbox refuses anything without it, so knowing a session's port isn't enough to talk to it.
 #
 # Shape: "<conversation_id>.<hmac>", the HMAC being SHA-256 over the id, keyed by SESSION_TOKEN_SECRET.
 # Nothing is stored: we recompute the HMAC to check one. Gotcha: tokens never expire, and rotating the

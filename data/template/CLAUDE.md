@@ -153,7 +153,7 @@ layout:
 The goal is that this should be quite detailed and complete, but not wordy at all and it doesn't tired the user out from looking at it. Probably dont over-list the items, and dont overdo the descriptions. Use simple sentences and words.
 Can list login/register page here if they're present.
 
-Ask them if they're finally ready for building. If so move on to Implementing. Call the communication mcp's start_implementation tool and wait for its "[Dev environment ready]" message before implementing. The app then lives in backend/ and frontend/ (each with its own CLAUDE.md). Manage the dev servers only with the dev_servers tool, never with pm2.
+Ask them if they're finally ready for building, by sending a message with the APPROVE_SPEC action (communication mcp's send_message tool, an actions tool_use item). The user sees Approve / Keep iterating buttons. If they keep iterating, carry on spec-ing. If they approve, that's it: the platform moves the project to Implementing and sets up the dev environment by itself. Wait for the "[Dev environment ready]" message before implementing (or "[Dev environment failed]": then tell the user). The app then lives in backend/ and frontend/ (each with its own CLAUDE.md). Manage the dev servers only with the dev_servers tool, never with pm2.
 
 ## Implementing
 
@@ -163,11 +163,11 @@ The dev environment should now be set up and the dev FE and BE servers should no
 - During implementing, if you encounter some serious issues or need some more clarification/discussion, feel free to come back earlier. Then you might choose to move on with implementing.
 - The result should be production-ready. There should be a chance that the user goes ahead with deployment with the first version (i.e. one-shotting it).
 
-The building status is on for this first build (the user sees their site being built). Turn it off with the communication mcp's building tool (active: false) when you're done, before coming back to the user. After you're done, come back to the user and ask them to take a look.
+The building status is on for this first build (the user sees their site being built). Turn it off by sending the BUILDING_DONE signal (communication mcp's send_signal tool) when you're done, before coming back to the user. After you're done, come back to the user and ask them to take a look.
 
 At this point, just iterate with them on the final result.
 
-This is where the 10 - 20% of tweakability comes in. Iterate and do live updates with them, updating the specs if necessary. For big changes that might need some non-trivial redesign, confirm and try to talk through with them first. If still go ahead, update the specs and code in place, no need to go back to spec-ing. For such a big change, turn the building status on with the building tool (active: true, with a one-line summary) while you work, and off (active: false) when done. Small tweaks don't need it.
+This is where the 10 - 20% of tweakability comes in. Iterate and do live updates with them, updating the specs if necessary. For big changes that might need some non-trivial redesign, confirm and try to talk through with them first. If still go ahead, update the specs and code in place, no need to go back to spec-ing. For such a big change, turn the building status on with the BUILDING signal (send_signal, with a one-line description) while you work, and off with BUILDING_DONE when done. Small tweaks don't need it.
 Do this till they're happy with the final result.
 
-Once you confirmed with the user that they're happy with the final result, send a implementing done signal by using the implementing_done tool from the communication mcp.
+Once the user seems happy with the final result, ask them to sign it off by sending a message with the APPROVE_IMPLEMENTATION action. If they approve, the platform records the sign-off and offers them payment and deployment by itself. If they keep iterating, carry on.

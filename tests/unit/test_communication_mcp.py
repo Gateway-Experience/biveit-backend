@@ -10,6 +10,7 @@ import socket
 import sys
 
 import mcp.types as mcp_types
+import pydash
 import pytest
 from aiohttp import web
 
@@ -32,7 +33,7 @@ async def fake_backend():
         calls.append((request.path, request.headers.get("Authorization"), body))
         if request.path.endswith("/dev-servers"):
             return web.json_response({"servers": [{"app": "backend", "status": "online"}]})
-        if request.path.endswith("/devenv"):
+        if request.path.endswith("/signals") and body["slug"] == "BUILDING_DONE":
             return web.json_response({"detail": "CONVERSATION_NOT_FOUND"}, status=404)
         return web.json_response({})
 
@@ -61,7 +62,7 @@ async def session_mcp(fake_backend):
             **os.environ,
             "COMMUNICATION_PORT": str(inbox_port),
             "COMMUNICATION_OUTBOX_URL": fake_backend["url"],
-            "COMMUNICATION_OUTBOX_TOKEN": "session-token",
+            "COMMUNICATION_TOKEN": "session-token",
         },
     )
     ids = iter(range(1, 1000))
@@ -132,13 +133,10 @@ async def test_it_is_a_channel_with_the_platforms_tools(session_mcp):
     assert initialized["capabilities"]["experimental"] == {"claude/channel": {}}
     assert initialized["serverInfo"]["name"] == "communication"
     tools = await session_mcp["call"]("tools/list")
-    assert [tool["name"] for tool in tools["tools"]] == [
-        "send_message",
-        "start_implementation",
-        "dev_servers",
-        "building",
-        "implementing_done",
-    ]
+    assert [tool["name"] for tool in tools["tools"]] == ["send_message", "dev_servers", "send_signal"]
+    send_signal = pydash.find(tools["tools"], {"name": "send_signal"})
+    # Only the agent's own signals are on offer -- the rest are ours to write.
+    assert send_signal["inputSchema"]["properties"]["slug"]["enum"] == ["BUILDING", "BUILDING_DONE"]
 
 
 async def test_tools_post_to_the_backend_with_the_session_token(session_mcp, fake_backend):
@@ -150,7 +148,7 @@ async def test_tools_post_to_the_backend_with_the_session_token(session_mcp, fak
         {"content": [{"type": "text", "text": "hi"}, {"type": "tool_use", "input": {"questions": [question]}}]},
     )
     servers = await _call_tool(session_mcp, "dev_servers", {"action": "status"})
-    await _call_tool(session_mcp, "building", {"active": True, "summary": "First version"})
+    await _call_tool(session_mcp, "send_signal", {"slug": "BUILDING", "description": "First version"})
 
     assert sent["content"][0]["text"] == "sent"
     assert json.loads(servers["content"][0]["text"]) == [{"app": "backend", "status": "online"}]
@@ -161,7 +159,7 @@ async def test_tools_post_to_the_backend_with_the_session_token(session_mcp, fak
             {"content": [{"type": "text", "text": "hi"}, {"type": "tool_use", "input": {"questions": [question]}}]},
         ),
         ("/api/agent/dev-servers", "Bearer session-token", {"action": "status"}),
-        ("/api/agent/building", "Bearer session-token", {"active": True, "summary": "First version"}),
+        ("/api/agent/signals", "Bearer session-token", {"slug": "BUILDING", "description": "First version"}),
     ]
 
 
@@ -174,15 +172,21 @@ async def test_the_agent_sees_why_a_tool_failed(session_mcp, fake_backend):
         {
             "content": [
                 {"type": "tool_use", "input": one_question},
-                {"type": "tool_use", "input": {"actions": [{"name": "pay", "params": {}}]}},
+                {"type": "tool_use", "input": {"actions": [{"name": "APPROVE_SPEC"}]}},
             ]
         },
     )
-    refused = await _call_tool(session_mcp, "start_implementation", {})
+    unknown_action = await _call_tool(
+        session_mcp, "send_message", {"content": [{"type": "tool_use", "input": {"actions": [{"name": "PAY"}]}}]}
+    )
+    not_ours = await _call_tool(session_mcp, "send_signal", {"slug": "IMPLEMENTATION_DONE"})
+    refused = await _call_tool(session_mcp, "send_signal", {"slug": "BUILDING_DONE"})
 
     assert mixed["isError"] and "Cannot mix questions and actions" in mixed["content"][0]["text"]
+    assert unknown_action["isError"] and not_ours["isError"]  # the schema stops them
     assert refused["isError"] and "404" in refused["content"][0]["text"]
-    assert [path for path, _, _ in fake_backend["calls"]] == ["/api/agent/devenv"]  # the mixed one never left
+    # Only the last one got as far as the backend.
+    assert [path for path, _, _ in fake_backend["calls"]] == ["/api/agent/signals"]
 
 
 async def test_a_push_into_the_inbox_comes_out_as_a_channel_notification(session_mcp):
@@ -201,16 +205,34 @@ async def test_a_push_into_the_inbox_comes_out_as_a_channel_notification(session
     assert notification["params"]["content"] == '{"content":[{"type":"text","text":"Xin chào, Tiếng Việt"}]}'
 
 
-async def _post_when_listening(port: int, body: dict, attempts: int = 50) -> int:
-    """POST to the inbox, retrying while it isn't listening yet (it starts right after the handshake)."""
+async def test_the_inbox_refuses_a_push_without_the_sessions_token(session_mcp):
+    # Anything on the box can reach the port; only the backend knows the token.
+    await _initialize(session_mcp)
+    await http.connect()
     try:
-        status, _, _ = await http.request("POST", f"http://127.0.0.1:{port}/", json=body)
+        port = session_mcp["inbox_port"]
+        missing = await _post_when_listening(port, {"content": [{"type": "text", "text": "fake 1"}]}, token=None)
+        wrong = await _post_when_listening(port, {"content": [{"type": "text", "text": "fake 2"}]}, token="guess")
+        real = await _post_when_listening(port, {"content": [{"type": "text", "text": "real"}]})
+    finally:
+        await http.close()
+    assert (missing, wrong, real) == (401, 401, 202)
+    # Nothing of the refused ones reached Claude: the first notification out is the real push.
+    assert (await session_mcp["read"]())["params"]["content"] == '{"content":[{"type":"text","text":"real"}]}'
+
+
+async def _post_when_listening(port: int, body: dict, token: str | None = "session-token", attempts: int = 50) -> int:
+    """POST to the inbox as the backend would (bearer = the session's token; None sends no header),
+    retrying while it isn't listening yet (it starts right after the handshake)."""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        status, _, _ = await http.request("POST", f"http://127.0.0.1:{port}/", json=body, headers=headers)
         return status
     except OSError:
         if attempts <= 1:
             raise
         await asyncio.sleep(0.1)
-        return await _post_when_listening(port, body, attempts - 1)
+        return await _post_when_listening(port, body, token, attempts - 1)
 
 
 async def test_it_exits_when_claude_closes_stdio(session_mcp):

@@ -135,10 +135,15 @@ def reply_to_submission(answered: list[tuple[dict, list[dict]]]) -> list[dict] |
     interaction of the message -- or None when anything was aborted (no reply then)."""
     if any(result["status"] != InteractionStatus.SUBMITTED for _, results in answered for result in results):
         return None
+    # A tool_use holds questions (ask_user) or actions (request_actions), never both.
     answer_lines = [
-        f"- {question['question']} -> {_describe_answer(result['value'])}"
+        f"- {question.get('question')} -> {_describe_answer(result['value'])}"
         for tool_use, results in answered
-        for question, result in zip(tool_use["input"]["questions"], results, strict=True)
+        for question, result in zip(tool_use["input"].get("questions", []), results, strict=False)
+    ] + [
+        f"- {action['name']} -> {result['value']['decision']}"
+        for tool_use, results in answered
+        for action, result in zip(tool_use["input"].get("actions", []), results, strict=False)
     ]
     return [_to_text_block("(mock agent) Got your answers:\n" + "\n".join(answer_lines))]
 

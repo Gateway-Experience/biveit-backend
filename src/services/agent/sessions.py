@@ -32,7 +32,7 @@ from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import projects as projects_repo
 from src.repositories import users as users_repo
 from src.services import devenv
-from src.services.agent import adapter, building, tokens
+from src.services.agent import adapter, signals, tokens
 from src.utils import http
 from src.utils.common import exponential_backoff, with_retries
 
@@ -69,10 +69,10 @@ async def ensure_session(project: Project, conversation_id: int) -> int:
 
 async def stop_session(project: Project, conversation_id: int) -> dict:
     """Turn the conversation's session off (adapter.stop_session), clear the project's current_port (it
-    would otherwise keep naming a port nobody listens on) and the agent's building flag (nobody's
-    building anything now). Idempotent. Returns what was stopped."""
+    would otherwise keep naming a port nobody listens on), and end any open build with a BUILDING_DONE
+    (nobody's building anything now). Idempotent. Returns what was stopped."""
     stopped = await adapter.stop_session(project, conversation_id)
-    await building.clear_building(conversation_id)
+    await signals.end_open_build(conversation_id, "The session was stopped")
     if project.get("current_port") is not None:
         await projects_repo.update(project["id"], {"current_port": None})
     return stopped
@@ -123,16 +123,19 @@ async def introduce_project(project: Project, conversation_id: int) -> None:
             "<then ask them the first open-ended question to get the whole process rolling>.",
         ]
     )
-    await send(port, [{"type": "text", "text": text}])
+    await send(conversation_id, port, [{"type": "text", "text": text}])
 
 
-async def send(port: int, content: list[dict]) -> None:
-    """Push a message into the session on `port`. Retries connection failures for a few seconds, since a
-    session that was just started takes a moment to begin listening. Raises SessionUnavailable if it
-    never answers, or answers with anything but success."""
+async def send(conversation_id: int, port: int, content: list[dict]) -> None:
+    """Push a message into the conversation's session, listening on `port`. It goes with the session's
+    token, which its inbox insists on (src/mcps/communication). Retries connection failures for a few
+    seconds, since a session that was just started takes a moment to begin listening. Raises
+    SessionUnavailable if it never answers, or answers with anything but success (a 401 included: a
+    session whose token doesn't match isn't the conversation's)."""
+    headers = {"Authorization": f"Bearer {tokens.to_session_token(conversation_id)}"}
     try:
         status, _, _ = await with_retries(
-            lambda: http.request("POST", f"http://127.0.0.1:{port}/", json={"content": content}),
+            lambda: http.request("POST", f"http://127.0.0.1:{port}/", json={"content": content}, headers=headers),
             retries=SESSION_SEND_ATTEMPTS,
             calculate_backoff=exponential_backoff(0.2, cap=2),
             # Connection refused/reset are OSErrors (aiohttp's included); anything else isn't worth a retry.

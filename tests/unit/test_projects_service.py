@@ -208,11 +208,11 @@ async def test_stopping_a_session_clears_the_current_port(monkeypatch, updates):
     async def fake_adapter_stop(project, conversation_id):
         return {"tmux_session": False, "pids": []}
 
-    async def fake_clear_building(conversation_id):
+    async def fake_end_open_build(conversation_id, description):
         pass
 
     monkeypatch.setattr(adapter, "stop_session", fake_adapter_stop)
-    monkeypatch.setattr(sessions.building, "clear_building", fake_clear_building)
+    monkeypatch.setattr(sessions.signals, "end_open_build", fake_end_open_build)
     await sessions.stop_session({"id": 1, "current_port": 47000}, 5)
     await sessions.stop_session({"id": 2, "current_port": None}, 5)
     assert updates == [(1, {"current_port": None})]

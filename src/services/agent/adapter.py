@@ -33,7 +33,6 @@ from src.constants import (
     SESSION_CONTINUE_ARGS,
     SESSION_LOCK_TTL_SECONDS,
     SESSION_LOCK_WAIT_SECONDS,
-    SESSION_OUTBOX_TOKEN_ENV,
     SESSION_OUTBOX_URL_ENV,
     SESSION_PORT_ENV,
     SESSION_PORT_LOCK_TTL_SECONDS,
@@ -44,6 +43,7 @@ from src.constants import (
     SESSION_STARTUP_PROMPT,
     SESSION_STARTUP_PROMPT_WAIT_SECONDS,
     SESSION_STOP_WAIT_SECONDS,
+    SESSION_TOKEN_ENV,
     SESSION_TRUST_PROMPT,
 )
 from src.dto.projects import Project
@@ -268,7 +268,7 @@ async def start_session(project: Project, conversation_id: int, port: int) -> No
             "-e",
             f"{SESSION_OUTBOX_URL_ENV}=http://127.0.0.1:{settings.api_port}",
             "-e",
-            f"{SESSION_OUTBOX_TOKEN_ENV}={tokens.to_session_token(conversation_id)}",
+            f"{SESSION_TOKEN_ENV}={tokens.to_session_token(conversation_id)}",
             shlex.join([*SESSION_COMMAND, *(SESSION_CONTINUE_ARGS if get_latest_claude_transcript(pwd) else [])]),
             cwd=pwd,
             env=_get_tmux_client_env(),

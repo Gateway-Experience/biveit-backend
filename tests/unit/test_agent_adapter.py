@@ -281,7 +281,7 @@ async def test_started_session_is_found_again(workspace, fake_redis, isolated_tm
     assert f"{SESSION_PORT_ENV}={port}" in processes[0]["environ"]
     # ...and so does the way back: where the channel posts the agent's messages, and the token it sends.
     assert f"COMMUNICATION_OUTBOX_URL=http://127.0.0.1:{settings.api_port}" in processes[0]["environ"]
-    assert f"COMMUNICATION_OUTBOX_TOKEN={tokens.to_session_token(_CONVERSATION_ID)}" in processes[0]["environ"]
+    assert f"COMMUNICATION_TOKEN={tokens.to_session_token(_CONVERSATION_ID)}" in processes[0]["environ"]
     assert await adapter.ensure_session(_PROJECT, _CONVERSATION_ID) == port  # reused, not started again
 
 

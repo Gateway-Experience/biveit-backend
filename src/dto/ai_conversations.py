@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field, model_validator
 
-from src.constants import UPLOAD_MAX_FILES, DevServerAction, InteractionStatus
+from src.constants import UPLOAD_MAX_FILES, AiSignal, DevServerAction, InteractionStatus
 
 
 class AiConversation(TypedDict):
@@ -52,13 +52,15 @@ class PostAgentMessageRequest(BaseModel):
     content: list[ContentBlock] = Field(min_length=1)
 
 
-class PostBuildingRequest(BaseModel):
-    """POST /agent/building body: the agent starting (or refreshing) or ending a big change."""
+class PostAgentSignalRequest(BaseModel):
+    """POST /agent/signals body: a signal from the project's agent session (see AiSignal). Only
+    AGENT_SIGNALS are accepted -- the service says no to the rest."""
 
     model_config = {"extra": "forbid"}
 
-    active: bool
-    summary: str | None = Field(None, max_length=200)  # one line on what's being built, shown to the user
+    slug: AiSignal
+    description: str | None = Field(None, max_length=200)  # e.g. BUILDING: one line on what's being built
+    meta: dict[str, Any] | None = None
 
 
 class PostDevServersRequest(BaseModel):
