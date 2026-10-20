@@ -1,6 +1,7 @@
-# Intentions: turn off everything running for a project -- each conversation's agent session (Claude
-# and its communication MCP) and its dev servers -- via services/projects.close_project. Nothing on disk
-# is touched; opening the project brings it all back. Safe to run again: what's off stays off.
+# Intentions: turn off everything running for a project -- each conversation's agent session and its dev
+# servers -- via services/projects.close_project. Sessions are stopped on BOTH runtimes (tmux and agent2's
+# runner), so there's no guessing which one a project is on. Nothing on disk is touched; opening the
+# project brings it all back. Safe to run again: what's off stays off.
 #
 #   uv run python -m scripts.stop_project <project id>
 
@@ -30,7 +31,8 @@ async def main() -> None:
             print(
                 f"conversation {conversation_id}: tmux session "
                 + f"{'killed' if session['tmux_session'] else 'was not running'}, "
-                + f"session pids stopped {session['pids'] or 'none'}"
+                + f"session pids stopped {session['pids'] or 'none'}, "
+                + f"agent2 runner {'stopped' if session['runner'] else 'was not running'}"
             )
         print(f"dev servers removed from pm2: {', '.join(stopped['dev_servers']) or 'none'}")
     finally:

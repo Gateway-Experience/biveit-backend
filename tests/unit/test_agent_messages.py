@@ -262,7 +262,7 @@ def pushed(monkeypatch):
     async def fake_ensure_session(project, conversation_id):
         return 47000
 
-    async def fake_send(conversation_id, port, content):
+    async def fake_send(project, conversation_id, content):
         state["pushed"] = [*state["pushed"], content]
 
     monkeypatch.setattr(implementation, "spawn", lambda job: state["jobs"].append(job))

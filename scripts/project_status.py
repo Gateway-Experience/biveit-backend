@@ -9,6 +9,9 @@
 # running across all projects. The project view: its workspace on disk, its agent session, its dev
 # servers, and its own slice of the infra.
 #
+# Both agent runtimes are checked side by side -- the tmux one (services/agent/adapter) and agent2's SDK
+# runners (services/agent2) -- so neither has to be guessed: whichever is running shows up.
+#
 # Each check that can fail (a dead redis, no pm2...) says so in its own section instead of stopping the rest.
 
 import argparse
@@ -26,6 +29,7 @@ import redis.asyncio as redis_lib
 from src.config import settings
 from src.constants import (
     AGENT_MOCK_REPLIES,
+    AGENT_RUNTIME,
     DEVENV_APP_DIRS,
     DEVENV_BACKEND_HEALTH_PATH,
     DEVENV_ENV_FILES,
@@ -37,10 +41,10 @@ from src.dto.projects import Project
 from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
-from src.services import devenv
+from src.services import agent2, devenv
 from src.services.agent import adapter, storage
 from src.services.devenv import addresses, servers
-from src.utils import http, postgres, redis
+from src.utils import http, postgres, redis, systemd
 from src.utils.processes import CommandFailed, run_command
 
 
@@ -164,6 +168,35 @@ async def _report_session(project: Project, conversation_id: int) -> None:
     )
 
 
+async def _report_agent2_runner(project: Project, conversation_id: int) -> None:
+    workspace = devenv.get_conversation_dir(project, conversation_id)
+    socket_path = Path(agent2.get_socket_path(project, conversation_id))
+    log_path = Path(agent2.get_log_path(project, conversation_id))
+    runners = [
+        process
+        for process in await adapter.get_all_processes(workspace)
+        if "src.runners.agent2.main" in process["cmdline"]
+    ]
+    _print_section(
+        "Agent2 runner (SDK)",
+        [
+            ("up (answers on its socket)", "yes" if await agent2.is_session_up(project, conversation_id) else "no"),
+            ("socket", f"{socket_path} ({'present' if socket_path.exists() else '-'})"),
+            ("systemd unit", await _describe_unit(agent2.get_unit_name(conversation_id))),
+            ("runner processes", len(runners) if len(runners) <= 1 else f"{len(runners)} -- TOO MANY, should be 1"),
+            *[(f"  pid {p['pid']}", " ".join(p["cmdline"])[:100]) for p in runners],
+            ("log", f"{log_path} ({'present' if log_path.exists() else '-'})"),
+        ],
+    )
+
+
+async def _describe_unit(unit: str) -> str:
+    """The runner's unit and whether it's running -- or why there's none to look at."""
+    if not systemd.is_available():
+        return "- (no systemd here: plain processes)"
+    return f"{unit} ({'active' if await systemd.is_active(unit) else 'not running'})"
+
+
 async def _report_servers(project: Project, conversation_id: int) -> None:
     try:
         pm2_processes = json.loads(await run_command(["pm2", "jlist"]))
@@ -266,7 +299,7 @@ async def _report_platform() -> None:
         [
             ("env", settings.env),
             ("api", f"port {settings.api_port}, health {await _check_health(settings.api_port, '/api/debug/health')}"),
-            ("agent", "MOCK replies" if AGENT_MOCK_REPLIES else "real sessions"),
+            ("agent", "MOCK replies" if AGENT_MOCK_REPLIES else f"real sessions, runtime: {AGENT_RUNTIME}"),
             ("dev domain", "none (local: no dev sites)" if local else settings.dev_domain or "NONE -- no dev sites"),
             ("session ports", f"{SESSION_PORT_RANGE[0]}-{SESSION_PORT_RANGE[1]}, random"),
             (
@@ -389,9 +422,31 @@ async def _report_running() -> None:
         held_locks = [f"unreadable: {error}"]
     print("\n== tmux ls (agent sessions) ==")
     print("\n".join(agent_session_lines) or "  none")
+    print("\n== agent2 runners (SDK) ==")
+    print("\n".join(await _list_agent2_runners()) or "  none")
     print("\n== pm2 ls (dev servers) ==")
     print("\n".join(pm2_table) or "  none")
     _print_section("Locks", [("held", " ".join(held_locks) or "none")])
+
+
+async def _list_agent2_runners() -> list[str]:
+    """One line per runner socket: its conversation, project, and whether anything answers there (a socket
+    left by a runner that died doesn't)."""
+    socket_dir = Path(agent2.get_socket_dir())
+    socket_paths = sorted(socket_dir.glob("*.sock")) if socket_dir.is_dir() else []
+    conversation_ids = [int(path.stem) for path in socket_paths if path.stem.isdigit()]
+    conversations = [await ai_conversations_repo.get(conversation_id) for conversation_id in conversation_ids]
+    projects = [
+        pydash.head(await projects_repo.find({"id": conversation["project_id"]})) if conversation else None
+        for conversation in conversations
+    ]
+    return [
+        f"  conversation {conversation_id} -- project {project['id']}: "
+        + ("up" if await agent2.is_session_up(project, conversation_id) else "NOT answering (stale socket)")
+        if project
+        else f"  conversation {conversation_id} -- no live project behind it"
+        for conversation_id, project in zip(conversation_ids, projects, strict=True)
+    ]
 
 
 async def _report_project_status(project_id: int, conversation_id: int | None) -> None:
@@ -408,6 +463,7 @@ async def _report_project_status(project_id: int, conversation_id: int | None) -
         return
     await _report_directory(project, conversation["id"])
     await _report_session(project, conversation["id"])
+    await _report_agent2_runner(project, conversation["id"])
     await _report_servers(project, conversation["id"])
     await _report_infra(project, conversation["id"])
 

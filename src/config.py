@@ -97,6 +97,17 @@ class Settings(BaseSettings):
     # session can be started, and no session call is accepted (fail closed). Long and random per env.
     session_token_secret: str = ""
 
+    # What agent2's runners bill to (services/agent2) -- one of the two is required outside local: without
+    # them Claude Code falls back to whatever claude.ai login the machine has, and a subscription may not
+    # power a product for other people. Locally, both empty = your own login, for trying things out.
+    #   anthropic_api_key     Anthropic's own API
+    #   anthropic_auth_token  a key for another endpoint speaking Anthropic's API, at anthropic_base_url
+    #                         (e.g. DeepSeek's https://api.deepseek.com/anthropic -- see AGENT2_ENDPOINT_ENV
+    #                         for the models that go with it)
+    anthropic_api_key: str = ""
+    anthropic_base_url: str = ""
+    anthropic_auth_token: str = ""
+
     # Dev environments (services/devenv), set up once a conversation's agent starts implementing.
     # boilerplate_dir: the app copied in (its backend/ and frontend/). devenv_templates_dir: the env, pm2
     # and nginx templates rendered for each project. ~ is expanded; relative paths resolve against the cwd.

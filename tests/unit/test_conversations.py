@@ -625,7 +625,7 @@ def real_agent(monkeypatch):
     async def fake_ensure_session(project, conversation_id):
         return 8899
 
-    async def fake_send(conversation_id, port, content):
+    async def fake_send(project, conversation_id, content):
         pushed.append(content)
 
     monkeypatch.setattr(conversations, "AGENT_MOCK_REPLIES", False)
@@ -668,11 +668,11 @@ def test_session_questions_can_be_answered_and_the_answers_go_back_in(client, db
         json=_submission((tool_use["id"], answer)),
     )
     assert response.status_code == 201
-    assert real_agent == [[{"type": "tool_result", "content": answer}]]
+    assert real_agent == [[{"type": "tool_result", "tool_use_id": tool_use["id"], "content": answer}]]
 
 
 def test_an_unreachable_session_is_503_but_the_message_is_kept(client, db, real_agent, monkeypatch):
-    async def unreachable(conversation_id, port, content):
+    async def unreachable(project, conversation_id, content):
         raise sessions.SessionUnavailable("nobody home")
 
     monkeypatch.setattr(sessions, "send", unreachable)
@@ -771,7 +771,7 @@ def test_approving_takes_effect_and_the_agent_hears_it(client, db, real_agent, a
     )
     assert response.status_code == 201
     assert approvals == [(3, conversation_id, ["APPROVE_IMPLEMENTATION"])]
-    assert real_agent == [[{"type": "tool_result", "content": approved}]]
+    assert real_agent == [[{"type": "tool_result", "tool_use_id": tool_use["id"], "content": approved}]]
 
 
 def test_keep_iterating_has_no_effect_beyond_the_answer(client, db, real_agent, approvals):
@@ -779,11 +779,12 @@ def test_keep_iterating_has_no_effect_beyond_the_answer(client, db, real_agent, 
     tool_use = _agent_requests_approval(client, conversation_id, "APPROVE_IMPLEMENTATION")
     iterate = [{"status": "submitted", "value": {"decision": "iterate"}}]
     client.post(f"/api/conversations/{conversation_id}/messages", json=_submission((tool_use["id"], iterate)))
-    assert approvals == [] and real_agent == [[{"type": "tool_result", "content": iterate}]]
+    assert approvals == []
+    assert real_agent == [[{"type": "tool_result", "tool_use_id": tool_use["id"], "content": iterate}]]
 
 
 def test_an_approval_holds_even_when_the_session_is_down(client, db, real_agent, approvals, monkeypatch):
-    async def unreachable(conversation_id, port, content):
+    async def unreachable(project, conversation_id, content):
         raise sessions.SessionUnavailable("nobody home")
 
     conversation_id = _open_conversation(client)

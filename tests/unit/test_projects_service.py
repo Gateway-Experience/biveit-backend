@@ -2,8 +2,11 @@
 # and no real sessions: the adapter and postgres are faked, so what's under test is when current_port gets
 # written and what the update SQL touches.
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
+from src.constants import AgentRuntime
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
 from src.services import devenv
@@ -25,7 +28,9 @@ def updates(monkeypatch):
 
 
 def _fake_session_on(monkeypatch, port, port_holders=()):
-    """The session comes up on `port`; `port_holders` are the projects the db says hold that port."""
+    """The tmux session comes up on `port`; `port_holders` are the projects the db says hold that port. The
+    runtime is pinned to tmux -- these are its port bookkeeping, whatever AGENT_RUNTIME is set to."""
+    monkeypatch.setattr(sessions, "AGENT_RUNTIME", AgentRuntime.TMUX)
 
     async def fake_ensure_workspace(project, conversation_id):
         pass
@@ -47,7 +52,7 @@ def _fake_session_on(monkeypatch, port, port_holders=()):
 
 async def test_ensure_session_records_a_new_port(monkeypatch, updates):
     _fake_session_on(monkeypatch, 8899)
-    assert await sessions.ensure_session({"id": 1, "current_port": None}, 5) == 8899
+    await sessions.ensure_session({"id": 1, "current_port": None}, 5)
     assert updates == [(1, {"current_port": 8899})]
 
 
@@ -135,35 +140,64 @@ async def test_open_project_ensures_the_devenv_only_once_implementing(stage, mon
     assert calls == (["session", "introduced", ("devenv", 5)] if stage == "implementing" else ["session", "introduced"])
 
 
-async def test_the_agent_is_introduced_once_and_retried_after_a_failure(monkeypatch):
-    claimed = set()
-    introduced = []
+@pytest.fixture
+def introductions(monkeypatch):
+    """ensure_introduced over fakes: claims as {(conversation, key): claimed at}, the log as a list the test
+    fills, introductions recorded (failing while `failures` has any)."""
+    state = {
+        "claims": {},
+        "log": [],
+        "introduced": [],
+        "failures": [],
+    }
 
-    async def fake_claim(conversation_id, key):
-        if (conversation_id, key) in claimed:
+    async def fake_claim(conversation_id, key, stale_before=None):
+        claimed_at = state["claims"].get((conversation_id, key))
+        if claimed_at is not None and not (stale_before and claimed_at < stale_before):
             return False
-        claimed.add((conversation_id, key))
+        state["claims"][(conversation_id, key)] = datetime.now(UTC)
         return True
 
     async def fake_delete(conversation_id, key):
-        claimed.discard((conversation_id, key))
+        state["claims"].pop((conversation_id, key), None)
 
-    failures = [sessions.SessionUnavailable("not yet")]
+    async def fake_log(conversation_id, before_seq, limit):
+        return state["log"]
 
     async def fake_introduce(project, conversation_id):
-        if failures:
-            raise failures.pop()
-        introduced.append(conversation_id)
+        if state["failures"]:
+            raise state["failures"].pop()
+        state["introduced"].append(conversation_id)
 
     monkeypatch.setattr(sessions.ai_conversations_repo, "claim_meta_key", fake_claim)
     monkeypatch.setattr(sessions.ai_conversations_repo, "delete_meta_key", fake_delete)
+    monkeypatch.setattr(sessions.ai_messages_repo, "find_before", fake_log)
     monkeypatch.setattr(sessions, "introduce_project", fake_introduce)
+    return state
 
+
+async def test_the_agent_is_introduced_once_and_retried_after_a_failure(introductions):
+    introductions["failures"] = [sessions.SessionUnavailable("not yet")]
     with pytest.raises(sessions.SessionUnavailable):
         await sessions.ensure_introduced({"id": 1}, 5)  # fails: the claim is given back
     await sessions.ensure_introduced({"id": 1}, 5)  # the next open tries again
-    await sessions.ensure_introduced({"id": 1}, 5)  # and from then on it's done
-    assert introduced == [5]
+    introductions["log"] = [{"role": "assistant", "content": [{"type": "text", "text": "Welcome!"}]}]
+    await sessions.ensure_introduced({"id": 1}, 5)  # and once the agent has spoken, it's done
+    assert introductions["introduced"] == [5]
+
+
+async def test_an_introduction_the_agent_never_answered_is_retried_once_overdue(introductions):
+    await sessions.ensure_introduced({"id": 1}, 5)
+    # Its first turn died: only a signal in the log, no word from the agent.
+    introductions["log"] = [{"role": "assistant", "content": [{"type": "signal", "slug": "BUILDING_DONE"}]}]
+    await sessions.ensure_introduced({"id": 1}, 5)  # too soon to call it failed
+    assert introductions["introduced"] == [5]
+
+    claim = (5, sessions.CONVERSATION_INTRODUCED_KEY)
+    introductions["claims"][claim] -= timedelta(minutes=10)  # ...time passes: now it's overdue
+    await sessions.ensure_introduced({"id": 1}, 5)
+    await sessions.ensure_introduced({"id": 1}, 5)  # a second tab right after: the re-claim is fresh again
+    assert introductions["introduced"] == [5, 5]
 
 
 # --- close_project ---

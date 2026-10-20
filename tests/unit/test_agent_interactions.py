@@ -271,3 +271,15 @@ def test_mock_lists_uploads_with_types_and_sizes():
         [{"name": "logo.png", "mime": "image/png", "size": 2048}, {"name": "a.txt", "mime": "text/plain", "size": 5}]
     )
     assert reply[0]["text"].splitlines()[1:] == ["- logo.png (image/png, 2.0 KB)", "- a.txt (text/plain, 5 B)"]
+
+
+def test_options_with_subtitles_are_answered_by_label():
+    question = {
+        "question": "Layout?",
+        "options": ["Plain", {"label": "Grid", "description": "Cards in rows"}],
+        "multi_select": False,
+        "allow_custom": True,
+    }
+    _validate_questions([question], [_submitted(["Grid"])])
+    with pytest.raises(InvalidSubmission, match="not among the options"):
+        _validate_questions([question], [_submitted(["Cards in rows"])])

@@ -74,8 +74,7 @@ async def _set_up_and_report(project: Project, conversation_id: int) -> None:
             ]
         )
     await publish_devenv_changed(conversation_id)
-    port = await sessions.ensure_session(project, conversation_id)
-    await sessions.send(conversation_id, port, [{"type": "text", "text": report}])
+    await sessions.send(project, conversation_id, [{"type": "text", "text": report}])
 
 
 def _describe_ready(description: dict) -> str:

@@ -1,6 +1,7 @@
 # Intentions: data access for the `ai_conversations` table -- a project's chat threads with the agent.
 # Schema: migrations/0006_ai_conversations.sql. Every read skips soft-deleted rows.
 
+from datetime import datetime
 from typing import Any, cast
 
 import pydash
@@ -37,16 +38,19 @@ async def insert(data: dict[str, Any]) -> AiConversation:
     return cast("AiConversation", inserted)
 
 
-async def claim_meta_key(conversation_id: int, key: str) -> bool:
+async def claim_meta_key(conversation_id: int, key: str, stale_before: datetime | None = None) -> bool:
     """Set meta[key] to the current time unless the conversation already has it, in ONE statement -- so
     of several callers racing for the same key exactly one gets True. A one-time marker ("this has
-    been done"); delete_meta_key gives it back."""
+    been done"); delete_meta_key gives it back. With `stale_before`, a marker set before that time can be
+    claimed again too -- still by exactly one of the racers, since the first one moves it to now."""
     sql = """
         UPDATE ai_conversations SET meta = meta || jsonb_build_object($key::text, now())
-        WHERE id = $conversation_id AND deleted_at IS NULL AND NOT meta ? $key::text
+        WHERE id = $conversation_id AND deleted_at IS NULL
+          AND (NOT meta ? $key::text OR (meta ->> $key::text)::timestamptz < $stale_before::timestamptz)
         RETURNING id
     """
-    return await postgres.fetchrow(sql, {"conversation_id": conversation_id, "key": key}) is not None
+    params = {"conversation_id": conversation_id, "key": key, "stale_before": stale_before}
+    return await postgres.fetchrow(sql, params) is not None
 
 
 async def delete_meta_key(conversation_id: int, key: str) -> None:

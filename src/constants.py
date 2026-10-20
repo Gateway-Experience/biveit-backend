@@ -145,6 +145,52 @@ SESSION_PORT_RANGE = (40000, 60000)
 # How long a freshly picked port stays reserved -- covers the gap until the session actually binds it.
 SESSION_PORT_LOCK_TTL_SECONDS = 300
 SESSION_PORT_MAX_ATTEMPTS = 1000
+
+
+class AgentRuntime(StrEnum):
+    """How a conversation's agent session runs (AGENT_RUNTIME)."""
+
+    TMUX = "tmux"  # Claude Code in tmux + the communication MCP's development channel (services/agent/adapter)
+    SDK = "sdk"  # a Claude Agent SDK runner per conversation (services/agent2)
+
+
+# Which runtime new sessions start on (services/agent/sessions). Stopping always tries both, so switching
+# leaves nothing running behind. Existing workspaces keep their Claude history either way.
+AGENT_RUNTIME = AgentRuntime.SDK
+
+# --- agent2: the Claude Agent SDK runtime (services/agent2 + runners/agent2) ---
+# One runner process per conversation holds its SDK session; it listens on a unix socket next to the
+# conversation's workspace, and is told where that is through this env var.
+AGENT2_SOCKET_ENV = "AGENT_SOCKET"
+# How long ensure_session waits for a freshly spawned runner to answer before giving up.
+AGENT2_START_WAIT_SECONDS = 30
+# How long a new runner waits for the conversation's socket while another holds it -- one shutting down
+# lets go within seconds; a live one never does, and the new one exits. Under AGENT2_START_WAIT_SECONDS.
+AGENT2_CLAIM_WAIT_SECONDS = 10
+# How long a question's asker waits for the session stream to show its call (runners/agent2/main.claim_question)
+# before posting it without its lead-up. It's normally there already, or a moment later.
+AGENT2_QUESTION_SHOWN_WAIT_SECONDS = 5
+# How long the backend waits on any one request to a runner (they all answer right away) before calling it hung.
+AGENT2_REQUEST_TIMEOUT_SECONDS = 10
+# The agent's own permission mode in its runner: nobody watches it, so it must never stop to ask.
+AGENT2_PERMISSION_MODE = "auto"
+# How Claude Code runs in agent2's runners against another endpoint (settings.anthropic_base_url), as the env
+# vars it reads -- applied only then; on Anthropic's own API, Claude Code's defaults apply. Now: DeepSeek.
+#   models etc.               per DeepSeek's Claude Code guide ([1m] = the 1M-token context window)
+#   CLAUDE_CODE_INLINE_TOOLS  off: newer Claude Code declares tools inline (tool_definition blocks), which
+#                             DeepSeek can't parse -- it answers 422, which Claude Code doesn't recognise as
+#                             "unsupported", so it never falls back on its own
+AGENT2_ENDPOINT_ENV = {
+    "CLAUDE_CODE_INLINE_TOOLS": "false",
+    "ANTHROPIC_MODEL": "deepseek-flash[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-flash[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-flash[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-flash",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "deepseek-flash",
+    "CLAUDE_CODE_EFFORT_LEVEL": "max",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "950000",
+}
+
 # Per-project mutex around find-or-start, so two concurrent calls can't both start a session.
 # Generous, since starting a session now includes waiting out its startup prompt (below).
 SESSION_LOCK_TTL_SECONDS = 120
@@ -236,8 +282,13 @@ class DevServerAction(StrEnum):
 AGENT_MOCK_REPLIES = False
 
 # The ai_conversations.meta key marking that the agent was handed the project's starting form
-# (services/agent/sessions.ensure_introduced) -- set once, by whichever open gets there first.
+# (services/agent/sessions.ensure_introduced) -- set by whichever open gets there first. The FE reads it too.
 CONVERSATION_INTRODUCED_KEY = "introduced_at"
+# How long after the introduction the agent may stay silent before it counts as failed: its first turn
+# died after getting the introduction (an API error, a crash), and nothing else would ever resend it. The
+# next open then introduces it again (ensure_introduced). Generous: a first turn normally takes a minute or two.
+# The FE uses the same figure to offer a retry -- keep them in step (vib3-frontend INTRODUCTION_OVERDUE_MS).
+INTRODUCTION_OVERDUE_SECONDS = 300
 
 # Per-project mutex around "find or create the current conversation" (services/agent/conversations).
 AI_CONVERSATION_LOCK_TTL_SECONDS = 10

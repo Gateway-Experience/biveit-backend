@@ -117,7 +117,7 @@ def _check_question_answer(index: int, question: dict, value: Any) -> str | None
     if not isinstance(value, dict) or not isinstance(value.get("selected"), list):
         return f"#{index}: value must be {{selected: [...], custom: str | null}}"
     selected, custom = value["selected"], value.get("custom")
-    unknown = [option for option in selected if option not in question["options"]]
+    unknown = [option for option in selected if option not in get_option_labels(question)]
     if unknown:
         return f"#{index}: not among the options: {unknown}"
     if len(set(selected)) != len(selected):
@@ -129,6 +129,12 @@ def _check_question_answer(index: int, question: dict, value: Any) -> str | None
     if not question.get("multi_select", False) and len(selected) + (custom is not None) != 1:
         return f"#{index}: single-select takes exactly one answer (an option or a custom text)"
     return None
+
+
+def get_option_labels(question: dict) -> list[str]:
+    """[Pure] A question's option labels -- what an answer selects. An option is either its label (a plain
+    string) or {label, description?}, the description being a subtitle the FE shows under it."""
+    return [option if isinstance(option, str) else option["label"] for option in question["options"]]
 
 
 def _check_action_answer(index: int, action: dict, value: Any) -> str | None:

@@ -334,8 +334,8 @@ async def _send_to_agent(conversation: AiConversation, user_message: AiMessage) 
 
     Raises sessions.SessionUnavailable if the session can't be reached. The message stays stored either
     way -- it just didn't get through."""
-    port = await sessions.ensure_session(await get_conversation_project(conversation), conversation["id"])
-    await sessions.send(conversation["id"], port, sessions.to_session_content(user_message))
+    project = await get_conversation_project(conversation)
+    await sessions.send(project, conversation["id"], sessions.to_session_content(user_message))
 
 
 async def _get_mock_reply(conversation: AiConversation, user_message: AiMessage) -> list[dict] | None:

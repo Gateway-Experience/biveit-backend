@@ -5,6 +5,7 @@
 import pytest
 
 from src.config import settings
+from src.constants import AgentRuntime
 from src.services.agent import sessions, tokens
 from src.utils import http
 
@@ -39,14 +40,14 @@ def test_text_and_attachments_go_as_text_items():
 
 
 def test_answers_keep_their_order_and_untouched_becomes_skipped():
-    # The stored message already answers every question in the order asked (post_user_message's job),
-    # so the channel's match-by-position works by keeping that order.
+    # The stored message already answers every question in the order asked (post_user_message's job), so
+    # the first runtime's match-by-position works by keeping that order; agent2 matches by tool_use_id.
     content = sessions.to_session_content(
         _msg("user", _answer("q1", {"status": "aborted"}, {"status": "untouched"}), _answer("q2", _PICKED))
     )
     assert content == [
-        {"type": "tool_result", "content": [{"status": "aborted"}, {"status": "skipped"}]},
-        {"type": "tool_result", "content": [_PICKED]},
+        {"type": "tool_result", "tool_use_id": "q1", "content": [{"status": "aborted"}, {"status": "skipped"}]},
+        {"type": "tool_result", "tool_use_id": "q2", "content": [_PICKED]},
     ]
 
 
@@ -96,7 +97,7 @@ async def test_send_retries_until_a_fresh_session_listens(monkeypatch):
     monkeypatch.setattr(sessions, "SESSION_SEND_ATTEMPTS", 5)
     monkeypatch.setattr(sessions, "exponential_backoff", lambda *a, **k: lambda attempt: 0)
 
-    await sessions.send(5, 8899, [{"type": "text", "text": "hi"}])
+    await sessions._send_to_port(5, 8899, [{"type": "text", "text": "hi"}])
     assert len(calls) == 3
     # Every push carries the conversation's session token -- the inbox refuses anything without it.
     assert calls[-1] == (
@@ -117,7 +118,7 @@ async def test_send_raises_session_unavailable(outcome, monkeypatch):
     monkeypatch.setattr(http, "request", request)
     monkeypatch.setattr(sessions, "exponential_backoff", lambda *a, **k: lambda attempt: 0)
     with pytest.raises(sessions.SessionUnavailable):
-        await sessions.send(5, 8899, [{"type": "text", "text": "hi"}])
+        await sessions._send_to_port(5, 8899, [{"type": "text", "text": "hi"}])
 
 
 async def test_the_introduction_carries_the_form_and_the_owners_language(monkeypatch):
@@ -130,7 +131,7 @@ async def test_the_introduction_carries_the_form_and_the_owners_language(monkeyp
     async def fake_ensure_session(project, conversation_id):
         return 47000
 
-    async def fake_send(conversation_id, port, content):
+    async def fake_send(project, conversation_id, content):
         pushed.append(content[0]["text"])
 
     monkeypatch.setattr(sessions.users_repo, "get", fake_get_user)
@@ -141,3 +142,46 @@ async def test_the_introduction_carries_the_form_and_the_owners_language(monkeyp
     await sessions.introduce_project(project, 5)
     assert "Project name: Bean & Brew" in pushed[0] and '"kind": "café"' in pushed[0]
     assert "Their language: Vietnamese (vi)" in pushed[0]
+
+
+# --- the runtime switch ---
+
+
+async def test_the_sdk_runtime_goes_through_agent2(monkeypatch):
+    calls = []
+
+    async def fake_ensure(project, conversation_id):
+        calls.append(("ensure", conversation_id))
+
+    async def fake_send(project, conversation_id, content):
+        calls.append(("send", conversation_id, content))
+
+    async def no_runner(project, conversation_id):
+        raise sessions.agent2.RunnerUnavailable("no key")
+
+    monkeypatch.setattr(sessions, "AGENT_RUNTIME", AgentRuntime.SDK)
+    monkeypatch.setattr(sessions.agent2, "ensure_session", fake_ensure)
+    monkeypatch.setattr(sessions.agent2, "send", fake_send)
+    await sessions.send({"id": 3}, 5, [{"type": "text", "text": "hi"}])
+    assert calls == [("ensure", 5), ("send", 5, [{"type": "text", "text": "hi"}])]
+
+    monkeypatch.setattr(sessions.agent2, "ensure_session", no_runner)
+    with pytest.raises(sessions.SessionUnavailable):  # callers only ever see SessionUnavailable
+        await sessions.ensure_session({"id": 3}, 5)
+
+
+async def test_stopping_stops_both_runtimes(monkeypatch):
+    async def fake_adapter_stop(project, conversation_id):
+        return {"tmux_session": False, "pids": []}
+
+    async def fake_runner_stop(project, conversation_id):
+        return True
+
+    async def no_open_build(conversation_id, description):
+        pass
+
+    monkeypatch.setattr(sessions.adapter, "stop_session", fake_adapter_stop)
+    monkeypatch.setattr(sessions.agent2, "stop_session", fake_runner_stop)
+    monkeypatch.setattr(sessions.signals, "end_open_build", no_open_build)
+    stopped = await sessions.stop_session({"id": 3, "current_port": None}, 5)
+    assert stopped == {"tmux_session": False, "pids": [], "runner": True}
