@@ -4,13 +4,13 @@
 # (the controller), swap in the real key and pass the call on, streaming the answer straight back. One place
 # every model call goes through is also where metering and limits would go.
 #
-# Only the paths Claude Code needs to talk to the model are forwarded (AGENT2_MODEL_PROXY_PATHS): with our
+# Only the paths Claude Code needs to talk to the model are forwarded (MODEL_PROXY_PATHS): with our
 # key, a provider's other endpoints (files, batches, admin) are ours, not the agent's.
 
 import aiohttp
 
 from src.config import settings
-from src.constants import AGENT2_DEFAULT_MODEL_BASE_URL, AGENT2_MODEL_PROXY_PATHS, AGENT2_MODEL_READ_TIMEOUT_SECONDS
+from src.constants import MODEL_PROXY_DEFAULT_BASE_URL, MODEL_PROXY_PATHS, MODEL_PROXY_READ_TIMEOUT_SECONDS
 from src.utils import http
 
 # Not passed on: the caller's own credentials (replaced by ours), hop-by-hop ones, and accept-encoding --
@@ -30,11 +30,11 @@ async def open_model_request(method: str, path: str, query: str, headers: dict, 
     """Send an agent's model call on to the model endpoint with our key, and return the open response for
     the caller to stream back -- and release. `path` is what came after /agent/model/ (e.g. v1/messages).
     Raises ModelPathRefused, ModelUnavailable."""
-    if path not in AGENT2_MODEL_PROXY_PATHS:
+    if path not in MODEL_PROXY_PATHS:
         raise ModelPathRefused(path)
     if not settings.anthropic_api_key and not settings.anthropic_auth_token:
         raise ModelUnavailable("neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set")
-    base_url = (settings.anthropic_base_url or AGENT2_DEFAULT_MODEL_BASE_URL).rstrip("/")
+    base_url = (settings.anthropic_base_url or MODEL_PROXY_DEFAULT_BASE_URL).rstrip("/")
     forwarded = {name: value for name, value in headers.items() if name.lower() not in _DROPPED_HEADERS}
     try:
         return await http.session().request(
@@ -43,7 +43,7 @@ async def open_model_request(method: str, path: str, query: str, headers: dict, 
             data=body,
             headers={**forwarded, **_to_auth_headers()},
             auto_decompress=False,
-            timeout=aiohttp.ClientTimeout(total=None, sock_read=AGENT2_MODEL_READ_TIMEOUT_SECONDS),
+            timeout=aiohttp.ClientTimeout(total=None, sock_read=MODEL_PROXY_READ_TIMEOUT_SECONDS),
         )
     except (OSError, aiohttp.ClientError) as error:
         raise ModelUnavailable(f"the model endpoint is unreachable: {error}") from error

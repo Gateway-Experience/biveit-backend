@@ -18,7 +18,6 @@ from starlette.middleware.sessions import SessionMiddleware
 from src import debug_scratch
 from src.config import settings
 from src.constants import AGENT_LISTENER_PORT, DEVENV_IDLE_SWEEP_SECONDS, SERVER_GRACEFUL_SHUTDOWN_SECONDS
-from src.controllers.agent import listener_router as agent_listener_router
 from src.controllers.agent import router as agent_router
 from src.controllers.auth import router as auth_router
 from src.controllers.conversations import router as conversations_router
@@ -106,11 +105,8 @@ async def _serve_agent_listener() -> uvicorn.Server | None:
     except Exception as error:
         log_error(error, "no projects' network (is docker there?): the agent listener isn't started")
         return None
-    listener_app = FastAPI(title=f"{settings.app_name} agents")
-    listener_app.include_router(agent_router, prefix=_API_PREFIX)
-    listener_app.include_router(agent_listener_router, prefix=_API_PREFIX)
     config = uvicorn.Config(
-        listener_app,
+        create_listener_app(),
         host=devenv.get_gateway_ip(),
         port=AGENT_LISTENER_PORT,
         lifespan="off",
@@ -125,6 +121,13 @@ async def _serve_agent_listener() -> uvicorn.Server | None:
     server.lifespan = config.lifespan_class(config)
     await server.startup()
     return server
+
+
+def create_listener_app() -> FastAPI:
+    """The agent listener's app (_serve_agent_listener): the agent endpoints, and nothing else."""
+    listener_app = FastAPI(title=f"{settings.app_name} agents")
+    listener_app.include_router(agent_router, prefix=_API_PREFIX)
+    return listener_app
 
 
 def create_app() -> FastAPI:
@@ -157,7 +160,6 @@ def create_app() -> FastAPI:
     app.include_router(auth_router, prefix=_API_PREFIX)
     app.include_router(projects_router, prefix=_API_PREFIX)
     app.include_router(project_folders_router, prefix=_API_PREFIX)
-    app.include_router(agent_router, prefix=_API_PREFIX)
     app.include_router(conversations_router, prefix=_API_PREFIX)
     app.include_router(system_configurations_router, prefix=_API_PREFIX)
     app.include_router(system_router, prefix=_API_PREFIX)

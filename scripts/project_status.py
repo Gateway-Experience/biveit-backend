@@ -6,11 +6,8 @@
 #   uv run python -m scripts.project_status <project id> [--conversation <id>]  # one project
 #
 # The system view: platform config, the infra everything shares, the tools the setup needs, and what's
-# running across all projects. The project view: its workspace on disk, its agent session, its dev
-# servers, and its own slice of the infra.
-#
-# Both agent runtimes are checked side by side -- the tmux one (services/agent/adapter) and agent2's SDK
-# runners (services/agent2) -- so neither has to be guessed: whichever is running shows up.
+# running across all projects. The project view: its workspace on disk, its agent's runner (services/agent/runners),
+# its container, its dev servers, and its own slice of the infra.
 #
 # Each check that can fail (a dead redis, no pm2...) says so in its own section instead of stopping the rest.
 
@@ -29,20 +26,17 @@ import redis.asyncio as redis_lib
 from src.config import settings
 from src.constants import (
     AGENT_MOCK_REPLIES,
-    AGENT_RUNTIME,
     DEVENV_APP_DIRS,
     DEVENV_BACKEND_HEALTH_PATH,
     DEVENV_ENV_FILES,
     PROJECT_REDIS_DATABASES_NEEDED,
-    SESSION_PORT_ENV,
-    SESSION_PORT_RANGE,
 )
 from src.dto.projects import Project
 from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
-from src.services import agent2, devenv
-from src.services.agent import adapter, storage
+from src.services import devenv
+from src.services.agent import runners, storage
 from src.services.devenv import addresses, servers
 from src.utils import http, postgres, redis
 from src.utils.processes import CommandFailed, run_command
@@ -88,7 +82,6 @@ async def _report_project(project: Project, conversations: list[dict], conversat
             ("name", project["name"]),
             ("stage", project["stage"]),
             ("owner (user id / hash)", f"{project['user_id']} / {project['user_hash']}"),
-            ("current_port (bookkeeping)", project["current_port"]),
             # The one reported on below first (marked *), then the rest.
             (
                 "conversations",
@@ -136,53 +129,15 @@ async def _report_directory(project: Project, conversation_id: int) -> None:
     )
 
 
-async def _report_session(project: Project, conversation_id: int) -> None:
-    workspace = devenv.get_conversation_dir(project, conversation_id)
-    tmux_session = f"conv_{conversation_id}"
-    try:
-        await run_command(["tmux", "has-session", "-t", tmux_session])
-        tmux_state = "running"
-    except (CommandFailed, FileNotFoundError):
-        tmux_state = "not running"
-    processes = await adapter.find_session_processes(workspace)
-    ports = [
-        int(match.group(1))
-        for process in processes
-        for entry in process["environ"]
-        if (match := re.match(rf"^{SESSION_PORT_ENV}=(\d+)$", entry))
-    ]
-    port = pydash.head(ports)
-    transcript = adapter.get_latest_claude_transcript(workspace)
+async def _report_runner(project: Project, conversation_id: int) -> None:
+    socket_path = Path(runners.get_socket_path(project, conversation_id))
+    log_path = Path(runners.get_log_path(project, conversation_id))
     _print_section(
-        "Agent session",
+        "Agent runner",
         [
-            ("tmux session", f"{tmux_session} ({tmux_state}) -- attach: tmux attach -t {tmux_session}"),
-            (
-                "session processes",
-                len(processes) if len(processes) <= 1 else f"{len(processes)} -- TOO MANY, should be 1",
-            ),
-            *[(f"  pid {p['pid']}", " ".join(p["cmdline"])[:100]) for p in processes],
-            ("channel port", f"{port} ({'listening' if _is_listening(port) else 'NOT listening'})" if port else "-"),
-            ("claude session id", transcript.stem if transcript else "-"),
-        ],
-    )
-
-
-async def _report_agent2_runner(project: Project, conversation_id: int) -> None:
-    workspace = devenv.get_conversation_dir(project, conversation_id)
-    socket_path = Path(agent2.get_socket_path(project, conversation_id))
-    log_path = Path(agent2.get_log_path(project, conversation_id))
-    runners = [
-        process for process in await adapter.get_all_processes(workspace) if "session_runner" in process["cmdline"]
-    ]
-    _print_section(
-        "Agent2 runner (SDK)",
-        [
-            ("up (answers on its socket)", "yes" if await agent2.is_session_up(project, conversation_id) else "no"),
+            ("up (answers on its socket)", "yes" if await runners.is_session_up(project, conversation_id) else "no"),
             ("socket", f"{socket_path} ({'present' if socket_path.exists() else '-'})"),
             ("pm2 process (in the container)", await _describe_runner_process(project, conversation_id)),
-            ("runner processes", len(runners) if len(runners) <= 1 else f"{len(runners)} -- TOO MANY, should be 1"),
-            *[(f"  pid {p['pid']}", " ".join(p["cmdline"])[:100]) for p in runners],
             ("log", f"{log_path} ({'present' if log_path.exists() else '-'})"),
         ],
     )
@@ -207,7 +162,7 @@ async def _report_container(project: Project) -> None:
 
 async def _describe_runner_process(project: Project, conversation_id: int) -> str:
     """The runner's pm2 process in the project's container and its state -- or why there's none."""
-    name = agent2.get_process_name(conversation_id)
+    name = runners.get_process_name(conversation_id)
     if not await devenv.is_container_running(project["id"]):
         return f"{name} (container not running)"
     try:
@@ -280,10 +235,7 @@ async def _report_infra(project: Project, conversation_id: int) -> None:
         return "HELD" if await redis.flag_exists(key) else "free"
 
     try:
-        locks = [
-            ("lock devenv", await _redis_flag(f"devenv:{conversation_id}")),
-            ("lock agent_session", await _redis_flag(f"agent_session:{conversation_id}")),
-        ]
+        locks = [("lock devenv", await _redis_flag(f"devenv:{conversation_id}"))]
     except Exception as error:
         locks = [("platform redis", f"unreachable: {error}")]
     redis_db = addresses.get_dev_redis_db(project["id"])
@@ -323,9 +275,11 @@ async def _report_platform() -> None:
         [
             ("env", settings.env),
             ("api", f"port {settings.api_port}, health {await _check_health(settings.api_port, '/api/debug/health')}"),
-            ("agent", "MOCK replies" if AGENT_MOCK_REPLIES else f"real sessions, runtime: {AGENT_RUNTIME}"),
+            (
+                "agent",
+                "MOCK replies" if AGENT_MOCK_REPLIES else "real sessions (SDK runners in the projects' containers)",
+            ),
             ("dev domain", "none (local: no dev sites)" if local else settings.dev_domain or "NONE -- no dev sites"),
-            ("session ports", f"{SESSION_PORT_RANGE[0]}-{SESSION_PORT_RANGE[1]}, random"),
             (
                 "project dev ports",
                 f"{addresses.get_dev_backend_port(0)} / {addresses.get_dev_frontend_port(0)} for every project (local)"
@@ -404,24 +358,10 @@ async def _ping_redis(redis_url: str) -> str:
         await client.aclose()
 
 
-async def _get_conversation_project_id(conversation_id: int) -> int | str:
-    conversation = await ai_conversations_repo.get(conversation_id)
-    return conversation["project_id"] if conversation else "? (conversation gone)"
-
-
 async def _report_running() -> None:
-    """What's running for us across all projects, as tmux and pm2 print it -- only our own entries (agent
-    sessions conv_<id>, dev servers project_<id>_be/_fe), never anything else on the box. Plus the locks
-    held in redis."""
-    try:
-        tmux_lines = (await run_command(["tmux", "ls"])).splitlines()
-    except (CommandFailed, FileNotFoundError):
-        tmux_lines = []  # no tmux server running = no sessions
-    agent_session_lines = [
-        f"{line}  -- project {await _get_conversation_project_id(int(match.group(1)))}"
-        for line in tmux_lines
-        if (match := re.match(r"conv_(\d+):", line))
-    ]
+    """What's running for us across all projects: the agents' runners (by their sockets), and the dev
+    servers as pm2 prints them -- only our own entries (project_<id>_be/_fe), never anything else on the
+    box. Plus the locks held in redis."""
     try:
         pm2_lines = (await run_command(["pm2", "ls", "--no-color"])).splitlines()
         # The table's rows start with │; borders don't. Keep the borders, the header row and our rows.
@@ -435,25 +375,17 @@ async def _report_running() -> None:
     except (CommandFailed, FileNotFoundError) as error:
         pm2_table = [f"pm2 unavailable: {error}"]
     try:
-        held_locks = sorted(
-            [
-                key.decode()
-                for pattern in ("devenv:*", "agent_session:*")
-                async for key in redis.client().scan_iter(match=pattern, count=500)
-            ]
-        )
+        held_locks = sorted([key.decode() async for key in redis.client().scan_iter(match="devenv:*", count=500)])
     except Exception as error:
         held_locks = [f"unreadable: {error}"]
-    print("\n== tmux ls (agent sessions) ==")
-    print("\n".join(agent_session_lines) or "  none")
-    print("\n== agent2 runners (SDK) ==")
-    print("\n".join(await _list_agent2_runners()) or "  none")
+    print("\n== agent runners ==")
+    print("\n".join(await _list_runners()) or "  none")
     print("\n== pm2 ls (dev servers) ==")
     print("\n".join(pm2_table) or "  none")
     _print_section("Locks", [("held", " ".join(held_locks) or "none")])
 
 
-async def _list_agent2_runners() -> list[str]:
+async def _list_runners() -> list[str]:
     """One line per runner socket: its conversation, project, and whether anything answers there (a socket
     left by a runner that died doesn't)."""
     sockets_root = Path(devenv.get_host_socket_dir(0)).parent  # one folder per project
@@ -466,7 +398,7 @@ async def _list_agent2_runners() -> list[str]:
     ]
     return [
         f"  conversation {conversation_id} -- project {project['id']}: "
-        + ("up" if await agent2.is_session_up(project, conversation_id) else "NOT answering (stale socket)")
+        + ("up" if await runners.is_session_up(project, conversation_id) else "NOT answering (stale socket)")
         if project
         else f"  conversation {conversation_id} -- no live project behind it"
         for conversation_id, project in zip(conversation_ids, projects, strict=True)
@@ -486,8 +418,7 @@ async def _report_project_status(project_id: int, conversation_id: int | None) -
         print("\n(no conversation yet -- nothing on disk or running to report)")
         return
     await _report_directory(project, conversation["id"])
-    await _report_session(project, conversation["id"])
-    await _report_agent2_runner(project, conversation["id"])
+    await _report_runner(project, conversation["id"])
     await _report_container(project)
     await _report_servers(project, conversation["id"])
     await _report_infra(project, conversation["id"])

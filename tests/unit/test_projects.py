@@ -11,7 +11,6 @@ from src.repositories import project_folders as project_folders_repo
 from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
 from src.services import projects as project_service
-from src.services.agent import adapter as agent_adapter
 from src.utils.auth import get_current_user
 
 _CALLER = {"id": 7, "username": "alice", "user_type": "USER"}
@@ -28,7 +27,6 @@ def _project(**overrides):
         "stage": "specing",
         "bootstrap_data": {},
         "implementation_done_at": None,
-        "current_port": None,
         "pinned_at": None,
         "folder_id": None,
         "meta": {},
@@ -133,7 +131,7 @@ def test_open_while_mocking_seeds_the_workspace_without_starting_a_session(
     async def no_session(project, conversation_id):
         raise AssertionError("no session while mocking")
 
-    monkeypatch.setattr(agent_adapter, "ensure_session", no_session)
+    monkeypatch.setattr(agent_service.sessions.runners, "ensure_session", no_session)
     monkeypatch.setattr(project_service, "AGENT_MOCK_REPLIES", True)
 
     response = client.post("/api/projects/1/open")

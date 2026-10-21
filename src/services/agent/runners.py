@@ -1,20 +1,19 @@
-# Intentions: agent2's sessions as the backend sees them -- each conversation's runner (vib3-session-runner)
-# started when needed, and talked to over its unix socket. The runtime-specific half only: what to say to
-# the agent (introductions, translating stored messages into the channel's format) stays where it is.
+# Intentions: each conversation's runner (vib3-session-runner), the process holding its agent's session --
+# started when needed, and talked to over its unix socket. The process side only: what to say to the agent
+# (introductions, translating stored messages into the channel's format) is sessions.py's.
 #
 # A runner runs IN its project's container (services/devenv/containers), under the container's pm2 as
-# runner_<conversation>, from the copy installed there (runners.py) -- and so does the Claude Code it
+# runner_<conversation>, from the copy installed there (runner_installs.py) -- and so does the Claude Code it
 # starts: everything the agent does happens in there. It belongs to the container, not to us, so a backend
 # restart or deploy doesn't touch it. It calls back to the backend's agent listener on the containers'
-# gateway (src/app.py), and so do Claude Code's model calls: the model key stays with us (agent2/models).
+# gateway (src/app.py), and so do Claude Code's model calls: the model key stays with us (model_proxy.py).
 #
 # Nothing is recorded anywhere. A conversation's runner listens at a socket in its project's socket folder
 # (mounted at /sockets), and "is it running?" is just "does it answer there?" -- so a crashed runner simply
 # stops answering (and pm2 starts it again), and the next ensure_session starts a fresh one if it must,
 # which continues the workspace's Claude session. Two racing starts are fine too: only one runner gets the
 # socket (the runner's main.claim_socket).
-# References: vib3-session-runner's session_runner/main.py (the other end), services/agent/adapter.py (the
-# tmux runtime).
+# References: vib3-session-runner's session_runner/main.py (the other end).
 
 import asyncio
 import os
@@ -24,22 +23,21 @@ import aiohttp
 
 from src.config import settings
 from src.constants import (
-    AGENT2_ENDPOINT_ENV,
-    AGENT2_REQUEST_TIMEOUT_SECONDS,
-    AGENT2_SOCKET_ENV,
-    AGENT2_START_WAIT_SECONDS,
+    AGENT_ENDPOINT_ENV,
     AGENT_LISTENER_PORT,
     DEVENV_SOCKETS_PATH,
     DEVENV_STATE_DIR,
     RUNNER_INSTALL_PATH,
+    RUNNER_REQUEST_TIMEOUT_SECONDS,
+    RUNNER_SEND_ATTEMPTS,
+    RUNNER_SOCKET_ENV,
+    RUNNER_START_WAIT_SECONDS,
     SESSION_OUTBOX_URL_ENV,
-    SESSION_SEND_ATTEMPTS,
     SESSION_TOKEN_ENV,
 )
 from src.dto.projects import Project
 from src.services import devenv
-from src.services.agent import tokens
-from src.services.agent2 import runners
+from src.services.agent import runner_installs, tokens
 from src.utils import paths
 from src.utils.common import exponential_backoff, with_retries
 from src.utils.processes import CommandFailed
@@ -87,11 +85,11 @@ async def ensure_session(project: Project, conversation_id: int) -> None:
     await devenv.ensure_workspace(project, conversation_id)
     try:
         await devenv.ensure_container(project)
-        await runners.ensure_runner_installed(project)
-    except (devenv.ContainerUnavailable, runners.RunnerInstallFailed) as error:
+        await runner_installs.ensure_runner_installed(project)
+    except (devenv.ContainerUnavailable, runner_installs.RunnerInstallFailed) as error:
         raise RunnerUnavailable(str(error)) from error
     await _start_runner(project, conversation_id)
-    await _wait_until_up(project, conversation_id, time.monotonic() + AGENT2_START_WAIT_SECONDS)
+    await _wait_until_up(project, conversation_id, time.monotonic() + RUNNER_START_WAIT_SECONDS)
 
 
 async def send(project: Project, conversation_id: int, content: list[dict]) -> None:
@@ -101,7 +99,7 @@ async def send(project: Project, conversation_id: int, content: list[dict]) -> N
     try:
         status = await with_retries(
             lambda: _request_runner(project, conversation_id, "POST", "/messages", {"content": content}),
-            retries=SESSION_SEND_ATTEMPTS,
+            retries=RUNNER_SEND_ATTEMPTS,
             calculate_backoff=exponential_backoff(0.2, cap=2),
             # Not listening yet / gone: OSErrors (aiohttp's connection errors included). But never a timeout
             # (an OSError too): the runner may well have taken the message, and a retry would say it twice.
@@ -146,7 +144,7 @@ async def _wait_until_up(project: Project, conversation_id: int, deadline: float
         return
     if time.monotonic() > deadline:
         raise RunnerUnavailable(
-            f"conversation {conversation_id}'s runner didn't come up within {AGENT2_START_WAIT_SECONDS}s "
+            f"conversation {conversation_id}'s runner didn't come up within {RUNNER_START_WAIT_SECONDS}s "
             + f"(see {get_log_path(project, conversation_id)})"
         )
     await asyncio.sleep(0.2)
@@ -195,12 +193,12 @@ def to_runner_env(conversation_id: int, token: str) -> dict[str, str]:
     """
     backend_url = get_backend_url()
     return {
-        AGENT2_SOCKET_ENV: f"{DEVENV_SOCKETS_PATH}/{conversation_id}.sock",
+        RUNNER_SOCKET_ENV: f"{DEVENV_SOCKETS_PATH}/{conversation_id}.sock",
         SESSION_OUTBOX_URL_ENV: backend_url,
         SESSION_TOKEN_ENV: token,
         "ANTHROPIC_BASE_URL": f"{backend_url}/api/agent/model",
         "ANTHROPIC_AUTH_TOKEN": token,
-        **(AGENT2_ENDPOINT_ENV if settings.anthropic_base_url else {}),
+        **(AGENT_ENDPOINT_ENV if settings.anthropic_base_url else {}),
         "DISABLE_AUTOUPDATER": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
@@ -224,7 +222,7 @@ async def _request_runner(
     this one socket, and these calls are rare."""
     headers = {"Authorization": f"Bearer {tokens.to_session_token(conversation_id)}"}
     connector = aiohttp.UnixConnector(path=get_socket_path(project, conversation_id))
-    timeout = aiohttp.ClientTimeout(total=AGENT2_REQUEST_TIMEOUT_SECONDS)
+    timeout = aiohttp.ClientTimeout(total=RUNNER_REQUEST_TIMEOUT_SECONDS)
     async with (
         aiohttp.ClientSession(connector=connector, timeout=timeout) as client,
         client.request(method, f"http://runner{path}", json=body, headers=headers) as response,

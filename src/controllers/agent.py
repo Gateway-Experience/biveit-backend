@@ -6,11 +6,10 @@
 #   POST /agent/signals      {slug, description?, meta?}: a signal from the agent (BUILDING, BUILDING_DONE);
 #                            403 for the ones only we write
 #   POST /agent/dev-servers  {action}: status / start / restart / stop the project's dev servers
-#   /agent/model/{path}      the model API, with OUR key (services/agent2/models): an agent's Claude Code
-#                            never holds the key. ONLY on the agent listener (listener_router, see src/app.py),
-#                            so a session token copied out of a container can't spend on our account
-# The agent listener (src/app.py, on the containers' gateway) serves all of these; the public API serves
-# `router` too, for the tmux runtime's sessions on the host.
+#   /agent/model/{path}      the model API, with OUR key (services/agent/model_proxy): an agent's Claude Code
+#                            never holds the key
+# Only the agent listener (src/app.py, on the containers' gateway) serves these, never the public API -- so
+# a session token copied out of a container can't spend on our account from outside.
 # Starting implementing and signing it off aren't the agent's to call: the user approves them in the chat
 # (services/agent/implementation).
 
@@ -19,7 +18,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.dto.ai_conversations import AiMessage, PostAgentMessageRequest, PostAgentSignalRequest, PostDevServersRequest
-from src.services import activity, agent2
+from src.services import activity
 from src.services import agent as agent_service
 from src.utils.logging import log_http_error
 
@@ -38,8 +37,6 @@ async def get_session_conversation_id(creds: HTTPAuthorizationCredentials | None
 
 
 router = APIRouter()
-# Only on the agent listener (src/app.py), never the public API.
-listener_router = APIRouter()
 
 
 @router.post("/agent/messages", status_code=201)
@@ -87,15 +84,15 @@ async def post_dev_servers(
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
 
 
-@listener_router.api_route("/agent/model/{path:path}", methods=["GET", "POST"])
+@router.api_route("/agent/model/{path:path}", methods=["GET", "POST"])
 async def proxy_model(path: str, request: Request, conversation_id: int = Depends(get_session_conversation_id)):
     try:
-        upstream = await agent2.open_model_request(
+        upstream = await agent_service.open_model_request(
             request.method, path, request.url.query, dict(request.headers), await request.body()
         )
-    except agent2.ModelPathRefused as error:
+    except agent_service.ModelPathRefused as error:
         raise HTTPException(status_code=404, detail="NOT_FOUND") from error
-    except agent2.ModelUnavailable as error:
+    except agent_service.ModelUnavailable as error:
         log_http_error(error, request)
         raise HTTPException(status_code=502, detail="MODEL_UNAVAILABLE") from error
 

@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 import pytest
 from fastapi.testclient import TestClient
 
-from src.app import create_app
+from src.app import create_app, create_listener_app
 from src.config import settings
 from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
@@ -124,6 +124,13 @@ def client(db) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_current_user] = lambda: _ALICE
     return TestClient(app)
+
+
+def _post_as_agent(conversation_id, path, body):
+    """The conversation's agent calling back in -- on the agent listener, which is the only app serving it."""
+    return TestClient(create_listener_app()).post(
+        path, json=body, headers={"Authorization": f"Bearer {tokens.to_session_token(conversation_id)}"}
+    )
 
 
 def _open_conversation(client) -> int:
@@ -669,9 +676,10 @@ def test_session_questions_can_be_answered_and_the_answers_go_back_in(client, db
     conversation_id = _open_conversation(client)
     # The session asks something -- the channel sends tool_use items with no id or name.
     monkeypatch.setattr(settings, "session_token_secret", "session-token-secret-for-tests")
-    asked = client.post(
+    asked = _post_as_agent(
+        conversation_id,
         "/api/agent/messages",
-        json={
+        {
             "content": [
                 {
                     "type": "tool_use",
@@ -683,7 +691,6 @@ def test_session_questions_can_be_answered_and_the_answers_go_back_in(client, db
                 }
             ]
         },
-        headers={"Authorization": f"Bearer {tokens.to_session_token(conversation_id)}"},
     ).json()
     tool_use = asked["content"][0]
     assert tool_use["name"] == "ask_user" and tool_use["id"].startswith("toolu_")
@@ -766,10 +773,10 @@ def test_a_batch_must_answer_every_pending_question_exactly_once(answers, client
 
 def _agent_requests_approval(client, conversation_id, action_name):
     """The session asks for an approval through its channel; returns the stored tool_use."""
-    asked = client.post(
+    asked = _post_as_agent(
+        conversation_id,
         "/api/agent/messages",
-        json={"content": [{"type": "tool_use", "input": {"actions": [{"name": action_name, "params": {}}]}}]},
-        headers={"Authorization": f"Bearer {tokens.to_session_token(conversation_id)}"},
+        {"content": [{"type": "tool_use", "input": {"actions": [{"name": action_name, "params": {}}]}}]},
     )
     assert asked.status_code == 201
     return asked.json()["content"][0]
@@ -827,11 +834,7 @@ def test_an_approval_holds_even_when_the_session_is_down(client, db, real_agent,
 def test_a_signal_after_the_question_doesnt_hide_it(client, db, real_agent, approvals):
     conversation_id = _open_conversation(client)
     tool_use = _agent_requests_approval(client, conversation_id, "APPROVE_SPEC")
-    client.post(
-        "/api/agent/signals",
-        json={"slug": "BUILDING_DONE"},
-        headers={"Authorization": f"Bearer {tokens.to_session_token(conversation_id)}"},
-    )
+    _post_as_agent(conversation_id, "/api/agent/signals", {"slug": "BUILDING_DONE"})
     assert _say(client, conversation_id, "just text").status_code == 409  # still pending: answer it first
     approved = [{"status": "submitted", "value": {"decision": "approved"}}]
     response = client.post(
@@ -843,10 +846,6 @@ def test_a_signal_after_the_question_doesnt_hide_it(client, db, real_agent, appr
 def test_resend_skips_the_signals_written_after_the_users_message(client, db, real_agent, approvals):
     conversation_id = _open_conversation(client)
     _say(client, conversation_id, "make it blue")
-    client.post(
-        "/api/agent/signals",
-        json={"slug": "BUILDING"},
-        headers={"Authorization": f"Bearer {tokens.to_session_token(conversation_id)}"},
-    )
+    _post_as_agent(conversation_id, "/api/agent/signals", {"slug": "BUILDING"})
     response = client.post(f"/api/conversations/{conversation_id}/resend")
     assert response.status_code == 200 and response.json()["content"] == [{"type": "text", "text": "make it blue"}]

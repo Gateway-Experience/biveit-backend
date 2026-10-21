@@ -97,12 +97,12 @@ class Settings(BaseSettings):
     # session can be started, and no session call is accepted (fail closed). Long and random per env.
     session_token_secret: str = ""
 
-    # What agent2's runners bill to (services/agent2) -- one of the two is required outside local: without
+    # What the agents' model calls bill to (services/agent/model_proxy) -- one of the two is required outside local: without
     # them Claude Code falls back to whatever claude.ai login the machine has, and a subscription may not
     # power a product for other people. Locally, both empty = your own login, for trying things out.
     #   anthropic_api_key     Anthropic's own API
     #   anthropic_auth_token  a key for another endpoint speaking Anthropic's API, at anthropic_base_url
-    #                         (e.g. DeepSeek's https://api.deepseek.com/anthropic -- see AGENT2_ENDPOINT_ENV
+    #                         (e.g. DeepSeek's https://api.deepseek.com/anthropic -- see AGENT_ENDPOINT_ENV
     #                         for the models that go with it)
     anthropic_api_key: str = ""
     anthropic_base_url: str = ""
@@ -110,7 +110,7 @@ class Settings(BaseSettings):
 
     # Dev environments (services/devenv), set up once a conversation's agent starts implementing.
     # The session runner's checkout (the vib3-session-runner repo, also the backend's own dependency): what
-    # gets installed into each project's container (services/agent2/runners).
+    # gets installed into each project's container (services/agent/runner_installs).
     session_runner_dir: str = "../vib3-session-runner"
     # boilerplate_dir: the app copied in (its backend/ and frontend/), whose env templates (each app's own,
     # see DEVENV_ENV_FILES) are rendered for each project. devenv_templates_dir: the platform's own templates,

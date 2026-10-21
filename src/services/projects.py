@@ -4,8 +4,8 @@
 # its stage says), turning it all off again (close_project), deleting it (delete_project), and the
 # user's edits from the project list and sidebar (update_project: rename, pin, file into a folder), and
 # finding projects by what the user wrote while prompting (search_prompts).
-# The workspace is per CONVERSATION (see services/devenv); keeping current_port up to date is
-# services/agent's job. Plain CRUD skips this layer and goes straight to repositories/projects.
+# The workspace is per CONVERSATION (see services/devenv). Plain CRUD skips this layer and goes straight to
+# repositories/projects.
 
 from typing import Any
 

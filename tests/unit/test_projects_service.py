@@ -1,79 +1,16 @@
-# Session port bookkeeping (services/agent/sessions.ensure_session) + projects repo-update tests. No db
-# and no real sessions: the adapter and postgres are faked, so what's under test is when current_port gets
-# written and what the update SQL touches.
+# Projects service + repo-update tests. No db and no real sessions: the agent, devenv and postgres are faked,
+# so what's under test is what gets started/stopped and what the update SQL touches.
 
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from src.constants import AgentRuntime
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
-from src.services import activity, devenv
+from src.services import activity
 from src.services import projects as projects_service
-from src.services.agent import adapter, sessions
+from src.services.agent import sessions
 from src.utils import postgres
-
-
-@pytest.fixture
-def updates(monkeypatch):
-    """Records every projects_repo.update call as (project_id, updates)."""
-    calls = []
-
-    async def fake_update(project_id, project_updates):
-        calls.append((project_id, project_updates))
-
-    monkeypatch.setattr(projects_repo, "update", fake_update)
-    return calls
-
-
-def _fake_session_on(monkeypatch, port, port_holders=()):
-    """The tmux session comes up on `port`; `port_holders` are the projects the db says hold that port. The
-    runtime is pinned to tmux -- these are its port bookkeeping, whatever AGENT_RUNTIME is set to."""
-    monkeypatch.setattr(sessions, "AGENT_RUNTIME", AgentRuntime.TMUX)
-
-    async def fake_ensure_workspace(project, conversation_id):
-        pass
-
-    async def fake_ensure_session(project, conversation_id):
-        return port
-
-    async def fake_find(criteria):
-        assert criteria == {"current_port": port}
-        return list(port_holders)
-
-    monkeypatch.setattr(devenv, "ensure_workspace", fake_ensure_workspace)
-    monkeypatch.setattr(adapter, "ensure_session", fake_ensure_session)
-    monkeypatch.setattr(projects_repo, "find", fake_find)
-
-
-# --- ensure_session ---
-
-
-async def test_ensure_session_records_a_new_port(monkeypatch, updates):
-    _fake_session_on(monkeypatch, 8899)
-    await sessions.ensure_session({"id": 1, "current_port": None}, 5)
-    assert updates == [(1, {"current_port": 8899})]
-
-
-async def test_ensure_session_corrects_a_stale_port(monkeypatch, updates):
-    _fake_session_on(monkeypatch, 8900)
-    await sessions.ensure_session({"id": 1, "current_port": 8899}, 5)
-    assert updates == [(1, {"current_port": 8900})]
-
-
-async def test_ensure_session_skips_the_write_when_unchanged(monkeypatch, updates):
-    _fake_session_on(monkeypatch, 8899, port_holders=[{"id": 1}])
-    await sessions.ensure_session({"id": 1, "current_port": 8899}, 5)
-    assert updates == []
-
-
-async def test_ensure_session_takes_the_port_from_a_stale_holder(monkeypatch, updates):
-    # Project 2's session died and the OS gave its port to project 1's new session.
-    _fake_session_on(monkeypatch, 8899, port_holders=[{"id": 2}])
-    await sessions.ensure_session({"id": 1, "current_port": None}, 5)
-    assert updates == [(2, {"current_port": None}), (1, {"current_port": 8899})]
-
 
 # --- projects_repo.update ---
 
@@ -92,7 +29,7 @@ def captured_sql(monkeypatch):
 
 
 async def test_update_never_touches_updated_at_implicitly(captured_sql):
-    await projects_repo.update(1, {"name": "Renamed", "current_port": 8899})
+    await projects_repo.update(1, {"name": "Renamed", "stage": "specing"})
     assert "updated_at" not in captured_sql["sql"].split("RETURNING")[0]
 
 
@@ -212,7 +149,7 @@ async def test_close_project_stops_every_session_and_the_dev_servers(monkeypatch
 
     async def fake_stop_session(project, conversation_id):
         calls.append(("session", conversation_id))
-        return {"tmux_session": True, "pids": [100 + conversation_id]}
+        return {"runner": True}
 
     async def fake_stop_devenv(project, conversation_id):
         calls.append(("devenv", conversation_id))
@@ -231,7 +168,7 @@ async def test_close_project_stops_every_session_and_the_dev_servers(monkeypatch
     stopped = await projects_service.close_project({"id": 1})
     assert calls == [("session", 6), ("session", 5), ("devenv", 6), ("container", 1)]  # the container last
     assert stopped == {
-        "sessions": {6: {"tmux_session": True, "pids": [106]}, 5: {"tmux_session": True, "pids": [105]}},
+        "sessions": {6: {"runner": True}, 5: {"runner": True}},
         "dev_servers": ["project_1_be"],
         "container": True,
     }
@@ -247,20 +184,6 @@ async def test_closing_a_project_without_conversations_does_nothing(monkeypatch)
     monkeypatch.setattr(projects_service.ai_conversations_repo, "find", no_conversations)
     monkeypatch.setattr(projects_service.devenv, "stop_container", no_container)
     assert await projects_service.close_project({"id": 1}) == {"sessions": {}, "dev_servers": [], "container": False}
-
-
-async def test_stopping_a_session_clears_the_current_port(monkeypatch, updates):
-    async def fake_adapter_stop(project, conversation_id):
-        return {"tmux_session": False, "pids": []}
-
-    async def fake_end_open_build(conversation_id, description):
-        pass
-
-    monkeypatch.setattr(adapter, "stop_session", fake_adapter_stop)
-    monkeypatch.setattr(sessions.signals, "end_open_build", fake_end_open_build)
-    await sessions.stop_session({"id": 1, "current_port": 47000}, 5)
-    await sessions.stop_session({"id": 2, "current_port": None}, 5)
-    assert updates == [(1, {"current_port": None})]
 
 
 # --- search_prompts ---

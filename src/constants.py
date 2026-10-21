@@ -7,10 +7,9 @@ from session_runner import protocol as _runner_protocol
 
 # The protocol between the platform and its session runner (the vib3-session-runner repo): ONE source for
 # both sides, taken over here under the names the backend has always used. See session_runner/protocol.py.
-COMMUNICATION_MCP_NAME = _runner_protocol.COMMUNICATION_MCP_NAME
 SESSION_OUTBOX_URL_ENV = _runner_protocol.OUTBOX_URL_ENV
 SESSION_TOKEN_ENV = _runner_protocol.TOKEN_ENV
-AGENT2_SOCKET_ENV = _runner_protocol.SOCKET_ENV
+RUNNER_SOCKET_ENV = _runner_protocol.SOCKET_ENV
 AiSignal = _runner_protocol.AiSignal
 AGENT_SIGNALS = _runner_protocol.AGENT_SIGNALS
 AgentAction = _runner_protocol.AgentAction
@@ -102,102 +101,32 @@ class ConfigName(StrEnum):
     Empty in the boilerplate -- add yours as the app grows."""
 
 
-# --- Agent sessions (services/agent/adapter) ---
-# The MCP server each session runs to talk to us (src/mcps/communication): its name in the session's
-# MCP config, which is also what SESSION_COMMAND loads as a channel. COMMUNICATION_MCP_NAME comes from the
-# runner's protocol (top of this file): the same name for both runtimes.
-
-
-# A project's agent session is a long-running process found again by its working directory (the
-# project's workspace) plus this env var, which also carries the port it listens on.
-SESSION_PORT_ENV = "COMMUNICATION_PORT"
-# Where the session's communication MCP posts the agent's messages back (POST /api/agent/messages), and
-# the session's token (services/agent/tokens). The token goes BOTH ways: the MCP sends it as its bearer
-# token, and its inbox only takes pushes that carry it -- so nothing else on the box can feed a session
-# fake user messages. Both are handed to the session at launch (services/agent/adapter). SESSION_OUTBOX_URL_ENV
-# and SESSION_TOKEN_ENV come from the runner's protocol (top of this file), the same for both runtimes.
-# What a session runs (argv, no shell), launched inside the project's workspace with SESSION_PORT_ENV set.
-# SESSION_COMMAND = ["doit", "--param", "1"]
-# --permission-mode auto: nobody watches the session's terminal, so it must never stop to ask before a tool
-# use (it would wait forever). Auto mode decides on its own -- risky actions are blocked rather than asked
-# about. Set explicitly: otherwise the mode depends on the machine's Claude account settings.
-SESSION_COMMAND = [
-    "claude",
-    "--dangerously-load-development-channels",
-    f"server:{COMMUNICATION_MCP_NAME}",
-    "--permission-mode",
-    "auto",
-]
-# Added to SESSION_COMMAND when the workspace already has a Claude conversation, so a restarted session
-# picks up where the last one left off (same flags every time: they're not saved with the conversation).
-# Only then: with nothing to continue, `claude --continue` exits straight away. A workspace is meant to
-# hold exactly one conversation, so "the most recent" is the one.
-SESSION_CONTINUE_ARGS = ["--continue"]
-# Where Claude keeps its conversations: one folder per working directory, named after its path with
-# every non-alphanumeric character turned into "-", holding a <session id>.jsonl transcript each.
-CLAUDE_PROJECTS_DIR = "~/.claude/projects"
-# Claude's startup screens that need an answer before the session runs. start_session watches the
-# session's terminal and answers them, giving up after the wait below:
-#   - the folder-trust dialog, shown in a folder Claude hasn't been told to trust (a trusted parent folder
-#     counts). Its preselected option is "No, exit", so it's answered with Down then Enter.
-#   - the --dangerously-load-development-channels confirmation; its option 1 (this text) is preselected,
-#     so Enter accepts it. This one is always last.
-SESSION_TRUST_PROMPT = "Yes, I trust this folder"
-SESSION_STARTUP_PROMPT = "I am using this for local development"
-SESSION_STARTUP_PROMPT_WAIT_SECONDS = 30
-# A session that dies during startup is started again, up to this many attempts in all, this long apart.
-# It happens on a brand-new workspace's first launch, around the trust dialog, and a second launch gets
-# through -- so we retry rather than make the user press "Try again". Kept well inside SESSION_LOCK_TTL_SECONDS.
-SESSION_START_ATTEMPTS = 5
-SESSION_START_RETRY_WAIT_SECONDS = 2
-# Sessions listen on a random port from this range (inclusive). The ranges below it belong to the
-# projects' apps, one fixed port each: dev backend 8000 + project id, dev frontend 16000 + id, prod
-# backend 24000 + id -- so a server fits ids below 8000. Everything else (db, redis, our API) stays
-# below 8000, and all of it stays below the OS's outgoing-connection ports (32768+), so nothing can
-# squat a project's port.
-SESSION_PORT_RANGE = (40000, 60000)
-# How long a freshly picked port stays reserved -- covers the gap until the session actually binds it.
-SESSION_PORT_LOCK_TTL_SECONDS = 300
-SESSION_PORT_MAX_ATTEMPTS = 1000
-
-
-class AgentRuntime(StrEnum):
-    """How a conversation's agent session runs (AGENT_RUNTIME)."""
-
-    TMUX = "tmux"  # Claude Code in tmux + the communication MCP's development channel (services/agent/adapter)
-    SDK = "sdk"  # a Claude Agent SDK runner per conversation (services/agent2)
-
-
-# Which runtime new sessions start on (services/agent/sessions). Stopping always tries both, so switching
-# leaves nothing running behind. Existing workspaces keep their Claude history either way.
-AGENT_RUNTIME = AgentRuntime.SDK
-
-# --- agent2: the Claude Agent SDK runtime (services/agent2 + the vib3-session-runner repo) ---
+# --- The agent's runners: the Claude Agent SDK runtime (services/agent + the vib3-session-runner repo) ---
 # One runner process per conversation holds its SDK session; it listens on a unix socket, told where by
-# AGENT2_SOCKET_ENV (from the runner's protocol, top of this file). The runner's own tunables live in its
+# RUNNER_SOCKET_ENV (from the runner's protocol, top of this file). The runner's own tunables live in its
 # repo (session_runner/constants.py).
 # How long ensure_session waits for a freshly spawned runner to answer before giving up.
-AGENT2_START_WAIT_SECONDS = 30
+RUNNER_START_WAIT_SECONDS = 30
 # Runners run in their project's container (services/devenv/containers), installed at this path by the
-# backend (services/agent2/runners): root-owned, so the agent can read but not change its runner.
+# backend (services/agent/runner_installs): root-owned, so the agent can read but not change its runner.
 RUNNER_INSTALL_PATH = "/opt/session-runner"
 # The backend's agent listener (src/app.py): the agent endpoints, the model proxy among them, on the
 # containers' gateway -- the one host address a container can reach. Never on a public interface.
 AGENT_LISTENER_PORT = 3002
-# The model proxy (services/agent2/models): where it forwards when ANTHROPIC_BASE_URL isn't set, the only
+# The model proxy (services/agent/model_proxy): where it forwards when ANTHROPIC_BASE_URL isn't set, the only
 # paths it forwards, and how long it waits for the next bit of a streamed answer.
-AGENT2_DEFAULT_MODEL_BASE_URL = "https://api.anthropic.com"
-AGENT2_MODEL_PROXY_PATHS = ["v1/messages", "v1/messages/count_tokens"]
-AGENT2_MODEL_READ_TIMEOUT_SECONDS = 600
+MODEL_PROXY_DEFAULT_BASE_URL = "https://api.anthropic.com"
+MODEL_PROXY_PATHS = ["v1/messages", "v1/messages/count_tokens"]
+MODEL_PROXY_READ_TIMEOUT_SECONDS = 600
 # How long the backend waits on any one request to a runner (they all answer right away) before calling it hung.
-AGENT2_REQUEST_TIMEOUT_SECONDS = 10
-# How Claude Code runs in agent2's runners against another endpoint (settings.anthropic_base_url), as the env
+RUNNER_REQUEST_TIMEOUT_SECONDS = 10
+# How Claude Code runs in the runners against another endpoint (settings.anthropic_base_url), as the env
 # vars it reads -- applied only then; on Anthropic's own API, Claude Code's defaults apply. Now: DeepSeek.
 #   models etc.               per DeepSeek's Claude Code guide ([1m] = the 1M-token context window)
 #   CLAUDE_CODE_INLINE_TOOLS  off: newer Claude Code declares tools inline (tool_definition blocks), which
 #                             DeepSeek can't parse -- it answers 422, which Claude Code doesn't recognise as
 #                             "unsupported", so it never falls back on its own
-AGENT2_ENDPOINT_ENV = {
+AGENT_ENDPOINT_ENV = {
     "CLAUDE_CODE_INLINE_TOOLS": "false",
     "ANTHROPIC_MODEL": "deepseek-flash[1m]",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-flash[1m]",
@@ -208,27 +137,23 @@ AGENT2_ENDPOINT_ENV = {
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "950000",
 }
 
-# Per-project mutex around find-or-start, so two concurrent calls can't both start a session.
-# Generous, since starting a session now includes waiting out its startup prompt (below).
-SESSION_LOCK_TTL_SECONDS = 120
-SESSION_LOCK_WAIT_SECONDS = 60
-# How long stopping a session waits for its processes to exit after SIGTERM, before it SIGKILLs them.
-SESSION_STOP_WAIT_SECONDS = 5
-# Attempts at pushing a message into a session (services/agent/sessions.send), with backoff growing to 2s
-# -- about 15s in all, enough for a session that was just started to begin listening.
-SESSION_SEND_ATTEMPTS = 10
+# Attempts at pushing a message into a runner (services/agent/runners.send), with backoff growing to 2s
+# -- about 15s in all, enough for a runner that was just started to begin listening.
+RUNNER_SEND_ATTEMPTS = 10
 
-# The only variables of our environment that commands we launch get to see (utils/processes) -- the
-# agent's tmux session, uv, npm, pm2. Everything else stays behind: python-dotenv loads our .env files
+# The only variables of our environment that commands we launch get to see (utils/processes) -- docker,
+# git, uv, npm. Everything else stays behind: python-dotenv loads our .env files
 # INTO our environment, so passing it on would hand our secrets to code the agent writes, and our config
 # (API_PORT...) would override the project's own .env files.
 SUBPROCESS_ENV_PASSTHROUGH = [
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM", "TMPDIR", "TMUX_TMPDIR",
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM", "TMPDIR",
     "XDG_RUNTIME_DIR",
 ]  # fmt: skip
 
 # --- Dev environments (services/devenv) ---
-# A project's dev servers listen on these + its id (see SESSION_PORT_RANGE above for the whole plan).
+# A project's dev servers are published on the host's 127.0.0.1 at these + its id (so ids below 8000 fit):
+# dev backend 8000 + id, dev frontend 16000 + id, prod backend 24000 + id. Everything else (db, redis, our
+# API) stays below 8000, and all of it below the OS's outgoing-connection ports (32768+).
 PROJECT_DEV_BACKEND_PORT_BASE = 8000
 PROJECT_DEV_FRONTEND_PORT_BASE = 16000
 # Each project's own Redis databases (on PROJECT_REDIS_URL's server): dev = base + id, prod = base + id.

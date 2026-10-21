@@ -16,13 +16,13 @@ from src.dto.projects import Project
 from src.utils import postgres
 
 _COLUMNS = """
-    id, hash, user_id, name, description, stage, bootstrap_data, implementation_done_at, current_port,
-    pinned_at, folder_id, meta, created_at, updated_at, deleted_at
+    id, hash, user_id, name, description, stage, bootstrap_data, implementation_done_at, pinned_at,
+    folder_id, meta, created_at, updated_at, deleted_at
 """
 
 # `updated_at` IS writable, and never set implicitly: it means "the user last edited this project" (the
-# list sorts by it), so only user-facing edit flows pass it. System writes like current_port must not, and
-# neither do pinning or filing into a folder -- those organise the list, they don't edit the project.
+# list sorts by it), so only user-facing edit flows pass it. System writes (meta.devenv_image...) must not,
+# and neither do pinning or filing into a folder -- those organise the list, they don't edit the project.
 _WRITABLE_COLUMNS = [
     "user_id",
     "name",
@@ -30,7 +30,6 @@ _WRITABLE_COLUMNS = [
     "stage",
     "bootstrap_data",
     "implementation_done_at",
-    "current_port",
     "pinned_at",
     "folder_id",
     "meta",
@@ -52,8 +51,7 @@ def _with_user_hash(statement: str, order_by: str = "") -> str:
 
 async def find(criteria: dict[str, Any]) -> list[Project]:
     """Live projects matching `criteria` (column = value, ANDed), most recently edited first. A user's
-    list ({"user_id": ..}) rides idx_projects_user_updated; a session port ({"current_port": ..}) rides
-    idx_projects_current_port. No pagination yet -- a user's own project list is small."""
+    list ({"user_id": ..}) rides idx_projects_user_updated. No pagination yet -- a user's own project list is small."""
     where = pydash.pick(criteria, "id", *_WRITABLE_COLUMNS)
     sql = _with_user_hash(
         f"SELECT {_COLUMNS} FROM projects WHERE {postgres.to_where_clause(where)} AND deleted_at IS NULL",

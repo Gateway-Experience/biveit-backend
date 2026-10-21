@@ -21,7 +21,6 @@ class Project(TypedDict):
     # When the user first signed off the implemented site (the agent's implementing_done); None before.
     # From then on the FE offers payment/deployment, whatever the stage.
     implementation_done_at: Any  # datetime | None
-    current_port: int | None  # last seen agent-session port; bookkeeping, can be stale (see 0005_projects.sql)
     pinned_at: Any  # datetime | None -- when the user pinned it to the top of their sidebar
     # The folder it sits directly in, or None (the root). Always a live folder: deleting one clears this.
     folder_id: int | None

@@ -1,5 +1,4 @@
 # The agent service package -- everything about a project's AI agent:
-#   adapter.py        the long-running session process working inside the workspace (services/devenv)
 #   conversations.py  the chat: messages in from the session and the user, out to the user's tabs
 #   interactions.py   the rules of the agent's questions/actions to the user (pending, valid answers),
 #                     and of what the agent may send at all
@@ -7,8 +6,12 @@
 #   implementation.py the implementing milestones the user's approvals set off (start, sign-off)
 #   storage.py        the chat's files in the workspace (uploads, artifacts) and the guards
 #                     on client-given names and paths
-#   sessions.py       the session as the app sees it: keeping it running + its port recorded, and talking
-#                     to it over its communication channel (translating to and from the channel's format)
+#   sessions.py       the session as the app sees it: keeping it running, and talking to it over its
+#                     channel (translating to and from the channel's format)
+#   runners.py        the process holding a conversation's session (vib3-session-runner), in its project's
+#                     container: started when needed, found by its socket, talked to over it
+#   runner_installs.py the runner installed in a project's container -- copied in, version-checked, kept current
+#   model_proxy.py    agents call the model through the backend, which holds the key
 #   devenvs.py        the conversation's dev environment as the chat sees it: the session's dev server
 #                     requests, and its status for the user's preview screen
 #   tokens.py         the token a session calls back into us with -- good for its own conversation only
@@ -45,6 +48,7 @@ from src.services.agent.devenvs import (
     stop_devenv,
 )
 from src.services.agent.interactions import InvalidSessionMessage, InvalidSubmission
+from src.services.agent.model_proxy import ModelPathRefused, ModelUnavailable, open_model_request
 from src.services.agent.sessions import SessionUnavailable, ensure_introduced, ensure_session, stop_session
 from src.services.agent.storage import FileNotAvailable
 from src.services.agent.tokens import get_token_conversation_id
@@ -57,6 +61,8 @@ __all__ = [
     "InteractionPending",
     "InvalidSessionMessage",
     "InvalidSubmission",
+    "ModelPathRefused",
+    "ModelUnavailable",
     "NothingToResend",
     "ProjectNotFound",
     "SessionUnavailable",
@@ -71,6 +77,7 @@ __all__ = [
     "get_owned_conversation",
     "get_token_conversation_id",
     "list_artifacts",
+    "open_model_request",
     "post_user_message",
     "receive_session_message",
     "receive_session_signal",

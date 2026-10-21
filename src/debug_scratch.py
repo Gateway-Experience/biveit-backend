@@ -18,7 +18,7 @@ async def do_test() -> None:
 
     Runs on the server's loop with live pg/redis/http; wrapped by run_do_test so a raise never aborts startup."""
     # --- point at the module you're testing (define `async def do_test()` in it), then save ---------------
-    # from src.services.agent.adapter import do_test as _colocated
+    # from src.services.agent.sessions import do_test as _colocated
     #
     # await _colocated()
 

@@ -1,6 +1,0 @@
-{
-  "enableAllProjectMcpServers": true,
-  "permissions": {
-    "deny": ["Bash(pm2:*)", "Bash(npx pm2:*)", "Bash(sudo:*)"]
-  }
-}

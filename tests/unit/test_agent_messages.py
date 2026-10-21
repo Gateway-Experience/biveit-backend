@@ -6,7 +6,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from src.app import create_app
+from src.app import create_listener_app
 from src.config import settings
 from src.constants import AiMessageRole, DevServerAction
 from src.repositories import ai_conversations as ai_conversations_repo
@@ -35,7 +35,7 @@ def _secret(monkeypatch):
 
 @pytest.fixture
 def client() -> TestClient:
-    return TestClient(create_app())
+    return TestClient(create_listener_app())
 
 
 def _session(conversation_id=5):
@@ -229,14 +229,14 @@ def test_bad_signals_are_422(body, client, db):
 
 
 async def test_stopping_the_session_ends_an_open_build(db, monkeypatch):
-    async def fake_adapter_stop(project, conversation_id):
-        return {"tmux_session": True, "pids": []}
+    async def fake_runner_stop(project, conversation_id):
+        return True
 
-    monkeypatch.setattr(sessions.adapter, "stop_session", fake_adapter_stop)
+    monkeypatch.setattr(sessions.runners, "stop_session", fake_runner_stop)
     await sessions.signals.append_signal(5, "BUILDING", "Big change")
-    await sessions.stop_session({"id": 3, "current_port": None}, 5)
+    await sessions.stop_session({"id": 3}, 5)
     assert db["messages"][-1]["content"][0]["slug"] == "BUILDING_DONE"
-    await sessions.stop_session({"id": 3, "current_port": None}, 5)
+    await sessions.stop_session({"id": 3}, 5)
     assert len(db["messages"]) == 2  # nothing open the second time, so nothing more written
 
 
