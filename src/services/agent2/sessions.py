@@ -1,24 +1,24 @@
-# Intentions: agent2's sessions as the backend sees them -- each conversation's runner (src/runners/agent2)
+# Intentions: agent2's sessions as the backend sees them -- each conversation's runner (vib3-session-runner)
 # started when needed, and talked to over its unix socket. The runtime-specific half only: what to say to
 # the agent (introductions, translating stored messages into the channel's format) stays where it is.
 #
 # Nothing is recorded anywhere. A conversation's runner lives at a socket path derived from its workspace,
 # and "is it running?" is just "does it answer there?" -- so a crashed runner simply stops answering, and
 # the next ensure_session starts a fresh one, which continues the workspace's Claude session. Two racing
-# starts are fine too: only one runner gets the socket (runners/agent2/main.claim_socket).
+# starts are fine too: only one runner gets the socket (the runner's main.claim_socket).
 #
 # Runners must outlive the backend (a deploy shouldn't cut every conversation), so where systemd is around
 # each one is its own transient unit of the user's manager (utils/systemd): out of the backend service's
 # cgroup, so its restart doesn't take them down. That's also a hard kill switch (stop_session) for a runner
 # that stopped answering. Without systemd (macOS) they're plain detached processes -- fine for local dev.
-# References: src/runners/agent2/main.py (the other end), services/agent/adapter.py (the tmux runtime).
+# References: vib3-session-runner's session_runner/main.py (the other end), services/agent/adapter.py (the
+# tmux runtime).
 
 import asyncio
 import os
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 import aiohttp
 
@@ -38,9 +38,6 @@ from src.services.agent import tokens
 from src.utils import systemd
 from src.utils.common import exponential_backoff, with_retries
 from src.utils.processes import CommandFailed, get_base_env
-
-# This repo, for the runner's PYTHONPATH -- it runs our code with the backend's own interpreter.
-_REPO_DIR = str(Path(__file__).resolve().parents[3])
 
 
 class RunnerUnavailable(Exception):
@@ -152,7 +149,6 @@ async def _start_runner(project: Project, conversation_id: int) -> None:
         raise RunnerUnavailable(str(error)) from error
     env = {
         **get_base_env(),
-        "PYTHONPATH": _REPO_DIR,
         AGENT2_SOCKET_ENV: get_socket_path(project, conversation_id),
         SESSION_OUTBOX_URL_ENV: f"http://127.0.0.1:{settings.api_port}",
         SESSION_TOKEN_ENV: token,
@@ -160,7 +156,8 @@ async def _start_runner(project: Project, conversation_id: int) -> None:
     }
     # Owner-only: the token guards each request too, but nobody else needs to even see the sockets.
     await asyncio.to_thread(os.makedirs, get_socket_dir(), 0o700, True)
-    argv = [sys.executable, "-m", "src.runners.agent2.main"]
+    # The backend's own interpreter: the runner is installed in its environment (a dependency, editable).
+    argv = [sys.executable, "-m", "session_runner"]
     cwd = devenv.get_conversation_dir(project, conversation_id)
     log_path = get_log_path(project, conversation_id)
     if not systemd.is_available():

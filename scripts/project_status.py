@@ -173,9 +173,7 @@ async def _report_agent2_runner(project: Project, conversation_id: int) -> None:
     socket_path = Path(agent2.get_socket_path(project, conversation_id))
     log_path = Path(agent2.get_log_path(project, conversation_id))
     runners = [
-        process
-        for process in await adapter.get_all_processes(workspace)
-        if "src.runners.agent2.main" in process["cmdline"]
+        process for process in await adapter.get_all_processes(workspace) if "session_runner" in process["cmdline"]
     ]
     _print_section(
         "Agent2 runner (SDK)",
