@@ -237,16 +237,19 @@ LOCAL_DEV_FRONTEND_PORT = 10102
 # that it started; these being there means the setup got that far).
 DEVENV_APP_DIRS = ["backend", "frontend"]
 # Never copied from the boilerplate, wherever they appear: VCS, dependencies, build output, caches, logs,
-# and env files (the project's own are rendered from DEVENV_ENV_FILES instead).
+# and env files (the project's own are rendered from DEVENV_ENV_FILES instead) -- the env templates too: they
+# stay in the boilerplate, which is the only place they're ever rendered from.
 DEVENV_COPY_SKIPPED_NAMES = [
     ".git", "node_modules", ".venv", "dist", "logs", "__pycache__", ".pytest_cache", ".ruff_cache",
-    ".env", ".env.local", ".env.dev", ".env.prod",
+    ".env", ".env.local", ".env.dev", ".env.prod", ".env.local.tmpl", ".env.tmpl",
 ]  # fmt: skip
-# (template in DEVENV_TEMPLATES_DIR, output relative to the workspace). Written once, never overwritten:
-# they hold secrets in use, and the agent may have edited them since.
+# The project's env files: (template, relative to BOILERPLATE_DIR -- each app keeps its own, since it knows
+# its own config keys; output, relative to the workspace). Written once, never overwritten: they hold
+# secrets in use, and the agent may have edited them since. Rendered from the BOILERPLATE, never from a
+# workspace's copy: templates run their expressions (templates.py), and a workspace is the agent's.
 DEVENV_ENV_FILES = [
-    ("backend.env.local.tmpl", "backend/.env.local"),
-    ("frontend.env.tmpl", "frontend/.env"),
+    ("backend/.env.local.tmpl", "backend/.env.local"),
+    ("frontend/.env.tmpl", "frontend/.env"),
 ]
 # Ours, not the agent's, so these are re-rendered every time: the pm2 file (in the workspace) and the
 # nginx site (in NGINX_SITES_DIR).

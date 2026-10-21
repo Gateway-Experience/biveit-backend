@@ -32,9 +32,18 @@ class TemplateFailed(Exception):
 
 
 def render_template(template_name: str, project: Project, conversation_id: int) -> str:
-    """[Pure-ish] The template DEVENV_TEMPLATES_DIR/template_name rendered for this project's workspace.
-    Raises TemplateFailed."""
-    template_path = os.path.join(os.path.expanduser(settings.devenv_templates_dir), template_name)
+    """[Pure-ish] The platform's template DEVENV_TEMPLATES_DIR/template_name (the pm2 file, the nginx site)
+    rendered for this project's workspace. Raises TemplateFailed."""
+    return render_template_file(
+        os.path.join(os.path.expanduser(settings.devenv_templates_dir), template_name), project, conversation_id
+    )
+
+
+def render_template_file(template_path: str, project: Project, conversation_id: int) -> str:
+    """[Pure-ish] Any template of OURS (a platform template, or one in the boilerplate checkout) rendered for
+    this project's workspace -- never one from a workspace: its expressions run (eval), and a workspace is
+    the agent's. Raises TemplateFailed."""
+    template_name = os.path.basename(template_path)
     scope = _get_scope(project, conversation_id)
     try:
         with open(template_path, encoding="utf-8") as template_file:

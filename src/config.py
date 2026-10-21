@@ -109,8 +109,9 @@ class Settings(BaseSettings):
     anthropic_auth_token: str = ""
 
     # Dev environments (services/devenv), set up once a conversation's agent starts implementing.
-    # boilerplate_dir: the app copied in (its backend/ and frontend/). devenv_templates_dir: the env, pm2
-    # and nginx templates rendered for each project. ~ is expanded; relative paths resolve against the cwd.
+    # boilerplate_dir: the app copied in (its backend/ and frontend/), whose env templates (each app's own,
+    # see DEVENV_ENV_FILES) are rendered for each project. devenv_templates_dir: the platform's own templates,
+    # the pm2 file and the nginx site. ~ is expanded; relative paths resolve against the cwd.
     boilerplate_dir: str = "../vib3-boilerplate"
     devenv_templates_dir: str = "data/devenv_templates"
     # A project's dev site is https://<project hash>.<dev_domain>, behind nginx with a wildcard certificate

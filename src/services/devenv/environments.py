@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 
 import pydash
 
+from src.config import settings
 from src.constants import (
     DEVENV_APP_DIRS,
     DEVENV_ENV_FILES,
@@ -105,18 +106,23 @@ def describe_devenv(project: Project) -> dict:
 
 
 async def _write_missing_env_files(project: Project, conversation_id: int) -> None:
-    """Render each of DEVENV_ENV_FILES that the workspace doesn't have yet. Existing ones are never
-    touched: they may hold edits, and they're the secrets the app is already using. All of them render
-    BEFORE any is written, so a broken template leaves no half-configured app behind."""
+    """Render each of DEVENV_ENV_FILES that the workspace doesn't have yet, from the boilerplate's own
+    templates (never the workspace's copies -- see DEVENV_ENV_FILES). Existing ones are never touched: they
+    may hold edits, and they're the secrets the app is already using. All of them render BEFORE any is
+    written, so a broken template leaves no half-configured app behind."""
     project_dir = workspaces.get_project_dir(project)
+    boilerplate_dir = os.path.realpath(os.path.expanduser(settings.boilerplate_dir))
     missing = [
-        (template_name, f"{conversation_id}/{output_path}")
-        for template_name, output_path in DEVENV_ENV_FILES
+        (template_path, f"{conversation_id}/{output_path}")
+        for template_path, output_path in DEVENV_ENV_FILES
         if paths.lstat_within(project_dir, f"{conversation_id}/{output_path}") is None
     ]
     rendered = [
-        (output_path, templates.render_template(template_name, project, conversation_id))
-        for template_name, output_path in missing
+        (
+            output_path,
+            templates.render_template_file(os.path.join(boilerplate_dir, template_path), project, conversation_id),
+        )
+        for template_path, output_path in missing
     ]
     # Owner-only (env files hold secrets), and atomic: a write cut off halfway must not leave a truncated
     # file that counts as written from then on.

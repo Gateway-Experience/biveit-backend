@@ -4,11 +4,12 @@
 
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import pytest
 
 from src.config import settings
-from src.constants import DevServerAction
+from src.constants import DEVENV_ENV_FILES, DevServerAction
 from src.services import devenv
 from src.services.devenv import addresses, containers, databases, environments, servers, sites, templates, workspaces
 from src.utils import paths
@@ -119,11 +120,19 @@ def test_template_failures_name_the_template(templates_dir, monkeypatch):
         templates.render_template("s.tmpl", _PROJECT, 9)
 
 
+_BOILERPLATE_CHECKOUT = Path(__file__).resolve().parents[3] / "vib3-boilerplate"
+
+
+@pytest.mark.skipif(not _BOILERPLATE_CHECKOUT.is_dir(), reason="no vib3-boilerplate checkout next to this repo")
 def test_the_shipped_templates_render(monkeypatch):
-    # The real templates in data/devenv_templates, with and without a dev domain.
+    # The real templates -- ours in data/devenv_templates, the env files' in the boilerplate checkout --
+    # with and without a dev domain.
     monkeypatch.setattr(settings, "project_secret_seed", "seed-for-tests")
-    names = ["backend.env.local.tmpl", "frontend.env.tmpl", "ecosystem.config.cjs.tmpl"]
-    assert all("{{{" not in templates.render_template(name, _PROJECT, 9) for name in names)
+    assert "{{{" not in templates.render_template("ecosystem.config.cjs.tmpl", _PROJECT, 9)
+    env_files = [
+        templates.render_template_file(str(_BOILERPLATE_CHECKOUT / path), _PROJECT, 9) for path, _ in DEVENV_ENV_FILES
+    ]
+    assert all("{{{" not in text for text in env_files) and "API_PORT=8000" in env_files[0]
     monkeypatch.setattr(settings, "dev_domain", "dev.example.com")
     site = templates.render_template("nginx-dev.conf.tmpl", _PROJECT, 9)
     assert "server_name p42hash.dev.example.com;" in site and "127.0.0.1:16042" in site
@@ -149,6 +158,11 @@ def boilerplate(tmp_path, monkeypatch):
     (root / "backend" / ".venv").mkdir()
     (root / "frontend" / "node_modules" / "react").mkdir(parents=True)
     (root / "frontend" / "index.html").write_text("<html>")
+    # The env templates, each app's own; rendered from here, never copied into a workspace.
+    (root / "backend" / ".env.local.tmpl").write_text(
+        "API_PORT={{{container_backend_port}}}\nJWT_SECRET={{{secret('jwt')}}}"
+    )
+    (root / "frontend" / ".env.tmpl").write_text("VITE_API_PROXY_TARGET=http://127.0.0.1:{{{container_backend_port}}}")
     monkeypatch.setattr(settings, "boilerplate_dir", str(root))
     return root
 
@@ -161,6 +175,7 @@ async def test_boilerplate_apps_are_copied_without_the_skipped_names(boilerplate
     assert (workspace / "backend/main.py").read_text() == "app"
     assert (workspace / "frontend/index.html").exists()
     assert not (workspace / "backend/.env.local").exists()
+    assert not (workspace / "backend/.env.local.tmpl").exists() and not (workspace / "frontend/.env.tmpl").exists()
     assert not (workspace / "backend/.venv").exists() and not (workspace / "frontend/node_modules").exists()
     assert sorted(path.name for path in workspace.iterdir()) == ["backend", "frontend"]  # no temp folders left
     assert devenv.has_app(_PROJECT, 9)
