@@ -3,8 +3,10 @@
 #
 # A template is any text file where `{{{<python expression>}}}` is replaced by its value. In scope:
 #   project_id, conversation_id
-#   dev_backend_port, dev_frontend_port, dev_host (None without DEV_DOMAIN), dev_url, workspace_dir
-#   dev_redis_db            the project's own Redis database for dev
+#   dev_backend_port, dev_frontend_port   the HOST ports (nginx, health checks), published by the container
+#   container_backend_port, container_frontend_port   the dev servers' ports inside the container (the same
+#                           for every project)
+#   dev_host (None without DEV_DOMAIN), dev_url, workspace_dir
 #   dev_mongo_uri()         the project's dev database, logged in as its owner (devenv/databases)
 #   settings                the backend's settings, e.g. {{{settings.dev_domain}}} -- never its credentials:
 #                           whatever a template renders, the project's agent can read
@@ -18,6 +20,7 @@ import os
 import re
 
 from src.config import settings
+from src.constants import DEVENV_INTERNAL_BACKEND_PORT, DEVENV_INTERNAL_FRONTEND_PORT
 from src.dto.projects import Project
 from src.services.devenv import addresses, databases, secrets, workspaces
 
@@ -51,7 +54,8 @@ def _get_scope(project: Project, conversation_id: int) -> dict:
         "dev_frontend_port": addresses.get_dev_frontend_port(project_id),
         "dev_host": addresses.get_dev_host(project),
         "dev_url": addresses.get_dev_url(project),
-        "dev_redis_db": addresses.get_dev_redis_db(project_id),
+        "container_backend_port": DEVENV_INTERNAL_BACKEND_PORT,
+        "container_frontend_port": DEVENV_INTERNAL_FRONTEND_PORT,
         "workspace_dir": workspaces.get_conversation_dir(project, conversation_id),
         "settings": settings,
         "dev_mongo_uri": lambda: databases.get_dev_mongo_uri(project),

@@ -122,9 +122,10 @@ class Settings(BaseSettings):
     # The platform's Mongo, for the projects' own apps (databases db_project_dev_<id> / db_project_<id>).
     # project_mongo_uri is OUR login, used only to manage the per-owner Mongo users (services/devenv/
     # databases), so it needs the userAdmin role. project_mongo_host is where the projects' apps reach the
-    # same server, logging in as their owner.
+    # same server, logging in as their owner -- from INSIDE their containers, so through the containers'
+    # gateway (the first address of devenv_network_subnet): mongod must listen there too, with auth on.
     project_mongo_uri: str = "mongodb://localhost:27017"
-    project_mongo_host: str = "localhost:27017"
+    project_mongo_host: str = "10.213.0.1:27017"
     # The projects' containers' docker network (services/devenv/containers): its first address is the
     # gateway, the one address on the host containers can reach (Mongo, the backend's agent listener).
     # It must not overlap the machine's other networks (LAN, VPN, other docker networks); written into

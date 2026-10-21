@@ -86,8 +86,9 @@ def _describe_ready(description: dict) -> str:
             f"- backend: port {backend['port']}, pm2 process {backend['process']}, log {backend['log']}",
             f"- frontend: port {frontend['port']}, pm2 process {frontend['process']}, log {frontend['log']}",
             f"- the site: {description['url']}",
-            "Both reload on save. Install dependencies yourself whenever you change them "
-            + "(uv sync in backend/, npm install in frontend/).",
+            "- Redis: the project's own, at 127.0.0.1:6379 (REDIS_URL in backend/.env.local)",
+            "Both servers reload on save. After changing dependencies, run that app's ./setup.sh (in backend/ or "
+            + "frontend/) -- it installs whatever's missing.",
             "Use the dev_servers tool to check, restart or stop the servers -- never pm2.",
             "The building status is now ON (the user sees the site being built). Send the BUILDING_DONE signal "
             + "(send_signal tool) once this first version is done.",

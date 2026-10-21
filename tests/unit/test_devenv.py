@@ -10,7 +10,7 @@ import pytest
 from src.config import settings
 from src.constants import DevServerAction
 from src.services import devenv
-from src.services.devenv import addresses, databases, environments, servers, sites, templates, workspaces
+from src.services.devenv import addresses, containers, databases, environments, servers, sites, templates, workspaces
 from src.utils import paths
 from src.utils.processes import CommandFailed, get_base_env, run_command
 
@@ -212,20 +212,29 @@ async def test_env_files_and_the_pm2_file_never_go_through_a_planted_symlink(tmp
 
 @pytest.fixture
 def commands(monkeypatch):
-    """Fakes run_command everywhere in devenv; records each argv (with its cwd) and answers pm2 jlist
-    from `state["pm2"]` -- a list of {name, pm2_env: {status}}."""
+    """Fakes the commands devenv runs -- on the host (nginx) and in the project's container (installs,
+    pm2), the container itself always up; records each argv (with its cwd: a container path for the
+    container's) and answers pm2 jlist from `state["pm2"]` -- a list of {name, pm2_env: {status}}."""
     state = {"ran": [], "pm2": []}
 
     async def fake_run_command(argv, cwd=None, input_text=None, timeout_seconds=600):
         state["ran"] = [*state["ran"], (argv, cwd)]
         return json.dumps(state["pm2"]) if argv == ["pm2", "jlist"] else ""
 
-    async def no_mongo(project):
+    async def fake_run_in_container(project_id, argv, cwd=None, user=None, env=None, timeout_seconds=600):
+        return await fake_run_command(argv, cwd)
+
+    async def nothing_to_do(*args):
         pass
 
-    for module in (environments, servers, sites):
-        monkeypatch.setattr(module, "run_command", fake_run_command)
-    monkeypatch.setattr(databases, "ensure_dev_access", no_mongo)
+    async def running(project_id):
+        return True
+
+    monkeypatch.setattr(sites, "run_command", fake_run_command)
+    monkeypatch.setattr(containers, "run_in_container", fake_run_in_container)
+    monkeypatch.setattr(containers, "is_container_running", running)
+    monkeypatch.setattr(containers, "ensure_container", nothing_to_do)
+    monkeypatch.setattr(databases, "ensure_dev_access", nothing_to_do)
     return state
 
 
@@ -256,26 +265,46 @@ async def test_ensure_devenv_sets_everything_up_then_only_fills_gaps(
 
     description = await devenv.ensure_devenv(_PROJECT, 9)
 
-    assert description["backend"] == {"port": 8042, "process": "project_42_be", "log": "logs/be.log"}
+    assert description["backend"] == {"port": 8000, "process": "project_42_be", "log": "logs/be.log"}
     env_dev = workspace / "backend/.env.local"
-    assert "API_PORT=8042" in env_dev.read_text() and oct(env_dev.stat().st_mode & 0o777) == "0o600"
+    assert "API_PORT=8000" in env_dev.read_text() and oct(env_dev.stat().st_mode & 0o777) == "0o600"
     assert (workspace / "frontend/.env").exists() and (workspace / "ecosystem.config.cjs").exists()
+    # The boilerplate here has no setup.sh: the old commands, run in the container, in the app's folder there.
     assert sorted(_ran(commands, "uv") + _ran(commands, "npm")) == [["npm", "install"], ["uv", "sync"]]
-    assert ["pm2", "start", str(workspace / "ecosystem.config.cjs"), "--only", "project_42_be,project_42_fe"] in _ran(
-        commands, "pm2"
-    )
+    assert ("uv", "/project/9/backend") in [(argv[0], cwd) for argv, cwd in commands["ran"]]
+    names = "project_42_be,project_42_fe,project_42_redis"
+    assert ["pm2", "start", "/project/9/ecosystem.config.cjs", "--only", names] in _ran(commands, "pm2")
 
     # Second run: env files edited since, npm finished, servers online -> only the (cheap) uv sync again.
     env_dev.write_text("EDITED=1")
     (workspace / "frontend/node_modules").mkdir()
     (workspace / "frontend/node_modules/.package-lock.json").write_text("{}")
     commands["ran"] = []
-    commands["pm2"] = [{"name": name, "pm2_env": {"status": "online"}} for name in ("project_42_be", "project_42_fe")]
+    commands["pm2"] = [
+        {"name": name, "pm2_env": {"status": "online"}}
+        for name in ("project_42_be", "project_42_fe", "project_42_redis")
+    ]
     await devenv.ensure_devenv(_PROJECT, 9)
 
     assert env_dev.read_text() == "EDITED=1"
     assert _ran(commands, "uv") == [["uv", "sync"]] and _ran(commands, "npm") == []
     assert _ran(commands, "pm2") == [["pm2", "jlist"]]
+
+
+async def test_each_apps_own_setup_script_runs_in_its_folder_in_the_container(
+    boilerplate, tmp_path, monkeypatch, commands, no_lock_no_health
+):
+    monkeypatch.setattr(settings, "template_dir", str(tmp_path / "no-template"))
+    (tmp_path / "no-template").mkdir()
+    monkeypatch.setattr(settings, "project_secret_seed", "seed-for-tests")
+    (boilerplate / "backend/setup.sh").write_text("uv sync")
+    (boilerplate / "frontend/setup.sh").write_text("npm install")
+
+    await devenv.ensure_devenv(_PROJECT, 9)
+
+    setups = [(argv, cwd) for argv, cwd in commands["ran"] if argv == ["sh", "./setup.sh"]]
+    assert sorted(cwd for _, cwd in setups) == ["/project/9/backend", "/project/9/frontend"]
+    assert _ran(commands, "uv") == [] and _ran(commands, "npm") == []  # the scripts own it now
 
 
 async def test_an_interrupted_setup_doesnt_look_finished(
@@ -310,16 +339,28 @@ async def test_only_servers_that_arent_online_are_started_fresh(monkeypatch, com
     await servers.ensure_dev_servers(_PROJECT, 9)
     assert _ran(commands, "pm2")[-2:] == [
         ["pm2", "delete", "project_42_fe"],
-        ["pm2", "start", devenv.get_conversation_dir(_PROJECT, 9) + "/ecosystem.config.cjs", "--only", "project_42_fe"],
+        ["pm2", "start", "/project/9/ecosystem.config.cjs", "--only", "project_42_fe,project_42_redis"],
     ]
+
+
+async def test_a_fresh_containers_pm2_daemon_banner_isnt_mistaken_for_the_list(monkeypatch):
+    async def fresh_daemon(project_id, argv, cwd=None, user=None, env=None, timeout_seconds=600):
+        return "[PM2] Spawning PM2 daemon with pm2_home=/project/.devenv/pm2\n[PM2] PM2 Successfully daemonized\n[]\n"
+
+    async def running(project_id):
+        return True
+
+    monkeypatch.setattr(containers, "run_in_container", fresh_daemon)
+    monkeypatch.setattr(containers, "is_container_running", running)
+    assert [status["status"] for status in await servers.get_dev_server_statuses(42)] == ["missing", "missing"]
 
 
 async def test_statuses_cover_both_servers_even_unknown_ones(commands):
     commands["pm2"] = [{"name": "project_42_be", "pm2_env": {"status": "online"}}]
     statuses = await servers.get_dev_server_statuses(42)
-    assert statuses == [
-        {"app": "backend", "name": "project_42_be", "status": "online", "port": 8042},
-        {"app": "frontend", "name": "project_42_fe", "status": "missing", "port": 16042},
+    assert statuses == [  # the servers' own ports, inside the container; Redis isn't one of them
+        {"app": "backend", "name": "project_42_be", "status": "online", "port": 8000},
+        {"app": "frontend", "name": "project_42_fe", "status": "missing", "port": 5173},
     ]
 
 
@@ -424,8 +465,8 @@ async def test_status_before_and_after_the_app_is_set_up(boilerplate, monkeypatc
     status = await devenv.get_devenv_status(_PROJECT, 9)
     assert status["preview_url"] == "https://p42hash.dev.example.com"
     assert status["servers"] == [
-        {"app": "backend", "status": "online", "port": 8042},
-        {"app": "frontend", "status": "missing", "port": 16042},
+        {"app": "backend", "status": "online", "port": 8000},
+        {"app": "frontend", "status": "missing", "port": 5173},
     ]
 
 

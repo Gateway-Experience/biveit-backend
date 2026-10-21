@@ -1,45 +1,51 @@
 # Intentions: setting up a conversation's whole dev environment, once its agent starts implementing --
-# the boilerplate's apps in the workspace, the owner's Mongo access, their env files, a first install, the
-# dev servers and the dev site -- and describing it.
+# the boilerplate's apps in the workspace, the owner's Mongo access, their env files, the project's
+# container, a first install and the dev servers (both inside it), the dev site -- and describing it.
 #
 # Every step looks at what's already there and only does what's missing, so ensure_devenv is safe to
 # run again and again: after a failure or a crash mid-way (it carries on from where it stopped), on
 # every visit (it brings back servers a reboot took down), or twice at once (the lock makes the second
 # one wait, then find everything done). What "already there" means is chosen so an interrupted step
 # never looks finished: the boilerplate lands by rename, env files by rename, and npm counts as
-# installed only once it wrote its end-of-install lockfile. The agent's dev server commands take the
+# installed only once it wrote its end-of-install lockfile (the frontend's setup.sh checks the same). The agent's dev server commands take the
 # same lock, so they never interleave with a setup's pm2 calls (which could start a server twice).
 
 import asyncio
 import os
+import stat
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import pydash
 
 from src.constants import (
+    DEVENV_APP_DIRS,
     DEVENV_ENV_FILES,
     DEVENV_INSTALL_TIMEOUT_SECONDS,
+    DEVENV_INTERNAL_BACKEND_PORT,
+    DEVENV_INTERNAL_FRONTEND_PORT,
     DEVENV_LOCK_TTL_SECONDS,
     DEVENV_LOCK_WAIT_SECONDS,
     DevServerAction,
 )
 from src.dto.projects import Project
-from src.services.devenv import addresses, databases, servers, sites, templates, workspaces
+from src.services.devenv import addresses, containers, databases, servers, sites, templates, workspaces
 from src.utils import paths, redis
-from src.utils.processes import run_command
 
 
 async def ensure_devenv(project: Project, conversation_id: int) -> dict:
     """Make sure the conversation's dev environment is fully set up and its dev servers are up, and
-    return describe_devenv's description of it. Raises on the first step that fails -- CommandFailed,
-    TemplateFailed, DevServersUnhealthy -- each with a message that reads on its own."""
+    return describe_devenv's description of it. Files are put in place from the host (through
+    utils/paths); everything that RUNS -- the installs, the servers -- runs in the project's container.
+    Raises on the first step that fails -- CommandFailed, TemplateFailed, ContainerUnavailable,
+    DevServersUnhealthy -- each with a message that reads on its own."""
     async with _lock_devenv(conversation_id):
         await workspaces.ensure_workspace(project, conversation_id)
         await workspaces.copy_boilerplate(project, conversation_id)
         await databases.ensure_dev_access(project)
         await _write_missing_env_files(project, conversation_id)
-        await _install_dependencies(workspaces.get_conversation_dir(project, conversation_id))
+        await containers.ensure_container(project)
+        await _install_dependencies(project, conversation_id)
         await servers.ensure_dev_servers(project, conversation_id)
         await sites.ensure_dev_site(project, conversation_id)
         await servers.wait_until_healthy(project["id"])
@@ -87,21 +93,14 @@ async def get_devenv_status(project: Project, conversation_id: int) -> dict:
 
 
 def describe_devenv(project: Project) -> dict:
-    """[Pure-ish] Where everything is: {url, backend: {port, process, log}, frontend: {...}}. Log paths
-    are relative to the workspace (the ecosystem template writes them there)."""
+    """[Pure-ish] Where everything is: {url, backend: {port, process, log}, frontend: {...}}. Ports are the
+    servers' own, inside the project's container (where the agent works with them); log paths are
+    relative to the workspace (the ecosystem template writes them there)."""
     names = servers.get_dev_server_names(project["id"])
     return {
         "url": addresses.get_dev_url(project),
-        "backend": {
-            "port": addresses.get_dev_backend_port(project["id"]),
-            "process": names["backend"],
-            "log": "logs/be.log",
-        },
-        "frontend": {
-            "port": addresses.get_dev_frontend_port(project["id"]),
-            "process": names["frontend"],
-            "log": "logs/fe.log",
-        },
+        "backend": {"port": DEVENV_INTERNAL_BACKEND_PORT, "process": names["backend"], "log": "logs/be.log"},
+        "frontend": {"port": DEVENV_INTERNAL_FRONTEND_PORT, "process": names["frontend"], "log": "logs/fe.log"},
     }
 
 
@@ -129,25 +128,45 @@ async def _write_missing_env_files(project: Project, conversation_id: int) -> No
     )
 
 
-async def _install_dependencies(workspace_dir: str) -> None:
-    """Get each app's dependencies installed, both at once. After the first time, keeping them up to
-    date is the agent's job -- it knows when it changed them -- so this only makes sure there's a
-    complete install:
-      - uv sync runs every time: it's quick when nothing changed, and it locks the environment, so it's
-        safe even while the agent runs its own.
-      - npm install runs only until one has finished: npm has no such lock, and two at once in the same
-        folder can wreck it. "Finished" is npm's own end-of-install lockfile, node_modules/.package-lock.json
-        -- node_modules alone shows up as soon as an install starts, so an interrupted one would pass."""
-    frontend_dir = os.path.join(workspace_dir, "frontend")
-    npm_installed = os.path.isfile(os.path.join(frontend_dir, "node_modules", ".package-lock.json"))
-    installs = [
-        run_command(
-            ["uv", "sync"], os.path.join(workspace_dir, "backend"), timeout_seconds=DEVENV_INSTALL_TIMEOUT_SECONDS
-        ),
-        *(
-            []
-            if npm_installed
-            else [run_command(["npm", "install"], frontend_dir, timeout_seconds=DEVENV_INSTALL_TIMEOUT_SECONDS)]
-        ),
-    ]
-    await asyncio.gather(*installs)
+async def _install_dependencies(project: Project, conversation_id: int) -> None:
+    """Get each app's dependencies installed, all at once, INSIDE the project's container (what runs there
+    must be built there). Each app brings its own setup.sh (the boilerplate's), run in its folder: it knows
+    its own stack, is safe to re-run, and does nothing much when everything's installed. An app without one
+    (a workspace from before setup scripts) gets the old commands instead:
+      - backend: uv sync, every time -- quick when nothing changed, and it locks the environment
+      - frontend: npm install until one has finished -- npm's end-of-install lockfile,
+        node_modules/.package-lock.json (node_modules alone shows up as soon as an install starts)."""
+    project_dir = workspaces.get_project_dir(project)
+
+    def _to_setup_argv(app_dir: str) -> list[str] | None:
+        app_path = f"{conversation_id}/{app_dir}"
+        if _is_regular_file(project_dir, f"{app_path}/setup.sh"):
+            return ["sh", "./setup.sh"]  # through sh: works whether or not the agent kept it executable
+        if app_dir == "frontend" and _is_regular_file(project_dir, f"{app_path}/node_modules/.package-lock.json"):
+            return None
+        return _FALLBACK_SETUP_ARGV[app_dir]
+
+    installs = [(app_dir, argv) for app_dir in DEVENV_APP_DIRS if (argv := _to_setup_argv(app_dir)) is not None]
+    await asyncio.gather(
+        *[
+            containers.run_in_container(
+                project["id"],
+                argv,
+                containers.to_container_path(project, os.path.join(project_dir, str(conversation_id), app_dir)),
+                timeout_seconds=DEVENV_INSTALL_TIMEOUT_SECONDS,
+            )
+            for app_dir, argv in installs
+        ]
+    )
+
+
+# What an app without its own setup.sh gets (_install_dependencies).
+_FALLBACK_SETUP_ARGV = {"backend": ["uv", "sync"], "frontend": ["npm", "install"]}
+
+
+def _is_regular_file(project_dir: str, project_relative_path: str) -> bool:
+    try:
+        entry = paths.lstat_within(project_dir, project_relative_path)
+    except paths.UnsafePath:
+        return False
+    return entry is not None and stat.S_ISREG(entry.st_mode)
