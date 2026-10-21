@@ -10,7 +10,7 @@ import pytest
 from src.config import settings
 from src.constants import DevServerAction
 from src.services import devenv
-from src.services.devenv import addresses, environments, servers, sites, templates, workspaces
+from src.services.devenv import addresses, databases, environments, servers, sites, templates, workspaces
 from src.utils.processes import CommandFailed, get_base_env, run_command
 
 _PROJECT = {"id": 42, "hash": "p42hash", "user_id": 7, "user_hash": "u7hash"}
@@ -77,6 +77,19 @@ def test_templates_get_the_projects_addresses_and_settings(templates_dir, monkey
     assert templates.render_template("t.tmpl", _PROJECT, 9) == (
         "PORT=8042 VITE=16042 HOST=p42hash.dev.example.com DB=mongodb://shared"
     )
+
+
+def test_a_projects_mongo_login_is_its_owners(templates_dir, monkeypatch):
+    monkeypatch.setattr(settings, "project_mongo_host", "mongo.internal:27017")
+    (templates_dir / "t.tmpl").write_text("{{{dev_mongo_uri()}}}")
+    uri = templates.render_template("t.tmpl", _PROJECT, 9)
+    same_owner = templates.render_template("t.tmpl", {**_PROJECT, "id": 43}, 9)
+    other_owner = templates.render_template("t.tmpl", {**_PROJECT, "user_id": 8}, 9)
+    assert uri.startswith("mongodb://user_7:") and uri.endswith(
+        "@mongo.internal:27017/db_project_dev_42?authSource=admin"
+    )
+    assert same_owner.split("@")[0] == uri.split("@")[0]  # one login per owner...
+    assert other_owner.split("@")[0] != uri.split("@")[0]  # ...each with its own password
 
 
 def test_secrets_are_derived_per_project_and_name(templates_dir):
@@ -167,8 +180,12 @@ def commands(monkeypatch):
         state["ran"] = [*state["ran"], (argv, cwd)]
         return json.dumps(state["pm2"]) if argv == ["pm2", "jlist"] else ""
 
+    async def no_mongo(project):
+        pass
+
     for module in (environments, servers, sites):
         monkeypatch.setattr(module, "run_command", fake_run_command)
+    monkeypatch.setattr(databases, "ensure_dev_access", no_mongo)
     return state
 
 

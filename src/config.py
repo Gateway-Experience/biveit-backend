@@ -119,11 +119,15 @@ class Settings(BaseSettings):
     dev_domain: str = ""
     # Where each project's nginx site file goes (written with sudo, then nginx is reloaded).
     nginx_sites_dir: str = "/etc/nginx/conf.d"
-    # What the projects' own apps connect to: one shared Mongo user (each project gets the databases
-    # db_project_dev_<id> / db_project_<id>), and one Redis server where each project gets its own
-    # numbered databases (see PROJECT_REDIS_DEV_DB_BASE). The Redis URL has NO database number -- each
-    # project's is appended. That server needs `databases 18000` (Redis's default is 16).
+    # The platform's Mongo, for the projects' own apps (databases db_project_dev_<id> / db_project_<id>).
+    # project_mongo_uri is OUR login, used only to manage the per-owner Mongo users (services/devenv/
+    # databases), so it needs the userAdmin role. project_mongo_host is where the projects' apps reach the
+    # same server, logging in as their owner.
     project_mongo_uri: str = "mongodb://localhost:27017"
+    project_mongo_host: str = "localhost:27017"
+    # One Redis server where each project gets its own numbered databases (see PROJECT_REDIS_DEV_DB_BASE).
+    # The Redis URL has NO database number -- each project's is appended. That server needs
+    # `databases 18000` (Redis's default is 16).
     project_redis_url: str = "redis://localhost:6379"
     # Every project secret (its JWT secret, admin token...) is derived from this plus the project id, so
     # nothing has to be stored, and re-rendering a project's env gives the same values. Effectively a

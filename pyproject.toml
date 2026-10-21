@@ -20,6 +20,7 @@ dependencies = [
     "pydantic[email]>=2.13.4",
     "pydash>=8.0.6",
     "pyjwt>=2.13.0",
+    "pymongo>=4.19.0",
     "python-dotenv>=1.2.2",
     "python-multipart>=0.0.32",
     "redis>=5",

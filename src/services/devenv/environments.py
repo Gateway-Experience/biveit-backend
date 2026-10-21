@@ -1,6 +1,6 @@
 # Intentions: setting up a conversation's whole dev environment, once its agent starts implementing --
-# the boilerplate's apps in the workspace, their env files, a first install, the dev servers and the
-# dev site -- and describing it.
+# the boilerplate's apps in the workspace, the owner's Mongo access, their env files, a first install, the
+# dev servers and the dev site -- and describing it.
 #
 # Every step looks at what's already there and only does what's missing, so ensure_devenv is safe to
 # run again and again: after a failure or a crash mid-way (it carries on from where it stopped), on
@@ -26,7 +26,7 @@ from src.constants import (
     DevServerAction,
 )
 from src.dto.projects import Project
-from src.services.devenv import addresses, servers, sites, templates, workspaces
+from src.services.devenv import addresses, databases, servers, sites, templates, workspaces
 from src.utils import redis
 from src.utils.processes import run_command
 
@@ -38,6 +38,7 @@ async def ensure_devenv(project: Project, conversation_id: int) -> dict:
     async with _lock_devenv(conversation_id):
         await workspaces.ensure_workspace(project, conversation_id)
         await workspaces.copy_boilerplate(project, conversation_id)
+        await databases.ensure_dev_access(project)
         await _write_missing_env_files(project, conversation_id)
         await _install_dependencies(workspaces.get_conversation_dir(project, conversation_id))
         await servers.ensure_dev_servers(project, conversation_id)
