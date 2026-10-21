@@ -85,6 +85,10 @@ async def ensure_container(project: Project) -> None:
     name = get_container_name(project["id"])
     container = await _inspect(name)
     if not (container and container["State"]["Running"]):
+        if settings.env == "local":
+            # Locally every project publishes the same two dev ports (LOCAL_DEV_BACKEND_PORT), so only one
+            # project's container can run at a time: starting this one stops the others (their agents too).
+            await _stop_other_local_containers(name)
         try:
             if container:
                 await run_command(["docker", "start", name])
@@ -240,6 +244,19 @@ async def _ensure_container_user(project_id: int) -> None:
         f"grep -q '^[^:]*:[^:]*:{uid}:' /etc/passwd || echo '{_CONTAINER_USER}:x:{uid}:{gid}::{home}:/bin/bash' >> /etc/passwd"
     )
     await run_in_container(project_id, ["sh", "-c", script], user="root")
+
+
+async def _stop_other_local_containers(name: str) -> None:
+    running = await run_command(
+        [
+            "docker",
+            "ps",
+            "--format={{.Names}}",
+            f"--filter=label=vib3.env={settings.env}",
+            "--filter=label=vib3.project",
+        ]
+    )
+    await asyncio.gather(*[run_command(["docker", "stop", other]) for other in running.split() if other != name])
 
 
 async def _inspect(name: str) -> dict | None:

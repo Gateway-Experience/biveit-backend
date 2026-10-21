@@ -21,7 +21,7 @@ from src.services import devenv
 from src.utils.processes import CommandFailed
 
 # Never copied in: the host's own venv (built for the host's Python, useless in the container) and caches.
-_NOT_COPIED = (".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache")
+_NOT_COPIED = (".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".ruff_cache")
 
 
 class RunnerInstallFailed(Exception):
@@ -59,19 +59,26 @@ async def _get_installed_version(project_id: int) -> str | None:
 
 
 async def _install(project_id: int, source_dir: str, version: str) -> None:
-    """Put the checkout in (minus _NOT_COPIED) as root's files, build its venv there as root -- exactly the
-    locked versions, with the container's own Python, compiled up front since the agent's user can't write
-    __pycache__ in it -- and only then write VERSION, so an install cut off halfway never looks finished."""
+    """Put the checkout in (minus _NOT_COPIED) as root's files, and install it there as root, exactly the
+    locked versions: its venv (the container's own Python; compiled up front, since the agent's user can't
+    write __pycache__ in it) and its bundle's MCP servers (extensions/, npm ci; no install scripts, and no
+    browser download -- the image has the browser). Only then VERSION, so an install cut off halfway never
+    looks finished."""
     archive = await asyncio.to_thread(_to_root_owned_archive, source_dir, os.path.basename(RUNNER_INSTALL_PATH))
     await devenv.run_in_container(project_id, ["rm", "-rf", RUNNER_INSTALL_PATH], user="root")
     await devenv.extract_into_container(project_id, archive, os.path.dirname(RUNNER_INSTALL_PATH))
+    # HOME=/root: the container's own HOME is the agent's (in the project folder), and a root install must
+    # read nothing the agent wrote -- an ~/.npmrc or uv config there could point it at another package
+    # registry, and what it installs is root-owned and runs for every session.
     # TMPDIR on the container's disk: uv unpacks the SDK there first, and its bundled Claude Code alone is
     # bigger than the container's /tmp (a small tmpfs, see DEVENV_CONTAINER_LIMITS).
     unpack_dir = f"{RUNNER_INSTALL_PATH}.unpack"
     build = (
-        f"mkdir -p {unpack_dir} && cd {RUNNER_INSTALL_PATH} && TMPDIR={unpack_dir} UV_NO_CACHE=1 "
-        "UV_PYTHON_DOWNLOADS=never uv sync --frozen --no-dev --compile-bytecode "
-        f"&& echo {version} > VERSION && chmod -R a+rX,go-w . ; status=$?; rm -rf {unpack_dir}; exit $status"
+        f"mkdir -p {unpack_dir} && cd {RUNNER_INSTALL_PATH} && export HOME=/root TMPDIR={unpack_dir} && "
+        "UV_NO_CACHE=1 UV_PYTHON_DOWNLOADS=never uv sync --frozen --no-dev --compile-bytecode && "
+        f"(cd extensions && npm_config_cache={unpack_dir}/npm PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 "
+        "npm ci --omit=dev --ignore-scripts --no-audit --no-fund) && "
+        f"echo {version} > VERSION && chmod -R a+rX,go-w . ; status=$?; rm -rf {unpack_dir}; exit $status"
     )
     await devenv.run_in_container(project_id, ["sh", "-c", build], user="root", timeout_seconds=600)
 

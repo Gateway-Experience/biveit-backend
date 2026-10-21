@@ -124,6 +124,21 @@ async def test_losing_a_creation_race_is_fine_only_if_the_other_container_runs(d
         await containers.ensure_container(_PROJECT)
 
 
+async def test_locally_starting_a_projects_container_stops_the_others(docker, monkeypatch):
+    # Locally every project publishes the same two dev ports: only one container can hold them.
+    monkeypatch.setattr(settings, "env", "local")
+    real_run_command = containers.run_command
+
+    async def with_others_running(argv, cwd=None, input_text=None, timeout_seconds=600, env=None):
+        if argv[:2] == ["docker", "ps"]:
+            return "vib3-local-project-7\nvib3-local-project-39\n"
+        return await real_run_command(argv, cwd, input_text, timeout_seconds, env)
+
+    monkeypatch.setattr(containers, "run_command", with_others_running)
+    await containers.ensure_container(_PROJECT)
+    assert _ran(docker, "stop") == [["docker", "stop", "vib3-local-project-7"]]  # not itself
+
+
 async def test_stopping_and_removing_are_idempotent(docker):
     assert await containers.stop_container(39) is False
     await containers.remove_container(39)

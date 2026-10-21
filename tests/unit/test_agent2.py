@@ -226,6 +226,7 @@ async def test_the_runner_is_installed_only_when_the_container_has_another_versi
     await agent2_runners.ensure_runner_installed(_PROJECT)
     build = next(argv for argv, user in state["ran"] if argv[0] == "sh")
     assert "uv sync --frozen" in build[-1] and f"echo {version} > VERSION" in build[-1]
+    assert "HOME=/root" in build[-1]  # never the agent's HOME: nothing the agent wrote steers a root install
     assert ("sh", "root") in [
         (argv[0], user) for argv, user in state["ran"]
     ]  # built as root: the agent can't change it
