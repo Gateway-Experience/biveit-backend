@@ -220,13 +220,20 @@ async def test_close_project_stops_every_session_and_the_dev_servers(monkeypatch
 
     monkeypatch.setattr(projects_service.ai_conversations_repo, "find", fake_find)
     monkeypatch.setattr(projects_service.agent_service, "stop_session", fake_stop_session)
+
+    async def fake_stop_container(project_id):
+        calls.append(("container", project_id))
+        return True
+
     monkeypatch.setattr(projects_service.agent_service, "stop_devenv", fake_stop_devenv)
+    monkeypatch.setattr(projects_service.devenv, "stop_container", fake_stop_container)
 
     stopped = await projects_service.close_project({"id": 1})
-    assert calls == [("session", 6), ("session", 5), ("devenv", 6)]
+    assert calls == [("session", 6), ("session", 5), ("devenv", 6), ("container", 1)]  # the container last
     assert stopped == {
         "sessions": {6: {"tmux_session": True, "pids": [106]}, 5: {"tmux_session": True, "pids": [105]}},
         "dev_servers": ["project_1_be"],
+        "container": True,
     }
 
 
@@ -234,8 +241,12 @@ async def test_closing_a_project_without_conversations_does_nothing(monkeypatch)
     async def no_conversations(criteria):
         return []
 
+    async def no_container(project_id):
+        return False
+
     monkeypatch.setattr(projects_service.ai_conversations_repo, "find", no_conversations)
-    assert await projects_service.close_project({"id": 1}) == {"sessions": {}, "dev_servers": []}
+    monkeypatch.setattr(projects_service.devenv, "stop_container", no_container)
+    assert await projects_service.close_project({"id": 1}) == {"sessions": {}, "dev_servers": [], "container": False}
 
 
 async def test_stopping_a_session_clears_the_current_port(monkeypatch, updates):

@@ -103,10 +103,11 @@ async def open_project(project: Project) -> None:
 
 
 async def close_project(project: Project) -> dict:
-    """Turn off everything running for the project: each conversation's agent session (Claude and its
-    communication MCP) and the project's dev servers. Nothing on disk is touched, so open_project brings
-    it all back. Idempotent: what's already off stays off. Returns what was stopped, as
-    {sessions: {conversation_id: adapter.stop_session's result}, dev_servers: [pm2 names removed]}.
+    """Turn off everything running for the project: each conversation's agent session, the project's dev
+    servers, and last its container (devenv/containers). Nothing on disk is touched, so open_project
+    brings it all back. Idempotent: what's already off stays off. Returns what was stopped, as
+    {sessions: {conversation_id: sessions.stop_session's result}, dev_servers: [pm2 names removed],
+    container: whether it was running}.
 
     The dev servers belong to the project, but their lock is per conversation -- the current one's is
     used, the same one setting them up takes."""
@@ -116,18 +117,21 @@ async def close_project(project: Project) -> dict:
         for conversation in conversations
     }
     dev_servers = await agent_service.stop_devenv(project, conversations[0]["id"]) if conversations else []
-    return {"sessions": sessions, "dev_servers": dev_servers}
+    container = await devenv.stop_container(project["id"])
+    return {"sessions": sessions, "dev_servers": dev_servers, "container": container}
 
 
 async def delete_project(project: Project) -> None:
-    """Delete a project for its owner: turn off whatever runs for it (close_project), then soft-delete the
-    row, so it drops out of every read (the repo skips deleted_at rows). Nothing on disk is removed, so a
-    project deleted by mistake can still be brought back by hand (clear deleted_at).
+    """Delete a project for its owner: turn off whatever runs for it (close_project) and remove its
+    container, then soft-delete the row, so it drops out of every read (the repo skips deleted_at rows).
+    Nothing on disk is removed, so a project deleted by mistake can still be brought back by hand (clear
+    deleted_at) -- its container just gets created afresh on the next open.
 
     Stopping is best effort: a session or dev server that won't stop must not keep the user from deleting
     the project, so its failure is only logged (whatever's left running finds no live project behind it)."""
     try:
         await close_project(project)
+        await devenv.remove_container(project["id"])
     except Exception as error:
         log_error(error, "delete_project: couldn't stop everything", {"project_id": project["id"]})
     await projects_repo.update(project["id"], {"deleted_at": utc_now()})

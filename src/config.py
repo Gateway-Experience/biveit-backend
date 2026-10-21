@@ -125,6 +125,11 @@ class Settings(BaseSettings):
     # same server, logging in as their owner.
     project_mongo_uri: str = "mongodb://localhost:27017"
     project_mongo_host: str = "localhost:27017"
+    # The projects' containers' docker network (services/devenv/containers): its first address is the
+    # gateway, the one address on the host containers can reach (Mongo, the backend's agent listener).
+    # It must not overlap the machine's other networks (LAN, VPN, other docker networks); written into
+    # projects' env files, so don't change it once projects use it.
+    devenv_network_subnet: str = "10.213.0.0/24"
     # One Redis server where each project gets its own numbered databases (see PROJECT_REDIS_DEV_DB_BASE).
     # The Redis URL has NO database number -- each project's is appended. That server needs
     # `databases 18000` (Redis's default is 16).

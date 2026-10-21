@@ -258,6 +258,34 @@ DEVENV_INSTALL_TIMEOUT_SECONDS = 600
 # changed" rather than "new messages" -- the SSE stream turns it into an `event: devenv` hint.
 DEVENV_WAKEUP = "devenv"
 
+# --- Project containers (services/devenv/containers) ---
+# The common image new projects' containers run (data/devenv_image, built by scripts/build_devenv_image.sh).
+# Bump the tag with every Dockerfile change: a project keeps the tag it was created with (projects.meta),
+# so a reused tag would change existing projects' environment under them. Pushed to Docker Hub as
+# <namespace>/vib3-devenv:<tag> once the namespace is set here.
+DEVENV_IMAGE = "vib3-devenv:1"
+# The docker network every project's container joins; its range is DEVENV_NETWORK_SUBNET (a setting: it
+# depends on what the machine's other networks use). The bridge interface is named after it too, so the
+# host's firewall rules can tell the containers' traffic apart.
+DEVENV_NETWORK = "vib3-projects"
+# Where things sit inside every container -- the same for each project, so nothing of the host's layout
+# shows (the backend translates: containers.to_container_path).
+DEVENV_PROJECT_PATH = "/project"
+DEVENV_SOCKETS_PATH = "/sockets"
+# The container's own state, inside the project folder so it survives the container being recreated:
+# HOME (Claude Code's settings and transcripts, tool caches), PM2_HOME, Redis data, logs.
+DEVENV_STATE_DIR = ".devenv"
+# The dev servers' ports INSIDE a container -- the same for every project (each container has its own
+# network). The host side stays per project (PROJECT_DEV_BACKEND_PORT_BASE...), published on 127.0.0.1.
+DEVENV_INTERNAL_BACKEND_PORT = 8000
+DEVENV_INTERNAL_FRONTEND_PORT = 5173
+# Ceilings for one project's container, not reservations -- it only uses what it needs.
+#   memory     no swap on top (--memory-swap = memory): over the limit, the kernel kills inside it only
+#   pids       counts THREADS: Chromium, Node tools and an npm install together reach a few hundred
+#   nofile     per process; Node dev tools open many files and sockets
+#   tmp_size   /tmp is a tmpfs, so it's memory too
+DEVENV_CONTAINER_LIMITS = {"memory": "3g", "cpus": "1.0", "pids": 2048, "nofile": 65536, "tmp_size": "256m"}
+
 
 class ProjectStage(StrEnum):
     """projects.stage -- where a project is in the building process. Moves forward only (see

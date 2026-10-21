@@ -8,10 +8,21 @@
 #   sites.py         the dev site in nginx
 #   templates.py     rendering a project's files from DEVENV_TEMPLATES_DIR
 #   addresses.py     a project's dev ports and URL, derived from its id
+#   containers.py    the project's container (where its dev servers, Redis and agent will run)
 #
 # It doesn't know about the agent or the chat -- services/agent builds on it, never the other way round.
 # Callers import THIS package (`from src.services import devenv`), not the files.
 
+from src.services.devenv.containers import (
+    ContainerUnavailable,
+    copy_into_container,
+    ensure_container,
+    get_container_name,
+    is_container_running,
+    remove_container,
+    run_in_container,
+    stop_container,
+)
 from src.services.devenv.environments import (
     control_dev_servers,
     describe_devenv,
@@ -27,13 +38,21 @@ from src.services.devenv.workspaces import (
 )
 
 __all__ = [
+    "ContainerUnavailable",
     "control_dev_servers",
+    "copy_into_container",
     "describe_devenv",
+    "ensure_container",
     "ensure_devenv",
     "ensure_workspace",
+    "get_container_name",
     "get_conversation_dir",
     "get_devenv_status",
     "get_project_dir",
     "has_app",
+    "is_container_running",
+    "remove_container",
+    "run_in_container",
+    "stop_container",
     "stop_dev_servers",
 ]

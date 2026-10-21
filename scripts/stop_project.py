@@ -35,6 +35,7 @@ async def main() -> None:
                 + f"agent2 runner {'stopped' if session['runner'] else 'was not running'}"
             )
         print(f"dev servers removed from pm2: {', '.join(stopped['dev_servers']) or 'none'}")
+        print(f"container {'stopped' if stopped['container'] else 'was not running'}")
     finally:
         await redis.close()
         await postgres.close()

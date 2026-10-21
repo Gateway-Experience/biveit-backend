@@ -190,6 +190,23 @@ async def _report_agent2_runner(project: Project, conversation_id: int) -> None:
     )
 
 
+async def _report_container(project: Project) -> None:
+    name = devenv.get_container_name(project["id"])
+    try:
+        inspected = json.loads(await run_command(["docker", "inspect", "--type=container", name]))[0]
+    except (CommandFailed, FileNotFoundError):
+        inspected = None
+    _print_section(
+        "Container",
+        [
+            ("name", name),
+            ("state", pydash.get(inspected, "State.Status") or "none"),
+            ("image (running)", pydash.get(inspected, "Config.Image") or "-"),
+            ("image (recorded on the project)", pydash.get(project, "meta.devenv_image") or "- (none yet)"),
+        ],
+    )
+
+
 async def _describe_unit(unit: str) -> str:
     """The runner's unit and whether it's running -- or why there's none to look at."""
     if not systemd.is_available():
@@ -464,6 +481,7 @@ async def _report_project_status(project_id: int, conversation_id: int | None) -
     await _report_directory(project, conversation["id"])
     await _report_session(project, conversation["id"])
     await _report_agent2_runner(project, conversation["id"])
+    await _report_container(project)
     await _report_servers(project, conversation["id"])
     await _report_infra(project, conversation["id"])
 
