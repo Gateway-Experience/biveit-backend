@@ -146,10 +146,13 @@ async def run_in_container(
     )
 
 
-async def copy_into_container(project_id: int, host_path: str, container_path: str) -> None:
-    """docker cp a host file or folder (ours, trusted) into the container. Without -a, what lands is owned
-    by root -- what's wanted for anything the agent mustn't change."""
-    await run_command(["docker", "cp", host_path, f"{get_container_name(project_id)}:{container_path}"])
+async def extract_into_container(project_id: int, archive: bytes, container_dir: str) -> None:
+    """Unpack a tar archive (ours, trusted) into `container_dir` in the container, keeping the owners the
+    archive records. That's the way to put root-owned files in there: docker cp of a host folder hands them
+    to the container's user (ours -- the agent's), and the container's root can't chown them back (no
+    capabilities). Gotcha, checked by hand: WITHOUT --archive is what keeps the tar's owners -- --archive
+    makes docker hand everything to the container's user again."""
+    await run_command(["docker", "cp", "-", f"{get_container_name(project_id)}:{container_dir}"], input_text=archive)
 
 
 async def ensure_network() -> None:

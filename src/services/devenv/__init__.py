@@ -15,13 +15,17 @@
 
 from src.services.devenv.containers import (
     ContainerUnavailable,
-    copy_into_container,
     ensure_container,
+    ensure_network,
+    extract_into_container,
     get_container_name,
+    get_gateway_ip,
+    get_host_socket_dir,
     is_container_running,
     remove_container,
     run_in_container,
     stop_container,
+    to_container_path,
 )
 from src.services.devenv.environments import (
     control_dev_servers,
@@ -40,14 +44,17 @@ from src.services.devenv.workspaces import (
 __all__ = [
     "ContainerUnavailable",
     "control_dev_servers",
-    "copy_into_container",
     "describe_devenv",
     "ensure_container",
     "ensure_devenv",
+    "ensure_network",
     "ensure_workspace",
+    "extract_into_container",
     "get_container_name",
     "get_conversation_dir",
     "get_devenv_status",
+    "get_gateway_ip",
+    "get_host_socket_dir",
     "get_project_dir",
     "has_app",
     "is_container_running",
@@ -55,4 +62,5 @@ __all__ = [
     "run_in_container",
     "stop_container",
     "stop_dev_servers",
+    "to_container_path",
 ]

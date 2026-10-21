@@ -178,6 +178,17 @@ AGENT_RUNTIME = AgentRuntime.SDK
 # repo (session_runner/constants.py).
 # How long ensure_session waits for a freshly spawned runner to answer before giving up.
 AGENT2_START_WAIT_SECONDS = 30
+# Runners run in their project's container (services/devenv/containers), installed at this path by the
+# backend (services/agent2/runners): root-owned, so the agent can read but not change its runner.
+RUNNER_INSTALL_PATH = "/opt/session-runner"
+# The backend's agent listener (src/app.py): the agent endpoints, the model proxy among them, on the
+# containers' gateway -- the one host address a container can reach. Never on a public interface.
+AGENT_LISTENER_PORT = 3002
+# The model proxy (services/agent2/models): where it forwards when ANTHROPIC_BASE_URL isn't set, the only
+# paths it forwards, and how long it waits for the next bit of a streamed answer.
+AGENT2_DEFAULT_MODEL_BASE_URL = "https://api.anthropic.com"
+AGENT2_MODEL_PROXY_PATHS = ["v1/messages", "v1/messages/count_tokens"]
+AGENT2_MODEL_READ_TIMEOUT_SECONDS = 600
 # How long the backend waits on any one request to a runner (they all answer right away) before calling it hung.
 AGENT2_REQUEST_TIMEOUT_SECONDS = 10
 # How Claude Code runs in agent2's runners against another endpoint (settings.anthropic_base_url), as the env

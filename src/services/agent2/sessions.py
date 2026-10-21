@@ -2,22 +2,22 @@
 # started when needed, and talked to over its unix socket. The runtime-specific half only: what to say to
 # the agent (introductions, translating stored messages into the channel's format) stays where it is.
 #
-# Nothing is recorded anywhere. A conversation's runner lives at a socket path derived from its workspace,
-# and "is it running?" is just "does it answer there?" -- so a crashed runner simply stops answering, and
-# the next ensure_session starts a fresh one, which continues the workspace's Claude session. Two racing
-# starts are fine too: only one runner gets the socket (the runner's main.claim_socket).
+# A runner runs IN its project's container (services/devenv/containers), under the container's pm2 as
+# runner_<conversation>, from the copy installed there (runners.py) -- and so does the Claude Code it
+# starts: everything the agent does happens in there. It belongs to the container, not to us, so a backend
+# restart or deploy doesn't touch it. It calls back to the backend's agent listener on the containers'
+# gateway (src/app.py), and so do Claude Code's model calls: the model key stays with us (agent2/models).
 #
-# Runners must outlive the backend (a deploy shouldn't cut every conversation), so where systemd is around
-# each one is its own transient unit of the user's manager (utils/systemd): out of the backend service's
-# cgroup, so its restart doesn't take them down. That's also a hard kill switch (stop_session) for a runner
-# that stopped answering. Without systemd (macOS) they're plain detached processes -- fine for local dev.
+# Nothing is recorded anywhere. A conversation's runner listens at a socket in its project's socket folder
+# (mounted at /sockets), and "is it running?" is just "does it answer there?" -- so a crashed runner simply
+# stops answering (and pm2 starts it again), and the next ensure_session starts a fresh one if it must,
+# which continues the workspace's Claude session. Two racing starts are fine too: only one runner gets the
+# socket (the runner's main.claim_socket).
 # References: vib3-session-runner's session_runner/main.py (the other end), services/agent/adapter.py (the
 # tmux runtime).
 
 import asyncio
 import os
-import subprocess
-import sys
 import time
 
 import aiohttp
@@ -28,6 +28,10 @@ from src.constants import (
     AGENT2_REQUEST_TIMEOUT_SECONDS,
     AGENT2_SOCKET_ENV,
     AGENT2_START_WAIT_SECONDS,
+    AGENT_LISTENER_PORT,
+    DEVENV_SOCKETS_PATH,
+    DEVENV_STATE_DIR,
+    RUNNER_INSTALL_PATH,
     SESSION_OUTBOX_URL_ENV,
     SESSION_SEND_ATTEMPTS,
     SESSION_TOKEN_ENV,
@@ -35,46 +39,57 @@ from src.constants import (
 from src.dto.projects import Project
 from src.services import devenv
 from src.services.agent import tokens
-from src.utils import systemd
+from src.services.agent2 import runners
+from src.utils import paths
 from src.utils.common import exponential_backoff, with_retries
-from src.utils.processes import CommandFailed, get_base_env
+from src.utils.processes import CommandFailed
 
 
 class RunnerUnavailable(Exception):
     """The conversation's runner couldn't be started, didn't come up in time, or refused a message. 503."""
 
 
-def get_socket_dir() -> str:
-    """[Pure-ish] Where every runner's socket lives: one short folder next to the storage root. Not in the
-    project folders, because unix socket paths are capped at ~108 bytes and those can run deep; and not in
-    /tmp, whose periodic cleanup could delete a long-idle runner's socket from under it."""
-    return os.path.join(os.path.dirname(os.path.realpath(settings.storage_dir)), "agent2_sockets")
-
-
 def get_socket_path(project: Project, conversation_id: int) -> str:
-    """[Pure-ish] Where the conversation's runner listens. Only the conversation decides it; `project` is
-    taken anyway so every runner path helper has the same shape."""
-    return os.path.join(get_socket_dir(), f"{conversation_id}.sock")
-
-
-def get_unit_name(conversation_id: int) -> str:
-    """[Pure-ish] The runner's systemd unit. The env is in it because every backend on the machine (local,
-    dev...) shares the user's manager, and conversation ids only mean something within one database."""
-    return f"agent2-{settings.env}-conversation-{conversation_id}"
+    """[Pure-ish] Where the conversation's runner listens, as the HOST sees it (the backend connects there):
+    its project's socket folder, the one mounted into the container at /sockets."""
+    return os.path.join(devenv.get_host_socket_dir(project["id"]), f"{conversation_id}.sock")
 
 
 def get_log_path(project: Project, conversation_id: int) -> str:
-    """[Pure-ish] The runner's stdout/stderr, next to its socket -- NOT in the project folder: that's the
-    agent's, and systemd (StandardOutput=append:) or our own open() would follow a symlink planted there."""
-    return os.path.join(get_socket_dir(), f"{conversation_id}.agent.log")
+    """[Pure-ish] The runner's output on the host (pm2 writes it, in the container): in the project's state
+    folder -- so read it through utils/paths, it's the agent's."""
+    return os.path.join(devenv.get_project_dir(project), DEVENV_STATE_DIR, "logs", f"runner_{conversation_id}.log")
+
+
+def get_backend_url() -> str:
+    """[Pure-ish] The backend as a container reaches it: its agent listener on the containers' gateway."""
+    return f"http://{devenv.get_gateway_ip()}:{AGENT_LISTENER_PORT}"
+
+
+def get_process_name(conversation_id: int) -> str:
+    """[Pure] The runner's pm2 name in its project's container."""
+    return f"runner_{conversation_id}"
 
 
 async def ensure_session(project: Project, conversation_id: int) -> None:
-    """Make sure the conversation's runner is up: if it doesn't answer, seed the workspace, start one and
-    wait for it to answer. Idempotent -- safe on every visit and before every send. Raises RunnerUnavailable."""
-    if await is_session_up(project, conversation_id):
+    """Make sure the conversation's runner is up, on its socket:
+      answers its health check             -> done
+      accepts connections but won't answer -> hung: thrown out, then a fresh one started
+      nothing there                        -> its workspace, its container and the runner installed in it
+                                              made sure of, a runner started
+    and then waited for until it answers. Idempotent -- safe on every visit and before every send. Raises
+    RunnerUnavailable."""
+    state = await _probe(project, conversation_id)
+    if state == "up":
         return
+    if state == "hung":
+        await _delete_runner(project["id"], conversation_id)
     await devenv.ensure_workspace(project, conversation_id)
+    try:
+        await devenv.ensure_container(project)
+        await runners.ensure_runner_installed(project)
+    except (devenv.ContainerUnavailable, runners.RunnerInstallFailed) as error:
+        raise RunnerUnavailable(str(error)) from error
     await _start_runner(project, conversation_id)
     await _wait_until_up(project, conversation_id, time.monotonic() + AGENT2_START_WAIT_SECONDS)
 
@@ -99,25 +114,29 @@ async def send(project: Project, conversation_id: int, content: list[dict]) -> N
 
 
 async def stop_session(project: Project, conversation_id: int) -> bool:
-    """Ask the conversation's runner to end (it finishes up and removes its socket); one that doesn't answer
-    but whose unit is still there (hung) gets its unit stopped instead. Idempotent; returns whether there was
-    one to stop. Its Claude session stays on disk, so the next ensure_session continues it."""
-    try:
-        return await _request_runner(project, conversation_id, "POST", "/shutdown") == 202
-    except OSError:
-        if not systemd.is_available() or not await systemd.is_active(get_unit_name(conversation_id)):
-            return False
-        await systemd.stop(get_unit_name(conversation_id))
-        return True
+    """Take the conversation's runner out of its container's pm2 (it gets SIGTERM and finishes up). Not
+    /shutdown: pm2 would only start it again. Idempotent; returns whether there was one to stop. Its
+    Claude session stays on disk, so the next ensure_session continues it."""
+    if not await devenv.is_container_running(project["id"]):
+        return False
+    return await _delete_runner(project["id"], conversation_id)
 
 
 async def is_session_up(project: Project, conversation_id: int) -> bool:
     """Whether the conversation's runner is up: it answers its health check. A socket file nobody listens on
     (a runner that died) counts as down."""
+    return await _probe(project, conversation_id) == "up"
+
+
+async def _probe(project: Project, conversation_id: int) -> str:
+    """The runner's state on its socket: "up" (answers health), "hung" (a connection, but no answer in
+    time), "down" (nothing listening)."""
     try:
-        return await _request_runner(project, conversation_id, "GET", "/health") == 200
+        return "up" if await _request_runner(project, conversation_id, "GET", "/health") == 200 else "hung"
+    except TimeoutError:
+        return "hung"
     except OSError:
-        return False
+        return "down"
 
 
 async def _wait_until_up(project: Project, conversation_id: int, deadline: float) -> None:
@@ -135,74 +154,65 @@ async def _wait_until_up(project: Project, conversation_id: int, deadline: float
 
 
 async def _start_runner(project: Project, conversation_id: int) -> None:
-    """Start the conversation's runner, detached, in its workspace, and return without waiting for it. Its
-    env is only what it needs: our base env, where to listen, where to call back, its session token -- and
-    what it bills to (to_billing_env). Outside local, having nothing to bill to is refused (RunnerUnavailable)
-    rather than letting Claude Code fall back to the machine's claude.ai login (see settings.anthropic_api_key)."""
-    if not settings.anthropic_api_key and not settings.anthropic_auth_token and settings.env != "local":
-        raise RunnerUnavailable(
-            "neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set: agent2 runners must bill to an API key"
-        )
+    """Start the conversation's runner under its container's pm2, in its workspace, and return without
+    waiting for it. Its env (to_runner_env) goes by NAME to docker, and from pm2's start into the runner.
+    Without a model key there's nothing for it to run on, so that's refused up front."""
+    if not settings.anthropic_api_key and not settings.anthropic_auth_token:
+        raise RunnerUnavailable("neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set: agents have no model")
     try:
         token = tokens.to_session_token(conversation_id)
     except tokens.SessionTokenSecretMissing as error:
         raise RunnerUnavailable(str(error)) from error
-    env = {
-        **get_base_env(),
-        AGENT2_SOCKET_ENV: get_socket_path(project, conversation_id),
-        SESSION_OUTBOX_URL_ENV: f"http://127.0.0.1:{settings.api_port}",
-        SESSION_TOKEN_ENV: token,
-        **to_billing_env(settings.anthropic_api_key, settings.anthropic_base_url, settings.anthropic_auth_token),
-    }
-    # Owner-only: the token guards each request too, but nobody else needs to even see the sockets.
-    await asyncio.to_thread(os.makedirs, get_socket_dir(), 0o700, True)
-    # The backend's own interpreter: the runner is installed in its environment (a dependency, editable).
-    argv = [sys.executable, "-m", "session_runner"]
-    cwd = devenv.get_conversation_dir(project, conversation_id)
-    log_path = get_log_path(project, conversation_id)
-    if not systemd.is_available():
-        await _start_detached(argv, cwd, env, log_path)
-        return
-    unit = get_unit_name(conversation_id)
+    project_dir = devenv.get_project_dir(project)
+    log_dir_fd = await asyncio.to_thread(paths.open_dir_within, project_dir, f"{DEVENV_STATE_DIR}/logs", True)
+    os.close(log_dir_fd)
+    log_path = devenv.to_container_path(project, get_log_path(project, conversation_id))
+    workspace = devenv.to_container_path(project, devenv.get_conversation_dir(project, conversation_id))
+    pm2_start = [
+        "pm2", "start", f"{RUNNER_INSTALL_PATH}/.venv/bin/python",
+        "--name", get_process_name(conversation_id),
+        "--cwd", workspace,
+        "--interpreter", "none",
+        "--output", log_path, "--error", log_path, "--time",
+        # Restarted when it exits (Claude Code went away), but backing off: a runner that can't start (or
+        # finds another one live on its socket) mustn't spin.
+        "--exp-backoff-restart-delay", "1000",
+        "--", "-m", "session_runner",
+    ]  # fmt: skip
     try:
-        await systemd.start_service(unit, argv, cwd, env, f"{get_socket_path(project, conversation_id)}.env", log_path)
+        await _delete_runner(project["id"], conversation_id)  # a stopped or errored leftover keeps its old env
+        await devenv.run_in_container(project["id"], pm2_start, env=to_runner_env(conversation_id, token))
     except CommandFailed as error:
-        # A racing start got the unit first -- fine, ensure_session waits for that one to answer. Anything
-        # else (no user manager: see utils/systemd) is a real failure.
-        if not await systemd.is_active(unit):
-            raise RunnerUnavailable(f"conversation {conversation_id}'s runner couldn't be started: {error}") from error
+        raise RunnerUnavailable(f"conversation {conversation_id}'s runner couldn't be started: {error}") from error
 
 
-async def _start_detached(argv: list[str], cwd: str, env: dict[str, str], log_path: str) -> None:
-    """Start the runner as a plain detached process, where there's no systemd. It outlives us, except a
-    service manager's restart that kills our whole process tree."""
-    # The child keeps its own copy of the log's file descriptor, so ours can close right away.
-    with await asyncio.to_thread(open, log_path, "ab") as log:
-        # Plain Popen, NOT asyncio's subprocess: asyncio kills a child it still tracks when its event loop
-        # closes, so every runner would die with whatever process started it (a backend restart, a script).
-        # The Popen object is dropped right away; the subprocess module reaps the runner once it exits.
-        # start_new_session: its own process group, so signals aimed at ours don't reach it either.
-        await asyncio.to_thread(
-            subprocess.Popen,
-            argv,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-
-
-def to_billing_env(api_key: str, base_url: str, auth_token: str) -> dict[str, str]:
-    """[Pure] The env vars telling a runner's Claude Code what to bill to: Anthropic's API key, and/or another
-    Anthropic-compatible endpoint with its key -- which also brings that endpoint's models (AGENT2_ENDPOINT_ENV).
-    Unset ones are left out, so Claude Code's own defaults apply."""
+def to_runner_env(conversation_id: int, token: str) -> dict[str, str]:
+    """[Pure-ish] Everything a runner (and the Claude Code it starts, which inherits it) is told:
+    - where to listen (the socket, as the container sees it), where to call back, its session token
+    - its model: the backend's model proxy, with the session token as the "key" -- the real key never
+      leaves the backend -- and another endpoint's own model names when it proxies to one
+    - no auto-updates and no bytecode writes: the runner and Claude Code are read-only for the agent's user
+    """
+    backend_url = get_backend_url()
     return {
-        **({"ANTHROPIC_API_KEY": api_key} if api_key else {}),
-        **({"ANTHROPIC_BASE_URL": base_url, **AGENT2_ENDPOINT_ENV} if base_url else {}),
-        **({"ANTHROPIC_AUTH_TOKEN": auth_token} if auth_token else {}),
+        AGENT2_SOCKET_ENV: f"{DEVENV_SOCKETS_PATH}/{conversation_id}.sock",
+        SESSION_OUTBOX_URL_ENV: backend_url,
+        SESSION_TOKEN_ENV: token,
+        "ANTHROPIC_BASE_URL": f"{backend_url}/api/agent/model",
+        "ANTHROPIC_AUTH_TOKEN": token,
+        **(AGENT2_ENDPOINT_ENV if settings.anthropic_base_url else {}),
+        "DISABLE_AUTOUPDATER": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
     }
+
+
+async def _delete_runner(project_id: int, conversation_id: int) -> bool:
+    """`pm2 delete` the conversation's runner, if pm2 has one. Returns whether it did."""
+    try:
+        await devenv.run_in_container(project_id, ["pm2", "delete", get_process_name(conversation_id)])
+    except CommandFailed:
+        return False  # pm2 doesn't know it: nothing to delete
+    return True
 
 
 async def _request_runner(

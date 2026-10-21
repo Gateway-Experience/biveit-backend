@@ -22,13 +22,13 @@ class CommandFailed(Exception):
 async def run_command(
     argv: list[str],
     cwd: str | None = None,
-    input_text: str | None = None,
+    input_text: str | bytes | None = None,
     timeout_seconds: float = 600,
     env: dict[str, str] | None = None,
 ) -> str:
     """Run argv (no shell) and return its output, stdout and stderr together. Raises CommandFailed on a
-    non-zero exit or a timeout (the process is killed then). `input_text` is fed to its stdin; `env`
-    replaces get_base_env() as the command's whole environment."""
+    non-zero exit or a timeout (the process is killed then). `input_text` (text, or raw bytes) is fed to its
+    stdin; `env` replaces get_base_env() as the command's whole environment."""
     process = await asyncio.create_subprocess_exec(
         *argv,
         cwd=cwd,
@@ -39,7 +39,7 @@ async def run_command(
     )
     try:
         stdout, _ = await asyncio.wait_for(
-            process.communicate(input_text.encode() if input_text is not None else None), timeout_seconds
+            process.communicate(input_text.encode() if isinstance(input_text, str) else input_text), timeout_seconds
         )
     except TimeoutError as error:
         process.kill()

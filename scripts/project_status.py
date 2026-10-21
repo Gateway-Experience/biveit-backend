@@ -44,7 +44,7 @@ from src.repositories import projects as projects_repo
 from src.services import agent2, devenv
 from src.services.agent import adapter, storage
 from src.services.devenv import addresses, servers
-from src.utils import http, postgres, redis, systemd
+from src.utils import http, postgres, redis
 from src.utils.processes import CommandFailed, run_command
 
 
@@ -180,7 +180,7 @@ async def _report_agent2_runner(project: Project, conversation_id: int) -> None:
         [
             ("up (answers on its socket)", "yes" if await agent2.is_session_up(project, conversation_id) else "no"),
             ("socket", f"{socket_path} ({'present' if socket_path.exists() else '-'})"),
-            ("systemd unit", await _describe_unit(agent2.get_unit_name(conversation_id))),
+            ("pm2 process (in the container)", await _describe_runner_process(project, conversation_id)),
             ("runner processes", len(runners) if len(runners) <= 1 else f"{len(runners)} -- TOO MANY, should be 1"),
             *[(f"  pid {p['pid']}", " ".join(p["cmdline"])[:100]) for p in runners],
             ("log", f"{log_path} ({'present' if log_path.exists() else '-'})"),
@@ -205,11 +205,20 @@ async def _report_container(project: Project) -> None:
     )
 
 
-async def _describe_unit(unit: str) -> str:
-    """The runner's unit and whether it's running -- or why there's none to look at."""
-    if not systemd.is_available():
-        return "- (no systemd here: plain processes)"
-    return f"{unit} ({'active' if await systemd.is_active(unit) else 'not running'})"
+async def _describe_runner_process(project: Project, conversation_id: int) -> str:
+    """The runner's pm2 process in the project's container and its state -- or why there's none."""
+    name = agent2.get_process_name(conversation_id)
+    if not await devenv.is_container_running(project["id"]):
+        return f"{name} (container not running)"
+    try:
+        listing = await devenv.run_in_container(project["id"], ["pm2", "jlist"])
+    except CommandFailed as error:
+        return f"{name} (pm2 unreadable: {error})"
+    processes = {process["name"]: process for process in json.loads(listing.strip().splitlines()[-1])}
+    process = processes.get(name)
+    if not process:
+        return f"{name} (not in pm2)"
+    return f"{name}: {pydash.get(process, 'pm2_env.status')}, {pydash.get(process, 'pm2_env.restart_time', 0)} restarts"
 
 
 async def _report_servers(project: Project, conversation_id: int) -> None:
@@ -447,8 +456,8 @@ async def _report_running() -> None:
 async def _list_agent2_runners() -> list[str]:
     """One line per runner socket: its conversation, project, and whether anything answers there (a socket
     left by a runner that died doesn't)."""
-    socket_dir = Path(agent2.get_socket_dir())
-    socket_paths = sorted(socket_dir.glob("*.sock")) if socket_dir.is_dir() else []
+    sockets_root = Path(devenv.get_host_socket_dir(0)).parent  # one folder per project
+    socket_paths = sorted(sockets_root.glob("*/*.sock")) if sockets_root.is_dir() else []
     conversation_ids = [int(path.stem) for path in socket_paths if path.stem.isdigit()]
     conversations = [await ai_conversations_repo.get(conversation_id) for conversation_id in conversation_ids]
     projects = [

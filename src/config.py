@@ -109,6 +109,9 @@ class Settings(BaseSettings):
     anthropic_auth_token: str = ""
 
     # Dev environments (services/devenv), set up once a conversation's agent starts implementing.
+    # The session runner's checkout (the vib3-session-runner repo, also the backend's own dependency): what
+    # gets installed into each project's container (services/agent2/runners).
+    session_runner_dir: str = "../vib3-session-runner"
     # boilerplate_dir: the app copied in (its backend/ and frontend/), whose env templates (each app's own,
     # see DEVENV_ENV_FILES) are rendered for each project. devenv_templates_dir: the platform's own templates,
     # the pm2 file and the nginx site. ~ is expanded; relative paths resolve against the cwd.

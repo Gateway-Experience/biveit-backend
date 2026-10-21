@@ -8,12 +8,15 @@
 
 from contextlib import asynccontextmanager
 
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from src import debug_scratch
 from src.config import settings
+from src.constants import AGENT_LISTENER_PORT, SERVER_GRACEFUL_SHUTDOWN_SECONDS
+from src.controllers.agent import listener_router as agent_listener_router
 from src.controllers.agent import router as agent_router
 from src.controllers.auth import router as auth_router
 from src.controllers.conversations import router as conversations_router
@@ -22,7 +25,7 @@ from src.controllers.projects import router as projects_router
 from src.controllers.system import router as system_router
 from src.controllers.system_configurations import router as system_configurations_router
 from src.controllers.users import router as users_router
-from src.services import system_config
+from src.services import devenv, system_config
 from src.utils import http, postgres, redis
 from src.utils.logging import configure_logging, log_error
 
@@ -60,11 +63,47 @@ async def lifespan(app: FastAPI):
     if settings.env == "local":
         await debug_scratch.run_do_test()
 
+    agent_listener = await _serve_agent_listener()
+
     yield
 
+    if agent_listener:
+        agent_listener.should_exit = True
+        await agent_listener.shutdown()
     await http.close()
     await redis.close()
     await postgres.close()
+
+
+async def _serve_agent_listener() -> uvicorn.Server | None:
+    """Start the agent listener: the agent endpoints -- and only them, the model proxy among them -- for the
+    projects' containers, on the containers' gateway (the one host address they can reach; never a public
+    interface). Every request still needs a session token. Shut down with the app. Without docker on the
+    machine (no containers, so no gateway) there's nothing to listen for: logged and skipped."""
+    try:
+        await devenv.ensure_network()
+    except Exception as error:
+        log_error(error, "no projects' network (is docker there?): the agent listener isn't started")
+        return None
+    listener_app = FastAPI(title=f"{settings.app_name} agents")
+    listener_app.include_router(agent_router, prefix=_API_PREFIX)
+    listener_app.include_router(agent_listener_router, prefix=_API_PREFIX)
+    config = uvicorn.Config(
+        listener_app,
+        host=devenv.get_gateway_ip(),
+        port=AGENT_LISTENER_PORT,
+        lifespan="off",
+        log_config=None,
+        # Model answers stream for minutes: a shutdown mustn't wait them all out (see main.py).
+        timeout_graceful_shutdown=SERVER_GRACEFUL_SHUTDOWN_SECONDS,
+    )
+    config.load()
+    server = uvicorn.Server(config)
+    # startup/shutdown, not serve(): serve() would take over the process's signal handling from the main
+    # server. serve() also sets up the server's lifespan handler, which startup() expects (off here).
+    server.lifespan = config.lifespan_class(config)
+    await server.startup()
+    return server
 
 
 def create_app() -> FastAPI:
