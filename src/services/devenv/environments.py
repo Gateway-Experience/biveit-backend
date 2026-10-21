@@ -12,7 +12,6 @@
 
 import asyncio
 import os
-import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -27,7 +26,7 @@ from src.constants import (
 )
 from src.dto.projects import Project
 from src.services.devenv import addresses, databases, servers, sites, templates, workspaces
-from src.utils import redis
+from src.utils import paths, redis
 from src.utils.processes import run_command
 
 
@@ -110,26 +109,24 @@ async def _write_missing_env_files(project: Project, conversation_id: int) -> No
     """Render each of DEVENV_ENV_FILES that the workspace doesn't have yet. Existing ones are never
     touched: they may hold edits, and they're the secrets the app is already using. All of them render
     BEFORE any is written, so a broken template leaves no half-configured app behind."""
-    workspace_dir = workspaces.get_conversation_dir(project, conversation_id)
+    project_dir = workspaces.get_project_dir(project)
     missing = [
-        (template_name, os.path.join(workspace_dir, output_path))
+        (template_name, f"{conversation_id}/{output_path}")
         for template_name, output_path in DEVENV_ENV_FILES
-        if not os.path.exists(os.path.join(workspace_dir, output_path))
+        if paths.lstat_within(project_dir, f"{conversation_id}/{output_path}") is None
     ]
     rendered = [
         (output_path, templates.render_template(template_name, project, conversation_id))
         for template_name, output_path in missing
     ]
-    await asyncio.gather(*[asyncio.to_thread(_write_private_file, output_path, text) for output_path, text in rendered])
-
-
-def _write_private_file(path: str, text: str) -> None:
-    """Write `text` readable by its owner only (env files hold secrets), via a temp file renamed into
-    place: a write cut off halfway must not leave a truncated file that counts as written from then on."""
-    temp_path = f"{path}.{uuid.uuid4().hex[:8]}.tmp"
-    with open(os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as env_file:
-        env_file.write(text)
-    os.replace(temp_path, path)
+    # Owner-only (env files hold secrets), and atomic: a write cut off halfway must not leave a truncated
+    # file that counts as written from then on.
+    await asyncio.gather(
+        *[
+            asyncio.to_thread(paths.replace_file_within, project_dir, output_path, text.encode(), 0o600)
+            for output_path, text in rendered
+        ]
+    )
 
 
 async def _install_dependencies(workspace_dir: str) -> None:

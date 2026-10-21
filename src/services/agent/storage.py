@@ -7,18 +7,24 @@
 #
 # Messages reference files by a path RELATIVE to the conversation dir ("uploads/3f2a91c0_logo.png"),
 # never an absolute one, so the storage root can move without touching the message log. Any path that
-# comes from a client is checked by resolve_conversation_file before it's used.
+# comes from a client is checked by _to_file_path before it's used.
+#
+# The project's folder belongs to its agent (it's mounted into the agent's container), so every file
+# operation here goes through utils/paths, rooted at the project folder: a symlink the agent planted is
+# never followed. See "PROJECT FOLDERS ARE UNTRUSTED INPUT" in CLAUDE.md.
 
 import asyncio
 import mimetypes
+import os
 import re
 import shutil
+import stat
 import uuid
-from pathlib import Path
 from typing import BinaryIO
 
 from src.dto.projects import Project
 from src.services import devenv
+from src.utils import paths
 
 UPLOADS_DIR = "uploads"
 ARTIFACTS_DIR = "artifacts"
@@ -71,8 +77,7 @@ async def save_upload(project: Project, conversation_id: int, name: str, source:
     Each upload gets a fresh id prefix, so the same name uploaded twice never overwrites the first --
     an older message keeps pointing at exactly the file it was sent with."""
     relative_path = f"{UPLOADS_DIR}/{uuid.uuid4().hex[:8]}_{to_safe_file_name(name)}"
-    destination = Path(devenv.get_conversation_dir(project, conversation_id), relative_path)
-    await asyncio.to_thread(_copy_to_new_file, source, destination)
+    await asyncio.to_thread(_copy_to_new_file, source, project, f"{conversation_id}/{relative_path}")
     return relative_path
 
 
@@ -81,70 +86,91 @@ async def write_artifact(project: Project, conversation_id: int, name: str, cont
     this OVERWRITES a same-named file on purpose: an artifact is a living document (the spec gets
     revised), so every place that shows it opens the latest version."""
     relative_path = f"{ARTIFACTS_DIR}/{to_safe_file_name(name)}"
-    destination = Path(devenv.get_conversation_dir(project, conversation_id), relative_path)
-
-    def _write() -> None:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(content)
-
-    await asyncio.to_thread(_write)
+    await asyncio.to_thread(
+        paths.replace_file_within, devenv.get_project_dir(project), f"{conversation_id}/{relative_path}", content
+    )
     return relative_path
 
 
-def _copy_to_new_file(source: BinaryIO, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("xb") as target:  # "x": fail rather than overwrite, should an id ever repeat
+def _copy_to_new_file(source: BinaryIO, project: Project, project_relative_path: str) -> None:
+    # O_EXCL: fail rather than overwrite, should an id ever repeat.
+    file_fd = paths.open_within(
+        devenv.get_project_dir(project),
+        project_relative_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o644,
+        make_dirs=True,
+    )
+    with os.fdopen(file_fd, "wb") as target:
         shutil.copyfileobj(source, target)
 
 
-def resolve_conversation_file(
+def open_conversation_file(
     project: Project, conversation_id: int, relative_path: str, folders: list[str] = _READABLE_DIRS
-) -> Path:
-    """The absolute path of a client-given relative path, if it's an existing file directly inside one
-    of the conversation's `folders` (default: every readable one). Raises FileNotAvailable otherwise. The check runs on the
-    RESOLVED path, so "uploads/../../other" or a symlink pointing elsewhere can't get out."""
-    conversation_dir = Path(devenv.get_conversation_dir(project, conversation_id))
-    resolved = (conversation_dir / relative_path).resolve()
-    allowed_parents = [(conversation_dir / folder).resolve() for folder in folders]
-    if resolved.parent not in allowed_parents or not resolved.is_file():
+) -> int:
+    """A read descriptor for a client-given relative path, if it's an existing regular file directly inside
+    one of the conversation's `folders` (default: every readable one). The caller closes it. Raises
+    FileNotAvailable otherwise -- "uploads/../../other", a symlink anywhere on the way, a missing file."""
+    try:
+        return paths.open_within(
+            devenv.get_project_dir(project), _to_file_path(conversation_id, relative_path, folders), os.O_RDONLY
+        )
+    except (paths.UnsafePath, FileNotFoundError, NotADirectoryError, IsADirectoryError) as error:
+        raise FileNotAvailable(relative_path, {"conversation_id": conversation_id}) from error
+
+
+def stat_conversation_file(
+    project: Project, conversation_id: int, relative_path: str, folders: list[str] = _READABLE_DIRS
+) -> os.stat_result:
+    """open_conversation_file's checks, for just the file's stat. Raises FileNotAvailable."""
+    file_fd = open_conversation_file(project, conversation_id, relative_path, folders)
+    try:
+        return os.fstat(file_fd)
+    finally:
+        os.close(file_fd)
+
+
+def _to_file_path(conversation_id: int, relative_path: str, folders: list[str]) -> str:
+    """[Pure] The project-relative path of a client-given one -- if it's exactly <folder>/<name> with an
+    allowed folder (files sit directly in it). Raises FileNotAvailable otherwise."""
+    folder, _, name = relative_path.partition("/")
+    if folder not in folders or not name or "/" in name or name in (".", ".."):
         raise FileNotAvailable(relative_path, {"conversation_id": conversation_id})
-    return resolved
+    return f"{conversation_id}/{folder}/{name}"
 
 
-def describe_file(relative_path: str, absolute_path: Path) -> dict:
-    """[Pure-ish] {path, name, mime, size} for a stored file. `name` is the stored name minus its upload
-    id prefix, i.e. what the user called it (after to_safe_file_name)."""
-    stored_name = absolute_path.name
+def describe_file(relative_path: str, file_stat: os.stat_result) -> dict:
+    """[Pure] {path, name, mime, size} for a stored file. `name` is the stored name minus its upload id
+    prefix, i.e. what the user called it (after to_safe_file_name)."""
+    stored_name = relative_path.rsplit("/", 1)[-1]
     return {
         "path": relative_path,
         "name": stored_name.split("_", 1)[1] if relative_path.startswith(f"{UPLOADS_DIR}/") else stored_name,
-        "mime": _PINNED_MIME_TYPES.get(absolute_path.suffix.lower())
+        "mime": _PINNED_MIME_TYPES.get(os.path.splitext(stored_name)[1].lower())
         or mimetypes.guess_type(stored_name)[0]
         or "application/octet-stream",
-        "size": absolute_path.stat().st_size,
+        "size": file_stat.st_size,
     }
 
 
-def get_file_version(absolute_path: Path) -> str:
-    """[Pure-ish] A short token that changes whenever the file does (modification time in ns + size), for
+def get_file_version(file_stat: os.stat_result) -> str:
+    """[Pure] A short token that changes whenever the file does (modification time in ns + size), for
     cache validation: the ETag of the download, and what clients key their caches on."""
-    stat = absolute_path.stat()
-    return f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
+    return f"{file_stat.st_mtime_ns:x}-{file_stat.st_size:x}"
 
 
 async def list_files(project: Project, conversation_id: int, folder: str) -> list[dict]:
-    """Every file in one of the conversation's folders, described, by last modification (oldest first;
-    files written within the same filesystem timestamp tick fall back to name order). Empty if the
-    folder doesn't exist yet."""
-    folder_path = Path(devenv.get_conversation_dir(project, conversation_id), folder)
-
-    def _list() -> list[dict]:
-        if not folder_path.is_dir():
-            return []
-        files = sorted(
-            (entry for entry in folder_path.iterdir() if entry.is_file()),
-            key=lambda entry: (entry.stat().st_mtime_ns, entry.name),
+    """Every regular file in one of the conversation's folders, described, plus its `version`, by last
+    modification (oldest first; files written within the same filesystem timestamp tick fall back to
+    name order). Symlinks are skipped, not followed. Empty if the folder doesn't exist yet, or is a symlink."""
+    try:
+        entries = await asyncio.to_thread(
+            paths.list_within, devenv.get_project_dir(project), f"{conversation_id}/{folder}"
         )
-        return [describe_file(f"{folder}/{entry.name}", entry) for entry in files]
-
-    return await asyncio.to_thread(_list)
+    except paths.UnsafePath:
+        return []  # the folder itself is a symlink: nothing in it is ours to show
+    files = sorted(
+        ((name, entry) for name, entry in entries if stat.S_ISREG(entry.st_mode)),
+        key=lambda file: (file[1].st_mtime_ns, file[0]),
+    )
+    return [{**describe_file(f"{folder}/{name}", entry), "version": get_file_version(entry)} for name, entry in files]

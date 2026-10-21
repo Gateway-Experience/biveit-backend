@@ -268,6 +268,14 @@ What the product's agent (the one building users' sites) is told lives in exactl
 Rule of thumb: if it would change when the runtime changes (tmux -> SDK, a new tool, a new channel format), it's mechanics.
 Caveat: the template is COPIED into workspaces when they're seeded, so editing it doesn't reach existing projects.
 
+# PROJECT FOLDERS ARE UNTRUSTED INPUT
+
+A project's folder (everything under STORAGE_DIR/<user>/<project>/) belongs to its agent: it's mounted into the project's container, and the agent can put anything there -- including symlinks. A symlink is harmless inside the container, but any HOST-side code that follows one acts on the host as the backend's user: `artifacts/spec.md -> ../../../../.env` gets the platform's secrets served to the browser, or a host file overwritten by an artifact write.
+- Never read, write, list, copy or serve a path inside a project folder with plain `open()` / `Path.write_bytes` / `shutil.copytree` etc. -- they follow symlinks by default. Resolve the real path and check it's still inside the project's real folder, and refuse symlinks at the last step (`O_NOFOLLOW`). Every folder on the way counts too: `artifacts/` itself can be a link.
+- Better: do the work INSIDE the project's container (`docker exec`), where symlinks can only reach the container's own world. Keep host-side touching to what has to happen on the host (serving files, saving uploads).
+- This applies to everything host-side: the backend, our scripts (status, migrations), and server tooling (backups, cleanup jobs -- especially anything running as root).
+- Every place that touches a project folder from the host needs a test that plants a symlink pointing out of the project and checks it's refused.
+
 # LINT AND TESTING
 
 After a round of changes, you should do sanity check by running these:

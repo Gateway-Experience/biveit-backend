@@ -23,7 +23,7 @@ from src.constants import (
 )
 from src.dto.projects import Project
 from src.services.devenv import addresses, templates, workspaces
-from src.utils import http
+from src.utils import http, paths
 from src.utils.processes import run_command
 
 
@@ -104,17 +104,14 @@ async def _wait_for_url(url: str, is_up: Callable[[int], bool], deadline: float)
 async def _write_ecosystem_file(project: Project, conversation_id: int) -> str:
     """Render the pm2 file into the workspace (and the logs/ folder it points at) and return its path."""
     template_name, output_path = DEVENV_ECOSYSTEM_TEMPLATE
-    workspace_dir = workspaces.get_conversation_dir(project, conversation_id)
-    ecosystem_path = os.path.join(workspace_dir, output_path)
+    project_dir = workspaces.get_project_dir(project)
     ecosystem_text = templates.render_template(template_name, project, conversation_id)
-    await asyncio.to_thread(os.makedirs, os.path.join(workspace_dir, "logs"), exist_ok=True)
-    await asyncio.to_thread(_write_text, ecosystem_path, ecosystem_text)
-    return ecosystem_path
-
-
-def _write_text(path: str, text: str) -> None:
-    with open(path, "w", encoding="utf-8") as output_file:
-        output_file.write(text)
+    logs_fd = await asyncio.to_thread(paths.open_dir_within, project_dir, f"{conversation_id}/logs", True)
+    os.close(logs_fd)
+    await asyncio.to_thread(
+        paths.replace_file_within, project_dir, f"{conversation_id}/{output_path}", ecosystem_text.encode()
+    )
+    return os.path.join(workspaces.get_conversation_dir(project, conversation_id), output_path)
 
 
 async def _start_fresh(ecosystem_path: str, names: list[str]) -> None:

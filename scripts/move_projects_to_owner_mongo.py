@@ -8,9 +8,7 @@
 
 import argparse
 import asyncio
-import os
 import re
-import uuid
 
 from src.constants import DevServerAction
 from src.dto.projects import Project
@@ -18,7 +16,7 @@ from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import projects as projects_repo
 from src.services import devenv
 from src.services.devenv import databases
-from src.utils import http, postgres, redis
+from src.utils import http, paths, postgres, redis
 
 _MONGO_URI_LINE = re.compile(r"^MONGO_URI=.*$", re.MULTILINE)
 
@@ -56,14 +54,20 @@ async def main() -> None:
         await postgres.close()
 
 
-def _get_env_path(project: Project, conversation_id: int) -> str:
-    return os.path.join(devenv.get_conversation_dir(project, conversation_id), "backend", ".env.local")
+def _get_env_path(conversation_id: int) -> str:
+    """The env file's path relative to the project folder -- read and written through utils/paths, since
+    the folder is the agent's (see "PROJECT FOLDERS ARE UNTRUSTED INPUT" in CLAUDE.md)."""
+    return f"{conversation_id}/backend/.env.local"
 
 
 def _is_outdated(project: Project, conversation_id: int) -> bool:
-    """Whether the workspace's env file has a MONGO_URI that isn't the owner's login."""
-    with open(_get_env_path(project, conversation_id), encoding="utf-8") as env_file:
-        match = _MONGO_URI_LINE.search(env_file.read())
+    """Whether the workspace's env file has a MONGO_URI that isn't the owner's login. One that can't be
+    read safely (missing, a symlink) isn't touched."""
+    try:
+        env_text = paths.read_within(devenv.get_project_dir(project), _get_env_path(conversation_id)).decode()
+    except (paths.UnsafePath, FileNotFoundError):
+        return False
+    match = _MONGO_URI_LINE.search(env_text)
     return bool(match) and match.group(0) != f"MONGO_URI={databases.get_dev_mongo_uri(project)}"
 
 
@@ -72,7 +76,10 @@ async def _move(project: Project, conversation_id: int) -> None:
     the setup writes it), and restart the dev servers if they're up."""
     await databases.ensure_dev_access(project)
     await asyncio.to_thread(
-        _rewrite_mongo_uri, _get_env_path(project, conversation_id), databases.get_dev_mongo_uri(project)
+        _rewrite_mongo_uri,
+        devenv.get_project_dir(project),
+        _get_env_path(conversation_id),
+        databases.get_dev_mongo_uri(project),
     )
     status = await devenv.get_devenv_status(project, conversation_id)
     if any(server["status"] == "online" for server in status["servers"]):
@@ -82,13 +89,10 @@ async def _move(project: Project, conversation_id: int) -> None:
         print("    rewritten (dev servers weren't running)")
 
 
-def _rewrite_mongo_uri(env_path: str, mongo_uri: str) -> None:
-    with open(env_path, encoding="utf-8") as env_file:
-        env_text = env_file.read()
-    temp_path = f"{env_path}.{uuid.uuid4().hex[:8]}.tmp"
-    with open(os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as temp_file:
-        temp_file.write(_MONGO_URI_LINE.sub(lambda _: f"MONGO_URI={mongo_uri}", env_text))
-    os.replace(temp_path, env_path)
+def _rewrite_mongo_uri(project_dir: str, env_path: str, mongo_uri: str) -> None:
+    env_text = paths.read_within(project_dir, env_path).decode()
+    new_text = _MONGO_URI_LINE.sub(lambda _: f"MONGO_URI={mongo_uri}", env_text)
+    paths.replace_file_within(project_dir, env_path, new_text.encode(), 0o600)
 
 
 if __name__ == "__main__":

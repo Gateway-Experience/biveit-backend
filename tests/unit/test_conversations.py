@@ -3,6 +3,7 @@
 # what gets stored, the mock's replies, wake-ups -- without a db. watch_messages is tested directly.
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
@@ -495,6 +496,31 @@ def test_uploaded_files_can_be_downloaded_safely(client, db):
     assert response.headers["content-security-policy"] == "sandbox"  # can't run script on our origin
     assert response.headers["x-content-type-options"] == "nosniff"
     assert 'filename="page.html"' in response.headers["content-disposition"]
+
+
+def test_downloads_support_ranges_and_revalidation_without_leaking_descriptors(client, db):
+    conversation_id = _open_conversation(client)
+    path = _upload(client, conversation_id, ("clip.mp4", b"0123456789", "video/mp4")).json()[0]["path"]
+    url = f"/api/conversations/{conversation_id}/files"
+    open_fds = len(os.listdir("/proc/self/fd"))
+
+    ranged = client.get(url, params={"path": path}, headers={"Range": "bytes=2-5"})
+    assert ranged.status_code == 206 and ranged.content == b"2345"  # video seeking still works
+    etag = client.get(url, params={"path": path}).headers["etag"]
+    assert client.get(url, params={"path": path}, headers={"If-None-Match": etag}).status_code == 304
+    assert len(os.listdir("/proc/self/fd")) == open_fds  # every served file's descriptor got closed
+
+
+def test_a_file_the_agent_symlinked_out_of_the_project_is_404(client, db, tmp_path):
+    conversation_id = _open_conversation(client)
+    path = _upload(client, conversation_id, ("a.txt", b"x", "text/plain")).json()[0]["path"]
+    secret = tmp_path / "platform.env"
+    secret.write_text("SECRET=1")
+    uploaded = next(tmp_path.rglob(path.split("/")[-1]))
+    uploaded.unlink()
+    uploaded.symlink_to(secret)
+    response = client.get(f"/api/conversations/{conversation_id}/files", params={"path": path})
+    assert response.status_code == 404 and b"SECRET" not in response.content
 
 
 @pytest.mark.parametrize("bad_path", ["uploads/nope.png", "../../../../etc/passwd", "uploads/../../x"])

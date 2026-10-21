@@ -17,10 +17,12 @@
 # Auth rides the session cookie (EventSource can't send headers), so open it with withCredentials.
 
 import json
+import os
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, Response, StreamingResponse
+from starlette.background import BackgroundTask
 
 from src.constants import (
     MESSAGES_PAGE_DEFAULT,
@@ -238,7 +240,7 @@ async def download_file(
     run with the user's session cookie)."""
     try:
         conversation = await agent_service.get_owned_conversation(conversation_id, user["id"])
-        absolute_path, file_info = await agent_service.get_conversation_file(conversation, path)
+        file_fd, file_info = await agent_service.get_conversation_file(conversation, path)
     except (agent_service.ConversationNotFound, agent_service.FileNotAvailable) as error:
         raise HTTPException(status_code=404, detail="FILE_NOT_FOUND") from error
     except Exception as error:
@@ -252,14 +254,24 @@ async def download_file(
         "X-Content-Type-Options": "nosniff",
     }
     if etag in [tag.strip() for tag in request.headers.get("if-none-match", "").split(",")]:
+        os.close(file_fd)
         return Response(status_code=304, headers=headers)
-    return FileResponse(
-        absolute_path,
+    # Served through /proc/self/fd: FileResponse wants a path (it does the ranges video seeking needs), and
+    # that one reopens the very file we checked -- never what's at the file's path by now, which the agent
+    # could have swapped for a symlink. Linux-only (macOS has no /proc). The file object holds the
+    # descriptor: closed after the response, or when it's dropped if the client went away mid-way.
+    held_file = os.fdopen(file_fd, "rb")
+    response = FileResponse(
+        f"/proc/self/fd/{file_fd}",
         media_type=file_info["mime"],
         filename=file_info["name"],
         content_disposition_type="inline",
         headers=headers,
+        stat_result=os.fstat(file_fd),
+        background=BackgroundTask(held_file.close),
     )
+    response.held_file = held_file
+    return response
 
 
 def _to_sse_event(message: AiMessage) -> str:

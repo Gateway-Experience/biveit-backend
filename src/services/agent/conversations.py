@@ -8,9 +8,9 @@
 # it can never drop or duplicate one.
 
 import asyncio
+import os
 import time
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 
 import pydash
@@ -33,7 +33,6 @@ from src.dto.projects import Project
 from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
-from src.services import devenv
 from src.services.agent import implementation, mock, sessions, signals, storage, wakeups
 from src.services.agent.interactions import (
     InvalidSubmission,
@@ -111,21 +110,24 @@ async def get_conversation_project(conversation: AiConversation) -> Project:
     return projects[0]
 
 
-async def get_conversation_file(conversation: AiConversation, relative_path: str) -> tuple[Path, dict]:
-    """A file from the conversation's uploads/ or artifacts/ folder by its relative path, as (absolute
-    path, {path, name, mime, size, version, immutable}). Raises storage.FileNotAvailable for anything
-    else -- a missing file, another folder, or a path that resolves outside the conversation.
+async def get_conversation_file(conversation: AiConversation, relative_path: str) -> tuple[int, dict]:
+    """A file from the conversation's uploads/ or artifacts/ folder by its relative path, as (an open read
+    descriptor the caller closes, {path, name, mime, size, version, immutable}). Raises
+    storage.FileNotAvailable for anything else -- a missing file, another folder, a path that leaves the
+    conversation, a symlink. A descriptor rather than a path: the agent controls that folder, so a path
+    could be swapped for a symlink between our check and the read.
 
     `immutable`: uploads never change (each gets a unique name), so they can be cached for good;
     artifacts are rewritten in place, so a cached copy must be revalidated against `version`."""
     project = await get_conversation_project(conversation)
-    absolute_path = storage.resolve_conversation_file(project, conversation["id"], relative_path)
+    file_fd = await asyncio.to_thread(storage.open_conversation_file, project, conversation["id"], relative_path)
+    file_stat = os.fstat(file_fd)
     file_info = {
-        **storage.describe_file(relative_path, absolute_path),
-        "version": storage.get_file_version(absolute_path),
+        **storage.describe_file(relative_path, file_stat),
+        "version": storage.get_file_version(file_stat),
         "immutable": relative_path.startswith(f"{storage.UPLOADS_DIR}/"),
     }
-    return absolute_path, file_info
+    return file_fd, file_info
 
 
 async def list_artifacts(conversation: AiConversation) -> list[dict]:
@@ -144,15 +146,7 @@ async def list_artifacts(conversation: AiConversation) -> list[dict]:
         for block in message["content"]
         if block.get("type") == "tool_use" and block.get("name") == SHOW_ARTIFACT_TOOL_NAME
     }
-    conversation_dir = Path(devenv.get_conversation_dir(project, conversation["id"]))
-    return [
-        {
-            **file,
-            "version": storage.get_file_version(conversation_dir / file["path"]),
-            "title": titles_by_path.get(file["path"]) or file["name"],
-        }
-        for file in files
-    ]
+    return [{**file, "title": titles_by_path.get(file["path"]) or file["name"]} for file in files]
 
 
 async def watch_messages(
@@ -230,8 +224,8 @@ async def upload_files(conversation: AiConversation, files: list[dict]) -> list[
 def _describe_attachment(project: Project, conversation_id: int, relative_path: str) -> dict:
     """[Pure-ish] An uploaded file as {path, name, mime, size}. Raises storage.FileNotAvailable unless
     the path is an existing file in THIS conversation's uploads folder."""
-    absolute_path = storage.resolve_conversation_file(project, conversation_id, relative_path, [storage.UPLOADS_DIR])
-    return storage.describe_file(relative_path, absolute_path)
+    file_stat = storage.stat_conversation_file(project, conversation_id, relative_path, [storage.UPLOADS_DIR])
+    return storage.describe_file(relative_path, file_stat)
 
 
 async def post_user_message(conversation: AiConversation, body: dict[str, Any]) -> AiMessage:

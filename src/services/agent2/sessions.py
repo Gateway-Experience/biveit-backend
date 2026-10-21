@@ -67,8 +67,9 @@ def get_unit_name(conversation_id: int) -> str:
 
 
 def get_log_path(project: Project, conversation_id: int) -> str:
-    """[Pure-ish] The runner's stdout/stderr, next to its socket."""
-    return os.path.join(devenv.get_project_dir(project), f"{conversation_id}.agent.log")
+    """[Pure-ish] The runner's stdout/stderr, next to its socket -- NOT in the project folder: that's the
+    agent's, and systemd (StandardOutput=append:) or our own open() would follow a symlink planted there."""
+    return os.path.join(get_socket_dir(), f"{conversation_id}.agent.log")
 
 
 async def ensure_session(project: Project, conversation_id: int) -> None:

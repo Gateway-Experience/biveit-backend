@@ -11,6 +11,7 @@ from src.config import settings
 from src.constants import DevServerAction
 from src.services import devenv
 from src.services.devenv import addresses, databases, environments, servers, sites, templates, workspaces
+from src.utils import paths
 from src.utils.processes import CommandFailed, get_base_env, run_command
 
 _PROJECT = {"id": 42, "hash": "p42hash", "user_id": 7, "user_hash": "u7hash"}
@@ -28,20 +29,27 @@ def test_layout_is_user_project_conversation(tmp_path):
     assert devenv.get_conversation_dir(_PROJECT, 9) == f"{tmp_path}/storage/u7hash/p42hash/9"
 
 
-def test_copy_missing_files_never_overwrites(tmp_path):
+async def test_seeding_a_workspace_never_overwrites_or_follows_what_the_agent_put_there(tmp_path, monkeypatch):
     template = tmp_path / "template"
     (template / "src").mkdir(parents=True)
+    (template / ".claude").mkdir()
     (template / "index.html").write_text("template index")
     (template / "src" / "app.js").write_text("template app")
+    (template / ".claude" / "settings.json").write_text("template settings")
+    monkeypatch.setattr(settings, "template_dir", str(template))
+    outside = tmp_path / "outside"
+    outside.mkdir()
 
-    destination = tmp_path / "ws"
-    destination.mkdir()
-    (destination / "index.html").write_text("user edited")
+    workspace = tmp_path / "storage/u7hash/p42hash/9"
+    workspace.mkdir(parents=True)
+    (workspace / "index.html").write_text("user edited")
+    (workspace / ".claude").symlink_to(outside)  # planted: a folder of ours pointing out of the project
 
-    workspaces._copy_missing_files(str(template), str(destination))
+    await workspaces.ensure_workspace(_PROJECT, 9)
 
-    assert (destination / "index.html").read_text() == "user edited"
-    assert (destination / "src" / "app.js").read_text() == "template app"
+    assert (workspace / "index.html").read_text() == "user edited"
+    assert (workspace / "src" / "app.js").read_text() == "template app"
+    assert list(outside.iterdir()) == []  # nothing written through the link
 
 
 async def test_ensure_workspace_creates_and_seeds_the_conversation_dir(tmp_path, monkeypatch):
@@ -165,6 +173,38 @@ async def test_an_app_already_in_the_workspace_is_left_alone(boilerplate, tmp_pa
     await workspaces.copy_boilerplate(_PROJECT, 9)
     assert (workspace / "backend/main.py").read_text() == "the agent's version"
     assert (workspace / "frontend/index.html").exists()
+
+
+async def test_a_symlinked_app_folder_isnt_an_app_and_gets_no_boilerplate(boilerplate, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    workspace = tmp_path / "storage/u7hash/p42hash/9"
+    workspace.mkdir(parents=True)
+    (workspace / "backend").symlink_to(outside)
+    (workspace / "frontend").symlink_to(outside)
+    assert not devenv.has_app(_PROJECT, 9)
+    with pytest.raises(OSError):  # the app folder's name is taken by the link: the copy can't be put in place
+        await workspaces.copy_boilerplate(_PROJECT, 9)
+    assert list(outside.iterdir()) == []
+
+
+async def test_env_files_and_the_pm2_file_never_go_through_a_planted_symlink(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "project_secret_seed", "seed-for-tests")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "target").write_text("host file")
+    workspace = tmp_path / "storage/u7hash/p42hash/9"
+    (workspace / "backend").mkdir(parents=True)
+    (workspace / "frontend").symlink_to(outside)  # a whole folder pointing out
+    (workspace / "ecosystem.config.cjs").symlink_to(outside / "target")  # one of our files pointing out
+
+    with pytest.raises(paths.UnsafePath):
+        await environments._write_missing_env_files(_PROJECT, 9)
+    await servers._write_ecosystem_file(_PROJECT, 9)
+
+    assert (outside / "target").read_text() == "host file"
+    assert sorted(entry.name for entry in outside.iterdir()) == ["target"]
+    assert "project_42_be" in (workspace / "ecosystem.config.cjs").read_text()  # the link itself got replaced
 
 
 # --- the whole setup ---
