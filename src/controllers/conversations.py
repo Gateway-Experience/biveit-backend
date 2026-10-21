@@ -34,6 +34,7 @@ from src.constants import (
 from src.dto.ai_conversations import AiConversation, AiMessage, PostUserMessageRequest
 from src.dto.users import User
 from src.repositories import ai_messages as ai_messages_repo
+from src.services import activity
 from src.services import agent as agent_service
 from src.utils.auth import get_current_user
 from src.utils.logging import log_http_error
@@ -160,6 +161,7 @@ async def stream_events(
                     *[_to_sse_event(message) for message in new_messages],
                     *(["event: devenv\ndata: {}\n\n"] if devenv_changed else []),
                 ]
+                await activity.mark_active(conversation["id"])  # an open chat tab keeps the project's container up
                 yield "".join(events) or ": heartbeat\n\n"
         except Exception as error:
             # The 200 is already sent, so all we can do is log and end the stream; EventSource reconnects.

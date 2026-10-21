@@ -17,8 +17,8 @@ from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import project_folders as project_folders_repo
 from src.repositories import projects as projects_repo
+from src.services import activity, devenv
 from src.services import agent as agent_service
-from src.services import devenv
 from src.utils.common import spawn, utc_now
 from src.utils.logging import log_error
 
@@ -93,6 +93,7 @@ async def open_project(project: Project) -> None:
     servers a reboot (or a crash) took down. Its failures are only logged: the agent finds out on its
     own when it next uses them."""
     conversation = await agent_service.get_current_conversation(project["id"], project["user_id"])
+    await activity.mark_active(conversation["id"])
     if AGENT_MOCK_REPLIES:
         await devenv.ensure_workspace(project, conversation["id"])
     else:
@@ -119,6 +120,30 @@ async def close_project(project: Project) -> dict:
     dev_servers = await agent_service.stop_devenv(project, conversations[0]["id"]) if conversations else []
     container = await devenv.stop_container(project["id"])
     return {"sessions": sessions, "dev_servers": dev_servers, "container": container}
+
+
+async def stop_idle_projects() -> list[int]:
+    """Close every project whose container runs but whose conversations all went unused for
+    DEVENV_IDLE_STOP_SECONDS (services/activity) -- everything in its container stops, and the next open
+    brings it back. A container whose project is gone (deleted) is removed. Returns the projects stopped.
+    Original purpose: the idle sweep (src/app.py), so idle projects don't hold the machine's memory."""
+    running = await devenv.list_running_project_ids()
+    projects = {
+        project["id"]: project for project_id in running for project in await projects_repo.find({"id": project_id})
+    }
+    orphans = [project_id for project_id in running if project_id not in projects]
+    for project_id in orphans:  # one side effect each: removing it
+        await devenv.remove_container(project_id)
+    idle = [
+        project
+        for project in projects.values()
+        if not await activity.is_any_active(
+            pydash.map_(await ai_conversations_repo.find({"project_id": project["id"]}), "id")
+        )
+    ]
+    for project in idle:  # one side effect each: closing it
+        await close_project(project)
+    return [*orphans, *pydash.map_(idle, "id")]
 
 
 async def delete_project(project: Project) -> None:

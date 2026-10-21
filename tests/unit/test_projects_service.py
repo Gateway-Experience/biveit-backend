@@ -9,7 +9,7 @@ import pytest
 from src.constants import AgentRuntime
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
-from src.services import devenv
+from src.services import activity, devenv
 from src.services import projects as projects_service
 from src.services.agent import adapter, sessions
 from src.utils import postgres
@@ -287,3 +287,82 @@ async def test_search_ignores_too_short_queries_and_trims_whitespace(monkeypatch
         {"project_id": 3, "excerpt": "Selling niche perfumes online"}
     ]
     assert calls == ["niche perfumes"]
+
+
+# --- the idle sweep ---
+
+
+@pytest.fixture
+def idle_world(monkeypatch):
+    """stop_idle_projects over fakes: running containers, live projects with their conversations, which
+    conversations are active, and what got closed / removed."""
+    state = {
+        "running": [1, 2, 3],
+        "projects": {1: {"id": 1}, 2: {"id": 2}},  # 3 is gone (deleted): its container is an orphan
+        "conversations": {1: [10, 11], 2: [20]},
+        "active": {11},
+        "closed": [],
+        "removed": [],
+    }
+
+    async def running():
+        return state["running"]
+
+    async def find_projects(criteria):
+        return [state["projects"][criteria["id"]]] if criteria["id"] in state["projects"] else []
+
+    async def find_conversations(criteria):
+        return [{"id": cid} for cid in state["conversations"].get(criteria["project_id"], [])]
+
+    async def any_active(conversation_ids):
+        return bool(set(conversation_ids) & state["active"])
+
+    async def close(project):
+        state["closed"].append(project["id"])
+
+    async def remove(project_id):
+        state["removed"].append(project_id)
+
+    monkeypatch.setattr(projects_service.devenv, "list_running_project_ids", running)
+    monkeypatch.setattr(projects_service.projects_repo, "find", find_projects)
+    monkeypatch.setattr(projects_service.ai_conversations_repo, "find", find_conversations)
+    monkeypatch.setattr(projects_service.activity, "is_any_active", any_active)
+    monkeypatch.setattr(projects_service, "close_project", close)
+    monkeypatch.setattr(projects_service.devenv, "remove_container", remove)
+    return state
+
+
+async def test_only_projects_nobody_uses_are_stopped(idle_world):
+    # 1 has an active conversation (11): kept. 2 has none: closed. 3's project is gone: its container removed.
+    assert sorted(await projects_service.stop_idle_projects()) == [2, 3]
+    assert idle_world["closed"] == [2] and idle_world["removed"] == [3]
+
+
+async def test_nothing_running_means_nothing_to_stop(idle_world):
+    idle_world["running"] = []
+    assert await projects_service.stop_idle_projects() == []
+    assert idle_world["closed"] == [] and idle_world["removed"] == []
+
+
+async def test_activity_is_a_flag_per_conversation_that_expires(monkeypatch):
+    flags = {}
+
+    async def set_flag(key, ttl_seconds):
+        flags[key] = ttl_seconds
+
+    async def flag_exists(key):
+        return key in flags
+
+    monkeypatch.setattr(activity.redis, "set_flag", set_flag)
+    monkeypatch.setattr(activity.redis, "flag_exists", flag_exists)
+    assert not await activity.is_any_active([5, 6])
+    await activity.mark_active(6)
+    assert await activity.is_any_active([5, 6]) and flags == {"devenv:active:6": 7200}
+
+
+async def test_marking_activity_never_fails_a_request(monkeypatch):
+    async def redis_down(key, ttl_seconds):
+        raise ConnectionError("redis is down")
+
+    monkeypatch.setattr(activity.redis, "set_flag", redis_down)
+    await activity.mark_active(5)  # logged, not raised

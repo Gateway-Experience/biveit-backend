@@ -6,6 +6,8 @@
 # useful without either (nothing caches yet, and settings fall back to code defaults), so a missing
 # local redis shouldn't stop you from running the API.
 
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -15,7 +17,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from src import debug_scratch
 from src.config import settings
-from src.constants import AGENT_LISTENER_PORT, SERVER_GRACEFUL_SHUTDOWN_SECONDS
+from src.constants import AGENT_LISTENER_PORT, DEVENV_IDLE_SWEEP_SECONDS, SERVER_GRACEFUL_SHUTDOWN_SECONDS
 from src.controllers.agent import listener_router as agent_listener_router
 from src.controllers.agent import router as agent_router
 from src.controllers.auth import router as auth_router
@@ -26,12 +28,14 @@ from src.controllers.system import router as system_router
 from src.controllers.system_configurations import router as system_configurations_router
 from src.controllers.users import router as users_router
 from src.services import devenv, system_config
+from src.services import projects as projects_service
 from src.utils import http, postgres, redis
 from src.utils.logging import configure_logging, log_error
 
 # Every route lives under /api so a host nginx has a single rule (/api/ -> this container) and nothing
 # is served bare at the root.
 _API_PREFIX = "/api"
+_log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -64,15 +68,32 @@ async def lifespan(app: FastAPI):
         await debug_scratch.run_do_test()
 
     agent_listener = await _serve_agent_listener()
+    idle_sweep = asyncio.create_task(_sweep_idle_projects())
 
     yield
 
+    idle_sweep.cancel()
     if agent_listener:
         agent_listener.should_exit = True
         await agent_listener.shutdown()
     await http.close()
     await redis.close()
     await postgres.close()
+
+
+async def _sweep_idle_projects() -> None:
+    """Every DEVENV_IDLE_SWEEP_SECONDS, stop the projects nobody has used for a while
+    (projects.stop_idle_projects). Every worker runs this loop, but only one does each round: the first to
+    claim it in Redis. A round that fails is logged and the next one tries again."""
+    while True:
+        await asyncio.sleep(DEVENV_IDLE_SWEEP_SECONDS)
+        try:
+            if await redis.set_if_absent("devenv:idle-sweep", DEVENV_IDLE_SWEEP_SECONDS - 10):
+                stopped = await projects_service.stop_idle_projects()
+                if stopped:
+                    _log.info("idle projects stopped: %s", stopped)
+        except Exception as error:
+            log_error(error, "the idle sweep failed; the next round tries again")
 
 
 async def _serve_agent_listener() -> uvicorn.Server | None:

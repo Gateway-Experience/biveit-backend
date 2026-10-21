@@ -19,18 +19,21 @@ from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.dto.ai_conversations import AiMessage, PostAgentMessageRequest, PostAgentSignalRequest, PostDevServersRequest
+from src.services import activity, agent2
 from src.services import agent as agent_service
-from src.services import agent2
 from src.utils.logging import log_http_error
 
 _bearer = HTTPBearer(auto_error=False)
 
 
-def get_session_conversation_id(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> int:
-    """Route dependency: the conversation the caller's session token speaks for. 403 without a valid one."""
+async def get_session_conversation_id(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> int:
+    """Route dependency: the conversation the caller's session token speaks for. 403 without a valid one.
+    Every agent call also counts as the conversation being in use (services/activity): an agent at work keeps
+    its project's container up, model calls included."""
     conversation_id = agent_service.get_token_conversation_id(creds.credentials) if creds else None
     if conversation_id is None:
         raise HTTPException(status_code=403, detail="FORBIDDEN")
+    await activity.mark_active(conversation_id)
     return conversation_id
 
 

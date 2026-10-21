@@ -304,6 +304,10 @@ DEVENV_INTERNAL_FRONTEND_PORT = 5173
 #   pids       counts THREADS: Chromium, Node tools and an npm install together reach a few hundred
 #   nofile     per process; Node dev tools open many files and sockets
 #   tmp_size   /tmp is a tmpfs, so it's memory too
+# A project's container is stopped once none of its conversations was in use for this long (services/activity),
+# checked every DEVENV_IDLE_SWEEP_SECONDS. The next open (or message) starts it again.
+DEVENV_IDLE_STOP_SECONDS = 2 * 60 * 60
+DEVENV_IDLE_SWEEP_SECONDS = 5 * 60
 DEVENV_CONTAINER_LIMITS = {"memory": "3g", "cpus": "1.0", "pids": 2048, "nofile": 65536, "tmp_size": "256m"}
 
 

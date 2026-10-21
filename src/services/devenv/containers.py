@@ -118,6 +118,14 @@ async def remove_container(project_id: int) -> None:
         await run_command(["docker", "rm", "--force", get_container_name(project_id)])
 
 
+async def list_running_project_ids() -> list[int]:
+    """The projects (of this backend's env) whose containers are running, by the labels every container gets."""
+    output = await run_command(
+        ["docker", "ps", f"--filter=label=vib3.env={settings.env}", '--format={{.Label "vib3.project"}}']
+    )
+    return [int(project_id) for project_id in output.split() if project_id.isdigit()]
+
+
 async def is_container_running(project_id: int) -> bool:
     container = await _inspect(get_container_name(project_id))
     return bool(container and container["State"]["Running"])

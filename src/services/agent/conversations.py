@@ -33,6 +33,7 @@ from src.dto.projects import Project
 from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
+from src.services import activity
 from src.services.agent import implementation, mock, sessions, signals, storage, wakeups
 from src.services.agent.interactions import (
     InvalidSubmission,
@@ -244,6 +245,7 @@ async def post_user_message(conversation: AiConversation, body: dict[str, Any]) 
     Approvals take effect once the answer is stored and BEFORE it's handed to the agent
     (implementation.apply_approvals): the user's click is what counts, so it holds even if the session
     can't be reached right then (the 503 still comes, and resending only re-delivers)."""
+    await activity.mark_active(conversation["id"])
     pending = find_pending_interactions(await ai_messages_repo.find(conversation["id"]))
 
     if body["type"] == "text":
