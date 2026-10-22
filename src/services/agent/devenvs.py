@@ -1,7 +1,7 @@
 # Intentions: a conversation's dev environment (services/devenv) as the chat sees it.
 # For the agent's session (through its channel's tools, so always about its OWN conversation's project):
-#   control_dev_servers   start / restart / stop / check the project's dev servers. The agent can't run
-#                         pm2 itself: there's one pm2 for every project on the box.
+#   control_dev_servers   start / restart / stop / check the project's dev servers. Done for the agent
+#                         (its pm2 also runs its own session), so it never runs pm2 itself.
 # For the user's tabs:
 #   get_devenv_status     the stage, the preview URL and the dev servers, for the preview screen
 #   restore_devenv        bring an implementing project's servers back on a visit (services/projects)

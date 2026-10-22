@@ -138,10 +138,6 @@ class Settings(BaseSettings):
     # widening it (/24 -> /16, same start) is fine, moving it isn't. It caps the RUNNING containers (a /16:
     # ~65k), not the projects -- a stopped container holds no address.
     devenv_network_subnet: str = "10.213.0.0/16"
-    # One Redis server where each project gets its own numbered databases (see PROJECT_REDIS_DEV_DB_BASE).
-    # The Redis URL has NO database number -- each project's is appended. That server needs
-    # `databases 18000` (Redis's default is 16).
-    project_redis_url: str = "redis://localhost:6379"
     # Every project secret (its JWT secret, admin token...) is derived from this plus the project id, so
     # nothing has to be stored, and re-rendering a project's env gives the same values. Effectively a
     # key: long, random, never shared. Empty -> rendering a template that asks for a secret fails.

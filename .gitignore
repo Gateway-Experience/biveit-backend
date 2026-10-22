@@ -8,6 +8,8 @@
 .env.canary
 .env.test
 .env.migration
+# Model key sets for scripts/manage.py keys -- real keys, never committed
+.agent_api_keys/
 
 # Python-generated files
 __pycache__/

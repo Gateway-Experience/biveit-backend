@@ -1,0 +1,11 @@
+Why "you're still working?" got no reply: the agent answers when its current turn ends, and the build is one long turn. Your message
+is waiting, and you'll get the reply together with the build result. The last finished turn (10:58:22) cost $0.55. This turn will cost
+more, because the build runs inside it.
+
+Something for you to fix later:
+- The agent saves its screenshots (home-*.png, newsletter-*.png, stamp.png) and .playwright-mcp/ at the root of the project folder, so
+they end up in the project's files.
+- You may want the runner or the template's CLAUDE.md to send screenshots somewhere like .devenv/, or keep them out of git.
+
+The runner log also showed unrecognized_model: deepseek-flash once at startup, but only for Claude Code's session-title helper. The
+turns themselves run fine.

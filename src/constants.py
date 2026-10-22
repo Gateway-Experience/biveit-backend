@@ -136,6 +136,11 @@ AGENT_ENDPOINT_ENV = {
     "CLAUDE_CODE_EFFORT_LEVEL": "max",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "950000",
 }
+# The model key sets scripts/manage.py switches between: one .env-format file per set in this folder (at the
+# repo root, gitignored), each holding only these variables. Applying a set rewrites all of them in
+# .env.<env>, so nothing of the previous provider lingers.
+AGENT_API_KEYS_DIR = ".agent_api_keys"
+AGENT_API_KEY_NAMES = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"]
 
 # Attempts at pushing a message into a runner (services/agent/runners.send), with backoff growing to 2s
 # -- about 15s in all, enough for a runner that was just started to begin listening.
@@ -156,14 +161,6 @@ SUBPROCESS_ENV_PASSTHROUGH = [
 # API) stays below 8000, and all of it below the OS's outgoing-connection ports (32768+).
 PROJECT_DEV_BACKEND_PORT_BASE = 8000
 PROJECT_DEV_FRONTEND_PORT_BASE = 16000
-# Each project's own Redis databases (on PROJECT_REDIS_URL's server): dev = base + id, prod = base + id.
-# A whole database per project rather than key prefixes, so projects can't see each other's keys whatever
-# the generated code does with Redis. db 0 is the platform's. The bases start at 1000 so a Redis server
-# shared with other apps keeps 1-999 for them (on the VPS, the gx projects use db = their id, 1-255).
-# With ids below 8000 that's databases 1001-17999, so the server needs PROJECT_REDIS_DATABASES_NEEDED.
-PROJECT_REDIS_DEV_DB_BASE = 1000
-PROJECT_REDIS_PROD_DB_BASE = 10000
-PROJECT_REDIS_DATABASES_NEEDED = 18000
 # ...except on a local platform (ENV=local), where every project uses the same two fixed ports and there's
 # no nginx: open the dev site straight on the frontend port. So only one project's dev servers can run
 # at a time locally -- another project's would find the ports taken.
