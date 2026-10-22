@@ -133,9 +133,11 @@ class Settings(BaseSettings):
     project_mongo_host: str = "10.213.0.1:27017"
     # The projects' containers' docker network (services/devenv/containers): its first address is the
     # gateway, the one address on the host containers can reach (Mongo, the backend's agent listener).
-    # It must not overlap the machine's other networks (LAN, VPN, other docker networks); written into
-    # projects' env files, so don't change it once projects use it.
-    devenv_network_subnet: str = "10.213.0.0/24"
+    # It must not overlap the machine's other networks (LAN, VPN, other docker networks). Its gateway is
+    # written into projects' env files (PROJECT_MONGO_HOST), so once projects use it, keep its first address:
+    # widening it (/24 -> /16, same start) is fine, moving it isn't. It caps the RUNNING containers (a /16:
+    # ~65k), not the projects -- a stopped container holds no address.
+    devenv_network_subnet: str = "10.213.0.0/16"
     # One Redis server where each project gets its own numbered databases (see PROJECT_REDIS_DEV_DB_BASE).
     # The Redis URL has NO database number -- each project's is appended. That server needs
     # `databases 18000` (Redis's default is 16).

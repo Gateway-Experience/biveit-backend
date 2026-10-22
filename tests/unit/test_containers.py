@@ -50,7 +50,7 @@ def test_container_paths_are_the_projects_only(tmp_path):
 
 
 def test_the_gateway_is_the_subnets_first_address(monkeypatch):
-    monkeypatch.setattr(settings, "devenv_network_subnet", "10.213.0.0/24")
+    monkeypatch.setattr(settings, "devenv_network_subnet", "10.213.0.0/16")
     assert containers.get_gateway_ip() == "10.213.0.1"
 
 
