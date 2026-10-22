@@ -86,6 +86,23 @@ def _ran(docker, verb):
     return [argv for argv in docker["ran"] if argv[:2] == ["docker", verb]]
 
 
+async def test_the_network_keeps_containers_apart(monkeypatch):
+    # Every project shares the bridge, so container-to-container traffic is off; the host is still reachable.
+    state = {"ran": []}
+
+    async def fake_run_command(argv, **_):
+        state["ran"] = [*state["ran"], argv]
+        if argv[:3] == ["docker", "network", "inspect"]:
+            raise containers.CommandFailed("no such network")
+        return ""
+
+    monkeypatch.setattr(containers, "run_command", fake_run_command)
+    await containers.ensure_network()
+    created = state["ran"][-1]
+    assert created[:3] == ["docker", "network", "create"]
+    assert "--opt=com.docker.network.bridge.enable_icc=false" in created
+
+
 async def test_a_new_project_gets_the_current_image_recorded_and_a_container(docker):
     await containers.ensure_container(_PROJECT)
     assert docker["updates"] == [(39, {"meta": {"devenv_image": DEVENV_IMAGE}})]

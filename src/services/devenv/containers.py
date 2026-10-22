@@ -169,7 +169,10 @@ async def extract_into_container(project_id: int, archive: bytes, container_dir:
 
 async def ensure_network() -> None:
     """The containers' network: DEVENV_NETWORK on settings.devenv_network_subnet, its bridge interface named
-    after it. Idempotent."""
+    after it. Containers on it can't reach each other (enable_icc=false): every project shares the bridge,
+    and the user is the security boundary. They still reach the host at the gateway (what the host lets in
+    is the firewall's call). Idempotent -- but only on the name: a network made before an option was added
+    keeps its old options until it's removed and recreated."""
     try:
         await run_command(["docker", "network", "inspect", DEVENV_NETWORK])
     except CommandFailed:
@@ -180,6 +183,7 @@ async def ensure_network() -> None:
                 "create",
                 f"--subnet={settings.devenv_network_subnet}",
                 f"--opt=com.docker.network.bridge.name={DEVENV_NETWORK}",
+                "--opt=com.docker.network.bridge.enable_icc=false",
                 DEVENV_NETWORK,
             ]
         )
