@@ -3,7 +3,7 @@
 # session runner in the project's container (runners.py); this is the part that doesn't care how it
 # runs: what to say to it (introductions), and the translations.
 #
-# THE CHANNEL (the runner's inbox and the platform's agent endpoints, see vib3-session-runner):
+# THE CHANNEL (the runner's inbox and the platform's agent endpoints, see biveit-session-runner):
 #   into the session:  {content: [item]}, item = {type: "text", text} or {type: "tool_result",
 #                      tool_use_id, content: [answer]} -- an answer names the call it answers, and the
 #                      runner hands it to that waiting call.

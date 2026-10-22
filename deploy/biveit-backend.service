@@ -1,0 +1,32 @@
+# systemd unit for the biveit backend on a server (see docs/dev-server-guide.md), for the `ubuntu` user with the
+# repos under ~/workspace. Install it:
+#               sudo cp deploy/biveit-backend.service /etc/systemd/system/
+#               sudo systemctl daemon-reload && sudo systemctl enable --now biveit-backend
+# Logs: journalctl -u biveit-backend -f
+
+[Unit]
+Description=biveit backend
+# Docker first: the backend checks the projects' network on start, and its agent listener binds that
+# network's gateway address.
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/workspace/biveit-backend
+# Selects .env.prod (src/config.py loads it on top of .env.local).
+Environment=ENV=prod
+# systemd starts services with a bare PATH. The backend runs docker and sudo (for nginx) itself; uv is
+# only needed by the scripts, but harmless here.
+Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
+# A system service gets no locale; without one, non-ASCII text (the chat is often Vietnamese) can garble.
+Environment=LANG=C.UTF-8
+# The venv's python directly (deploys run `uv sync` beforehand).
+ExecStart=/home/ubuntu/workspace/biveit-backend/.venv/bin/python main.py
+Restart=always
+RestartSec=3
+# Restarting the backend never touches the projects: their containers belong to docker, not to this unit.
+
+[Install]
+WantedBy=multi-user.target

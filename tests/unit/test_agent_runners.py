@@ -1,5 +1,5 @@
 # Runner tests, the backend's side: services/agent/runners starting, finding and talking to runners, and
-# runner_installs putting the runner into a container. The runner is the real one (vib3-session-runner's
+# runner_installs putting the runner into a container. The runner is the real one (biveit-session-runner's
 # session_runner, served in-process on a real unix socket); only its Claude Agent SDK client is faked
 # (session_runner.testing.FakeClaudeClient). The runner itself is tested in its own repo.
 

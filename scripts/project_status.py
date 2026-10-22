@@ -201,7 +201,7 @@ async def _report_servers(project: Project, conversation_id: int) -> None:
 
     health = await _check_health(ports["backend"])
     dev_host = addresses.get_dev_host(project)
-    site_path = Path(settings.nginx_sites_dir, f"vib3-project-{project['id']}.conf")
+    site_path = Path(settings.nginx_sites_dir, f"biveit-project-{project['id']}.conf")
     _print_section(
         "Dev servers",
         [

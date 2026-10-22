@@ -8,7 +8,7 @@
 #                     on client-given names and paths
 #   sessions.py       the session as the app sees it: keeping it running, and talking to it over its
 #                     channel (translating to and from the channel's format)
-#   runners.py        the process holding a conversation's session (vib3-session-runner), in its project's
+#   runners.py        the process holding a conversation's session (biveit-session-runner), in its project's
 #                     container: started when needed, found by its socket, talked to over it
 #   runner_installs.py the runner installed in a project's container -- copied in, version-checked, kept current
 #   model_proxy.py    agents call the model through the backend, which holds the key

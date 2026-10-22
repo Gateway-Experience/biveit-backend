@@ -43,9 +43,9 @@ class InvalidResetToken(Exception):
 # The reset email, per user language. {link} and {minutes} are filled in at send time.
 _EMAIL_COPY = {
     UserLanguage.EN: {
-        "subject": "Reset your VibeIt password",
+        "subject": "Reset your biveit password",
         "text": (
-            "Someone (hopefully you) asked to reset the password for your VibeIt account.\n\n"
+            "Someone (hopefully you) asked to reset the password for your biveit account.\n\n"
             "Set a new one here: {link}\n\n"
             "The link works once and expires in {minutes} minutes. "
             "If you didn't ask for this, ignore this email -- your password stays the same."
@@ -53,9 +53,9 @@ _EMAIL_COPY = {
         "button": "Set a new password",
     },
     UserLanguage.VI: {
-        "subject": "Đặt lại mật khẩu VibeIt",
+        "subject": "Đặt lại mật khẩu biveit",
         "text": (
-            "Có người (hy vọng là bạn) đã yêu cầu đặt lại mật khẩu cho tài khoản VibeIt của bạn.\n\n"
+            "Có người (hy vọng là bạn) đã yêu cầu đặt lại mật khẩu cho tài khoản biveit của bạn.\n\n"
             "Đặt mật khẩu mới tại đây: {link}\n\n"
             "Liên kết chỉ dùng được một lần và hết hạn sau {minutes} phút. "
             "Nếu bạn không yêu cầu, hãy bỏ qua email này -- mật khẩu của bạn vẫn giữ nguyên."

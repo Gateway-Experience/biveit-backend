@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     env: str = "local"
     # Identifies this app in logs (the `service` field every deployed log line carries). Rename it
     # per project -- it's how you tell two services apart in one log stream.
-    app_name: str = "vib3-backend"
+    app_name: str = "biveit-backend"
 
     # Where the API listens. 127.0.0.1: on the server, nginx is the only way in (and locally nothing else
     # needs it). Set 0.0.0.0 only if something off this machine must reach it directly.
@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     api_reload: bool = False
 
     # PostgreSQL -- the application store. Schema is applied by scripts/migrate.py, not at startup.
-    postgres_dsn: str = "postgresql://postgres:postgres@localhost:5432/vib3"
+    postgres_dsn: str = "postgresql://postgres:postgres@localhost:5432/biveit"
     postgres_pool_max_size: int = 20
 
     # Redis -- available infrastructure (utils/cache reads through it). Startup connect is best-effort,
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     s3_bucket: str = ""
-    # Email -- the From address for outgoing mail (utils/aws/ses), e.g. "VibeIt <no-reply@example.com>". It (or its
+    # Email -- the From address for outgoing mail (utils/aws/ses), e.g. "biveit <no-reply@example.com>". It (or its
     # domain) must be verified in SES. Empty -> nothing is sent; locally, the password-reset link is printed to
     # the log instead so the flow can still be tried.
     email_from: str = ""
@@ -109,13 +109,13 @@ class Settings(BaseSettings):
     anthropic_auth_token: str = ""
 
     # Dev environments (services/devenv), set up once a conversation's agent starts implementing.
-    # The session runner's checkout (the vib3-session-runner repo, also the backend's own dependency): what
+    # The session runner's checkout (the biveit-session-runner repo, also the backend's own dependency): what
     # gets installed into each project's container (services/agent/runner_installs).
-    session_runner_dir: str = "../vib3-session-runner"
+    session_runner_dir: str = "../biveit-session-runner"
     # boilerplate_dir: the app copied in (its backend/ and frontend/), whose env templates (each app's own,
     # see DEVENV_ENV_FILES) are rendered for each project. devenv_templates_dir: the platform's own templates,
     # the pm2 file and the nginx site. ~ is expanded; relative paths resolve against the cwd.
-    boilerplate_dir: str = "../vib3-boilerplate"
+    boilerplate_dir: str = "../biveit-boilerplate"
     devenv_templates_dir: str = "data/devenv_templates"
     # A project's dev site is https://<project hash>.<dev_domain>, behind nginx with a wildcard certificate
     # for *.<dev_domain> (set up once on the VPS, at /etc/letsencrypt/live/<dev_domain>/). Empty -> no
@@ -126,8 +126,9 @@ class Settings(BaseSettings):
     # The platform's Mongo, for the projects' own apps (databases db_project_dev_<id> / db_project_<id>).
     # project_mongo_uri is OUR login, used only to manage the per-owner Mongo users (services/devenv/
     # databases), so it needs the userAdmin role. project_mongo_host is where the projects' apps reach the
-    # same server, logging in as their owner -- from INSIDE their containers, so through the containers'
-    # gateway (the first address of devenv_network_subnet): mongod must listen there too, with auth on.
+    # same server, logging in as their owner -- from INSIDE their containers, so an address on the
+    # containers' network: the gateway (devenv_network_subnet's first address) when mongod runs on the host,
+    # or the Mongo container's own address there (docs/dev-server-guide.md). Auth must be on either way.
     project_mongo_uri: str = "mongodb://localhost:27017"
     project_mongo_host: str = "10.213.0.1:27017"
     # The projects' containers' docker network (services/devenv/containers): its first address is the

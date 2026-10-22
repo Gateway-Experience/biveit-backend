@@ -2,7 +2,7 @@
 # servers, its own Redis, its agent's session runner (see docs/plans/project-containers.md). The container
 # is the boundary between users: the agent can do anything inside it, nothing inside it sees the platform.
 #
-#   name        vib3-<env>-project-<id>, derived -- nothing is recorded but the image tag (below)
+#   name        biveit-<env>-project-<id>, derived -- nothing is recorded but the image tag (below)
 #   image       the tag the project was created with (projects.meta.devenv_image): new projects get
 #               DEVENV_IMAGE, existing ones keep theirs until upgraded by hand
 #   mounts      the project's folder at /project, its runner sockets' folder at /sockets -- nothing else
@@ -41,7 +41,7 @@ from src.utils.processes import CommandFailed, run_command
 
 # The account the container's processes run as -- ours, by uid -- named inside the container, since some
 # tools look the user up by name.
-_CONTAINER_USER = "vib3"
+_CONTAINER_USER = "biveit"
 
 
 class ContainerUnavailable(Exception):
@@ -51,7 +51,7 @@ class ContainerUnavailable(Exception):
 def get_container_name(project_id: int) -> str:
     """[Pure-ish] The env is in it: every backend on the machine (local, dev...) shares one docker, and
     project ids only mean something within one database."""
-    return f"vib3-{settings.env}-project-{project_id}"
+    return f"biveit-{settings.env}-project-{project_id}"
 
 
 def get_host_socket_dir(project_id: int) -> str:
@@ -121,7 +121,7 @@ async def remove_container(project_id: int) -> None:
 async def list_running_project_ids() -> list[int]:
     """The projects (of this backend's env) whose containers are running, by the labels every container gets."""
     output = await run_command(
-        ["docker", "ps", f"--filter=label=vib3.env={settings.env}", '--format={{.Label "vib3.project"}}']
+        ["docker", "ps", f"--filter=label=biveit.env={settings.env}", '--format={{.Label "biveit.project"}}']
     )
     return [int(project_id) for project_id in output.split() if project_id.isdigit()]
 
@@ -198,8 +198,8 @@ def _to_run_argv(project: Project, image: str) -> list[str]:
         "run",
         "--detach",
         f"--name={get_container_name(project['id'])}",
-        f"--label=vib3.env={settings.env}",
-        f"--label=vib3.project={project['id']}",
+        f"--label=biveit.env={settings.env}",
+        f"--label=biveit.project={project['id']}",
         "--init",
         f"--user={os.getuid()}:{os.getgid()}",
         "--cap-drop=ALL",
@@ -260,8 +260,8 @@ async def _stop_other_local_containers(name: str) -> None:
             "docker",
             "ps",
             "--format={{.Names}}",
-            f"--filter=label=vib3.env={settings.env}",
-            "--filter=label=vib3.project",
+            f"--filter=label=biveit.env={settings.env}",
+            "--filter=label=biveit.project",
         ]
     )
     await asyncio.gather(*[run_command(["docker", "stop", other]) for other in running.split() if other != name])

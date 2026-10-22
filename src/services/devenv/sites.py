@@ -21,7 +21,7 @@ async def ensure_dev_site(project: Project, conversation_id: int) -> None:
     left in place, it would make every later reload fail, for every project on the box."""
     if addresses.get_dev_host(project) is None:
         return
-    site_path = os.path.join(settings.nginx_sites_dir, f"vib3-project-{project['id']}.conf")
+    site_path = os.path.join(settings.nginx_sites_dir, f"biveit-project-{project['id']}.conf")
     site_text = templates.render_template(DEVENV_NGINX_TEMPLATE, project, conversation_id)
     if await asyncio.to_thread(_read_text_or_none, site_path) == site_text:
         return

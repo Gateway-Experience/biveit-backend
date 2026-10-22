@@ -1,7 +1,7 @@
 [project]
-name = "vib3-backend"
+name = "biveit-backend"
 version = "0.1.0"
-description = "vib3 backend: FastAPI + asyncpg/PostgreSQL"
+description = "biveit backend: FastAPI + asyncpg/PostgreSQL"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -23,13 +23,13 @@ dependencies = [
     "redis>=5",
     "ruff>=0.15.17",
     "uvicorn[standard]>=0.49.0",
-    "vib3-session-runner",
+    "biveit-session-runner",
 ]
 
 # The session runner (its own repo, a sibling checkout): the backend starts it, and takes the protocol between
 # them from it (session_runner.protocol). Editable, so a runner change needs no reinstall here.
 [tool.uv.sources]
-vib3-session-runner = { path = "../vib3-session-runner", editable = true }
+biveit-session-runner = { path = "../biveit-session-runner", editable = true }
 
 [dependency-groups]
 dev = [

@@ -5,7 +5,7 @@ from enum import StrEnum
 
 from session_runner import protocol as _runner_protocol
 
-# The protocol between the platform and its session runner (the vib3-session-runner repo): ONE source for
+# The protocol between the platform and its session runner (the biveit-session-runner repo): ONE source for
 # both sides, taken over here under the names the backend has always used. See session_runner/protocol.py.
 SESSION_OUTBOX_URL_ENV = _runner_protocol.OUTBOX_URL_ENV
 SESSION_TOKEN_ENV = _runner_protocol.TOKEN_ENV
@@ -66,7 +66,7 @@ AVATAR_DIR = "profile"  # inside the user's storage folder
 # A user's first / last name: the columns' varchar limit (migrations/0001_users.sql).
 USER_NAME_MAX_LENGTH = 100
 
-# Password rules + reset. The FE mirrors MIN_PASSWORD_LENGTH (vib3-frontend authForm.ts).
+# Password rules + reset. The FE mirrors MIN_PASSWORD_LENGTH (biveit-frontend authForm.ts).
 MIN_PASSWORD_LENGTH = 8
 PASSWORD_RESET_TOKEN_TTL_SECONDS = 30 * 60
 # One reset email per address per window, so the endpoint can't be used to flood someone's inbox.
@@ -101,7 +101,7 @@ class ConfigName(StrEnum):
     Empty in the boilerplate -- add yours as the app grows."""
 
 
-# --- The agent's runners: the Claude Agent SDK runtime (services/agent + the vib3-session-runner repo) ---
+# --- The agent's runners: the Claude Agent SDK runtime (services/agent + the biveit-session-runner repo) ---
 # One runner process per conversation holds its SDK session; it listens on a unix socket, told where by
 # RUNNER_SOCKET_ENV (from the runner's protocol, top of this file). The runner's own tunables live in its
 # repo (session_runner/constants.py).
@@ -207,12 +207,12 @@ DEVENV_WAKEUP = "devenv"
 # The common image new projects' containers run (data/devenv_image, built by scripts/build_devenv_image.sh).
 # Bump the tag with every Dockerfile change: a project keeps the tag it was created with (projects.meta),
 # so a reused tag would change existing projects' environment under them. Pushed to Docker Hub as
-# <namespace>/vib3-devenv:<tag> once the namespace is set here.
-DEVENV_IMAGE = "vib3-devenv:1"
+# <namespace>/biveit-devenv:<tag> once the namespace is set here.
+DEVENV_IMAGE = "biveit-devenv:1"
 # The docker network every project's container joins; its range is DEVENV_NETWORK_SUBNET (a setting: it
 # depends on what the machine's other networks use). The bridge interface is named after it too, so the
 # host's firewall rules can tell the containers' traffic apart.
-DEVENV_NETWORK = "vib3-projects"
+DEVENV_NETWORK = "biveit-projects"
 # Where things sit inside every container -- the same for each project, so nothing of the host's layout
 # shows (the backend translates: containers.to_container_path).
 DEVENV_PROJECT_PATH = "/project"
@@ -255,7 +255,7 @@ CONVERSATION_INTRODUCED_KEY = "introduced_at"
 # How long after the introduction the agent may stay silent before it counts as failed: its first turn
 # died after getting the introduction (an API error, a crash), and nothing else would ever resend it. The
 # next open then introduces it again (ensure_introduced). Generous: a first turn normally takes a minute or two.
-# The FE uses the same figure to offer a retry -- keep them in step (vib3-frontend INTRODUCTION_OVERDUE_MS).
+# The FE uses the same figure to offer a retry -- keep them in step (biveit-frontend INTRODUCTION_OVERDUE_MS).
 INTRODUCTION_OVERDUE_SECONDS = 300
 
 # Per-project mutex around "find or create the current conversation" (services/agent/conversations).

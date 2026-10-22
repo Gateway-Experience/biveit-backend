@@ -1,6 +1,6 @@
 // pm2 processes for project {{{project_id}}} in DEV, run by pm2 INSIDE the project's container: the backend
 // (uvicorn, reloads itself on save), the frontend (Vite dev server, hot reload) and the project's own Redis.
-// Written by vib3 and rewritten whenever the servers are started -- don't edit it here, it won't stick.
+// Written by biveit and rewritten whenever the servers are started -- don't edit it here, it won't stick.
 //
 // pm2's own `watch` stays OFF: both servers already reload themselves, and pm2 watching too would turn
 // every save into a full restart (killing Vite's hot reload).

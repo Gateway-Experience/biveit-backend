@@ -120,10 +120,10 @@ def test_template_failures_name_the_template(templates_dir, monkeypatch):
         templates.render_template("s.tmpl", _PROJECT, 9)
 
 
-_BOILERPLATE_CHECKOUT = Path(__file__).resolve().parents[3] / "vib3-boilerplate"
+_BOILERPLATE_CHECKOUT = Path(__file__).resolve().parents[3] / "biveit-boilerplate"
 
 
-@pytest.mark.skipif(not _BOILERPLATE_CHECKOUT.is_dir(), reason="no vib3-boilerplate checkout next to this repo")
+@pytest.mark.skipif(not _BOILERPLATE_CHECKOUT.is_dir(), reason="no biveit-boilerplate checkout next to this repo")
 def test_the_shipped_templates_render(monkeypatch):
     # The real templates -- ours in data/devenv_templates, the env files' in the boilerplate checkout --
     # with and without a dev domain.
@@ -407,7 +407,7 @@ async def test_no_dev_host_means_no_site(env, dev_domain, nginx_dir, commands, m
 
 async def test_a_changed_site_is_written_and_nginx_reloaded(nginx_dir, commands):
     await sites.ensure_dev_site(_PROJECT, 9)
-    site_path = str(nginx_dir / "vib3-project-42.conf")
+    site_path = str(nginx_dir / "biveit-project-42.conf")
     assert [argv for argv, _ in commands["ran"]] == [
         ["sudo", "-n", "tee", site_path],
         ["sudo", "-n", "nginx", "-t"],
@@ -416,7 +416,7 @@ async def test_a_changed_site_is_written_and_nginx_reloaded(nginx_dir, commands)
 
 
 async def test_an_unchanged_site_is_left_alone(nginx_dir, commands):
-    (nginx_dir / "vib3-project-42.conf").write_text(templates.render_template("nginx-dev.conf.tmpl", _PROJECT, 9))
+    (nginx_dir / "biveit-project-42.conf").write_text(templates.render_template("nginx-dev.conf.tmpl", _PROJECT, 9))
     await sites.ensure_dev_site(_PROJECT, 9)
     assert commands["ran"] == []
 
@@ -433,7 +433,7 @@ async def test_a_site_nginx_rejects_is_removed_again(nginx_dir, monkeypatch):
     monkeypatch.setattr(sites, "run_command", nginx_rejects)
     with pytest.raises(CommandFailed):
         await sites.ensure_dev_site(_PROJECT, 9)
-    assert ran[-1] == ["sudo", "-n", "rm", "-f", str(nginx_dir / "vib3-project-42.conf")]
+    assert ran[-1] == ["sudo", "-n", "rm", "-f", str(nginx_dir / "biveit-project-42.conf")]
 
 
 # --- running commands ---
@@ -452,8 +452,8 @@ async def test_run_command_returns_output_and_raises_with_its_tail():
 def test_commands_never_get_our_config_or_our_venv(monkeypatch):
     monkeypatch.setenv("API_PORT", "3001")
     monkeypatch.setenv("SESSION_TOKEN_SECRET", "ours")
-    monkeypatch.setenv("VIRTUAL_ENV", "/srv/vib3/.venv")
-    monkeypatch.setenv("PATH", "/srv/vib3/.venv/bin:/usr/bin")
+    monkeypatch.setenv("VIRTUAL_ENV", "/srv/biveit/.venv")
+    monkeypatch.setenv("PATH", "/srv/biveit/.venv/bin:/usr/bin")
     base_env = get_base_env()
     assert "API_PORT" not in base_env and "SESSION_TOKEN_SECRET" not in base_env and "VIRTUAL_ENV" not in base_env
     assert base_env["PATH"] == "/usr/bin"

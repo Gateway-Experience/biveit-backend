@@ -1,6 +1,6 @@
 # Local development
 
-How to get the whole vib3 platform running on your machine: the backend (this repo), the frontend, and
+How to get the whole biveit platform running on your machine: the backend (this repo), the frontend, and
 the agent sessions that build users' websites.
 
 > **macOS vs Linux.** Both work, real agent sessions included: the backend finds a conversation's
@@ -11,10 +11,10 @@ the agent sessions that build users' websites.
 ## What runs where
 
 ```
-browser ── vib3-frontend (Vite, :5173)
+browser ── biveit-frontend (Vite, :5173)
               │  /api
               ▼
-           vib3-backend (FastAPI, :3001) ── Postgres, Redis
+           biveit-backend (FastAPI, :3001) ── Postgres, Redis
               │  starts, in tmux, one per conversation
               ▼
            claude  ── its communication MCP (src/mcps/communication) ── calls back into :3001
@@ -45,25 +45,25 @@ the terminal you start the backend from. If you installed Node with nvm, open a 
 
 ```bash
 mkdir -p ~/workspace && cd ~/workspace
-git clone git@github.com:tna20141/vib3-backend.git
-git clone git@github.com:tna20141/vib3-frontend.git
-git clone <vib3-boilerplate repo URL> vib3-boilerplate
+git clone git@github.com:tna20141/biveit-backend.git
+git clone git@github.com:tna20141/biveit-frontend.git
+git clone <biveit-boilerplate repo URL> biveit-boilerplate
 ```
 
 The backend expects the boilerplate (the app copied into each project once the agent starts
-implementing) at `../vib3-boilerplate`. If you put it elsewhere, set `BOILERPLATE_DIR` in `.env.local`.
+implementing) at `../biveit-boilerplate`. If you put it elsewhere, set `BOILERPLATE_DIR` in `.env.local`.
 
 ## 3. Start the databases
 
 ```bash
-docker run -d --name vib3-postgres --restart unless-stopped \
-  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=vib3 \
+docker run -d --name biveit-postgres --restart unless-stopped \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=biveit \
   -p 127.0.0.1:5432:5432 postgres:16
 
-docker run -d --name vib3-redis --restart unless-stopped \
+docker run -d --name biveit-redis --restart unless-stopped \
   -p 127.0.0.1:6379:6379 redis:7 redis-server --databases 18000
 
-docker run -d --name vib3-mongo --restart unless-stopped \
+docker run -d --name biveit-mongo --restart unless-stopped \
   -p 127.0.0.1:27017:27017 mongo:7
 ```
 
@@ -79,7 +79,7 @@ skip that container and point the env file at yours.
 ## 4. Set up the backend
 
 ```bash
-cd ~/workspace/vib3-backend
+cd ~/workspace/biveit-backend
 uv sync
 cp .env.example .env.local
 cp .env.migration.example .env.migration
@@ -111,7 +111,7 @@ Check it: `curl localhost:3001/api/debug/health` should answer `{"ok": true}`.
 ## 5. Set up the frontend
 
 ```bash
-cd ~/workspace/vib3-frontend
+cd ~/workspace/biveit-frontend
 npm install
 npm run dev                    # http://localhost:5173
 ```

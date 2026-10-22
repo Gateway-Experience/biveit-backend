@@ -1,4 +1,4 @@
-# vib3-backend
+# biveit-backend
 
 FastAPI + PostgreSQL (asyncpg), async throughout. Python 3.12, managed with [uv](https://docs.astral.sh/uv/).
 

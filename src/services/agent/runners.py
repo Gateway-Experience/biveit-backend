@@ -1,4 +1,4 @@
-# Intentions: each conversation's runner (vib3-session-runner), the process holding its agent's session --
+# Intentions: each conversation's runner (biveit-session-runner), the process holding its agent's session --
 # started when needed, and talked to over its unix socket. The process side only: what to say to the agent
 # (introductions, translating stored messages into the channel's format) is sessions.py's.
 #
@@ -13,7 +13,7 @@
 # stops answering (and pm2 starts it again), and the next ensure_session starts a fresh one if it must,
 # which continues the workspace's Claude session. Two racing starts are fine too: only one runner gets the
 # socket (the runner's main.claim_socket).
-# References: vib3-session-runner's session_runner/main.py (the other end).
+# References: biveit-session-runner's session_runner/main.py (the other end).
 
 import asyncio
 import os

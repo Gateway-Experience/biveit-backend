@@ -24,21 +24,21 @@ def _options(argv, prefix):
 
 
 def test_a_container_gets_only_its_project_and_its_sockets(tmp_path):
-    argv = containers._to_run_argv(_PROJECT, "vib3-devenv:1")
+    argv = containers._to_run_argv(_PROJECT, "biveit-devenv:1")
     project_dir = f"{tmp_path}/storage/4e7a1c9b0d2f8a63/b81d6e0f3a92c475"
     assert _options(argv, "--volume=") == [f"{project_dir}:/project", f"{tmp_path}/agent2_sockets/39:/sockets"]
     assert _options(argv, "--publish=") == ["127.0.0.1:8039:8000", "127.0.0.1:16039:5173"]  # host side only
-    assert argv[-3:] == ["vib3-devenv:1", "sleep", "infinity"]
+    assert argv[-3:] == ["biveit-devenv:1", "sleep", "infinity"]
 
 
 def test_a_container_is_hardened_and_limited():
-    argv = containers._to_run_argv(_PROJECT, "vib3-devenv:1")
+    argv = containers._to_run_argv(_PROJECT, "biveit-devenv:1")
     assert {"--init", "--cap-drop=ALL", "--security-opt=no-new-privileges"} <= set(argv)
     assert f"--user={os.getuid()}:{os.getgid()}" in argv
     assert not [option for option in argv if "privileged" in option or "docker.sock" in option or "--cap-add" in option]
     assert not [option for option in argv if option.startswith(("--network=host", "--pid=", "--ipc="))]
     assert {"--memory=3g", "--memory-swap=3g", "--pids-limit=2048", "--ulimit=nofile=65536:65536"} <= set(argv)
-    assert "--network=vib3-projects" in argv and "--name=vib3-dev-project-39" in argv
+    assert "--network=biveit-projects" in argv and "--name=biveit-dev-project-39" in argv
 
 
 def test_container_paths_are_the_projects_only(tmp_path):
@@ -94,12 +94,12 @@ async def test_a_new_project_gets_the_current_image_recorded_and_a_container(doc
 
 
 async def test_a_project_keeps_the_image_it_was_created_with(docker):
-    await containers.ensure_container({**_PROJECT, "meta": {"devenv_image": "vib3-devenv:0"}})
-    assert docker["updates"] == [] and _ran(docker, "run")[0][-3] == "vib3-devenv:0"
+    await containers.ensure_container({**_PROJECT, "meta": {"devenv_image": "biveit-devenv:0"}})
+    assert docker["updates"] == [] and _ran(docker, "run")[0][-3] == "biveit-devenv:0"
 
 
 async def test_a_stopped_container_is_started_and_a_running_one_left_alone(docker):
-    docker["container"] = {"State": {"Running": False}, "Config": {"Image": "vib3-devenv:1"}}
+    docker["container"] = {"State": {"Running": False}, "Config": {"Image": "biveit-devenv:1"}}
     await containers.ensure_container(_PROJECT)
     assert _ran(docker, "start") and not _ran(docker, "run")
     docker["ran"] = []
@@ -131,12 +131,12 @@ async def test_locally_starting_a_projects_container_stops_the_others(docker, mo
 
     async def with_others_running(argv, cwd=None, input_text=None, timeout_seconds=600, env=None):
         if argv[:2] == ["docker", "ps"]:
-            return "vib3-local-project-7\nvib3-local-project-39\n"
+            return "biveit-local-project-7\nbiveit-local-project-39\n"
         return await real_run_command(argv, cwd, input_text, timeout_seconds, env)
 
     monkeypatch.setattr(containers, "run_command", with_others_running)
     await containers.ensure_container(_PROJECT)
-    assert _ran(docker, "stop") == [["docker", "stop", "vib3-local-project-7"]]  # not itself
+    assert _ran(docker, "stop") == [["docker", "stop", "biveit-local-project-7"]]  # not itself
 
 
 async def test_stopping_and_removing_are_idempotent(docker):
