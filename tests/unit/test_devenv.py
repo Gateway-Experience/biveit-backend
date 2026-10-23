@@ -136,6 +136,8 @@ def test_the_shipped_templates_render(monkeypatch):
     monkeypatch.setattr(settings, "dev_domain", "dev.example.com")
     site = templates.render_template("nginx-dev.conf.tmpl", _PROJECT, 9)
     assert "server_name p42hash.dev.example.com;" in site and "127.0.0.1:16042" in site
+    # Both the API and the site make cookies usable inside the preview's cross-site iframe.
+    assert site.count("proxy_cookie_flags ~ secure samesite=none;") == 2
 
 
 def test_a_local_platform_uses_fixed_ports_and_no_site(monkeypatch):

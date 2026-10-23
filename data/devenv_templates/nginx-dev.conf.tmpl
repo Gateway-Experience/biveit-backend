@@ -27,6 +27,10 @@ server {
         # Overwrite, never append: the backend trusts the first hop as the client IP.
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_read_timeout 120s;
+        # The site is watched inside the platform's preview, an iframe on another site, where browsers only send
+        # a cookie that's SameSite=None (and Secure). Making every cookie the app sets one keeps cookie logins
+        # working there. Safari blocks such cookies anyway; the preview's "open in a new tab" works everywhere.
+        proxy_cookie_flags ~ secure samesite=none;
     }
 
     # Vite dev server, including the hot-reload websocket.
@@ -39,5 +43,6 @@ server {
         # nginx closes idle connections after 60s by default; Vite would read that as a server restart
         # and reload the page every minute.
         proxy_read_timeout 1d;
+        proxy_cookie_flags ~ secure samesite=none;  # same as /api/'s
     }
 }
