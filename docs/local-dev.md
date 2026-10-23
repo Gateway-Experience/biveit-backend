@@ -144,14 +144,14 @@ project's workspace: the agent's files, the app (`backend/`, `frontend/`) once i
 ## Useful commands
 
 ```bash
-uv run python -m scripts.project_status            # the whole platform: config, infra, what's running
-uv run python -m scripts.project_status <id>       # one project: workspace, session, dev servers, data
-uv run python -m scripts.stop_project <id>         # turn a project's session and dev servers off
+uv run python -m scripts.manage status             # the whole platform: config, infra, what's running
+uv run python -m scripts.manage status <id>        # one project: workspace, runner, container, dev servers, data
+uv run python -m scripts.manage stop <id>          # turn a project's runners, dev servers and container off
 uv run pytest tests                                # the test suite
 uv run ruff check --fix && uv run ruff format      # lint + format
 ```
 
-Opening the project again in the browser brings back whatever `stop_project` turned off. The agent's
+Opening the project again in the browser brings back whatever `manage stop` turned off. The agent's
 session continues its previous conversation.
 
 ## Mock mode (no real agent)
@@ -168,11 +168,11 @@ It's for working on the chat UI without spending model turns.
 ## Things to know
 
 - **One project's dev servers at a time.** Locally every project uses the same two ports (10101 and
-  10102). Stop the previous project first (`scripts.stop_project <id>`), or the next one's setup fails
+  10102). Stop the previous project first (`scripts.manage stop <id>`), or the next one's setup fails
   with the ports taken.
 - **The agent's tools come from this repo.** `src/mcps/communication` is the MCP server every session
   runs. Each session's `.mcp.json` is written when the session starts, pointing at this repo's Python.
-  So after changing the MCP, restart the session (`stop_project`, then open the project) to pick it up.
+  So after changing the MCP, restart the session (`manage stop`, then open the project) to pick it up.
 - **Template changes only reach new workspaces.** `data/template/` (`CLAUDE.md`, `.claude/`) is copied
   into a workspace only where files are missing. Existing projects keep their copy.
 
@@ -181,8 +181,8 @@ It's for working on the chat UI without spending model turns.
 | Symptom | Likely cause |
 |---|---|
 | Opening a project fails with 503 | the session couldn't start. Check `tmux ls` and the `<conversation id>.session.log` next to the workspace. `claude` or `tmux` not on the backend's `PATH` is the usual cause |
-| The agent never replies | attach to its tmux session and look: a startup screen nobody answered, or an error. `scripts.project_status <id>` shows whether the channel port is listening |
-| A session sits on "New MCP server found" | the workspace lacks `.claude/settings.local.json` (`enableAllProjectMcpServers`). It comes from `data/template/` and is copied only where missing: copy it in, then restart the session (`scripts.stop_project <id>`, then open the project) |
-| The preview never comes up | `scripts.project_status <id>` shows the dev servers. Their logs are in the workspace's `logs/`. Ports 10101/10102 held by another project is common |
+| The agent never replies | attach to its tmux session and look: a startup screen nobody answered, or an error. `scripts.manage status <id>` shows whether the channel port is listening |
+| A session sits on "New MCP server found" | the workspace lacks `.claude/settings.local.json` (`enableAllProjectMcpServers`). It comes from `data/template/` and is copied only where missing: copy it in, then restart the session (`scripts.manage stop <id>`, then open the project) |
+| The preview never comes up | `scripts.manage status <id>` shows the dev servers. Their logs are in the workspace's `logs/`. Ports 10101/10102 held by another project is common |
 | Login always 401s | `JWT_SECRET` is empty |
-| `Too many sessions` | two Claude processes in one workspace (e.g. one started by hand). `scripts.stop_project <id>` clears them |
+| `Too many sessions` | two Claude processes in one workspace (e.g. one started by hand). `scripts.manage stop <id>` clears them |

@@ -97,7 +97,7 @@ async def send(project: Project, conversation_id: int, content: list[dict]) -> N
     Retries connection failures for a few seconds, since a runner that was just started takes a moment to
     listen. Raises RunnerUnavailable if it never answers, or answers with anything but success."""
     try:
-        status = await with_retries(
+        status, _ = await with_retries(
             lambda: _request_runner(project, conversation_id, "POST", "/messages", {"content": content}),
             retries=RUNNER_SEND_ATTEMPTS,
             calculate_backoff=exponential_backoff(0.2, cap=2),
@@ -126,15 +126,23 @@ async def is_session_up(project: Project, conversation_id: int) -> bool:
     return await _probe(project, conversation_id) == "up"
 
 
-async def _probe(project: Project, conversation_id: int) -> str:
-    """The runner's state on its socket: "up" (answers health), "hung" (a connection, but no answer in
-    time), "down" (nothing listening)."""
+async def get_health(project: Project, conversation_id: int) -> dict:
+    """[Pure-ish] The runner as seen on its socket: {"runner": "up" (answers health) | "hung" (a connection,
+    but no answer in time) | "down" (nothing listening)}, plus, when up, what it says the session is doing
+    (protocol.TurnState as "turn", "since" when, "last_turn"). A runner from before that was reported gives
+    just "runner"."""
     try:
-        return "up" if await _request_runner(project, conversation_id, "GET", "/health") == 200 else "hung"
+        status, health = await _request_runner(project, conversation_id, "GET", "/health")
     except TimeoutError:
-        return "hung"
+        return {"runner": "hung"}
     except OSError:
-        return "down"
+        return {"runner": "down"}
+    return {**(health or {}), "runner": "up"} if status == 200 else {"runner": "hung"}
+
+
+async def _probe(project: Project, conversation_id: int) -> str:
+    """The runner's state on its socket: "up", "hung" or "down" (see get_health)."""
+    return (await get_health(project, conversation_id))["runner"]
 
 
 async def _wait_until_up(project: Project, conversation_id: int, deadline: float) -> None:
@@ -215,8 +223,9 @@ async def _delete_runner(project_id: int, conversation_id: int) -> bool:
 
 async def _request_runner(
     project: Project, conversation_id: int, method: str, path: str, body: dict | None = None
-) -> int:
-    """One authenticated request to the conversation's runner over its unix socket; returns the status.
+) -> tuple[int, dict | None]:
+    """One authenticated request to the conversation's runner over its unix socket; returns the status, and
+    the answer's body when it's JSON (/health's is).
     Raises OSError (aiohttp's connection errors are OSErrors) when nothing listens there -- or TimeoutError
     (an OSError too) when a hung runner doesn't answer in time. A session per call: the connector is bound to
     this one socket, and these calls are rare."""
@@ -227,4 +236,4 @@ async def _request_runner(
         aiohttp.ClientSession(connector=connector, timeout=timeout) as client,
         client.request(method, f"http://runner{path}", json=body, headers=headers) as response,
     ):
-        return response.status
+        return response.status, await response.json() if response.content_type == "application/json" else None

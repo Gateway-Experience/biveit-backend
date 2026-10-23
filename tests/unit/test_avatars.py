@@ -31,6 +31,7 @@ _USER = {
     "updated_at": "2026-10-01T00:00:00Z",
     "deleted_at": None,
     "has_password": True,
+    "role": None,
 }
 
 

@@ -24,6 +24,9 @@
 -- hash: a random, unguessable public handle (16 hex chars, filled in by the DB on insert). It names the
 -- user's folder on disk (<STORAGE_DIR>/<user hash>/...), so paths and URLs don't give away or enumerate ids.
 -- Rows that existed before it was added have hash = id::text (their folders were already named by id).
+-- role: what the account may do beyond being a user (UserRole). NULL = a normal user; 'ADMIN' = the
+-- platform's operators (the admin dashboard, controllers/admin). Set by hand only -- no endpoint writes it:
+--   UPDATE users SET role = 'ADMIN' WHERE username = '<email>';
 
 CREATE TABLE IF NOT EXISTS users
 (
@@ -38,6 +41,7 @@ CREATE TABLE IF NOT EXISTS users
     last_name       varchar(100),
     profile_picture varchar(1000),
     language        varchar(16)  NOT NULL DEFAULT 'en',    -- UserLanguage: the FE's language picker
+    role            varchar(32),                           -- UserRole; NULL = a normal user
     tags            text[]       NOT NULL DEFAULT '{}',
     meta            jsonb        NOT NULL DEFAULT '{}',
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),

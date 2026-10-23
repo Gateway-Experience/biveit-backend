@@ -16,11 +16,18 @@ AgentAction = _runner_protocol.AgentAction
 ApprovalDecision = _runner_protocol.ApprovalDecision
 InteractionStatus = _runner_protocol.InteractionStatus
 DevServerAction = _runner_protocol.DevServerAction
+TurnState = _runner_protocol.TurnState
 
 
 class UserType(StrEnum):
     USER = "USER"  # a real, credentialed account
     GUEST = "GUEST"  # anonymous account minted on first visit; promoted to USER on signup
+
+
+class UserRole(StrEnum):
+    """users.role -- what an account may do beyond being a user. A normal user has none (NULL)."""
+
+    ADMIN = "ADMIN"  # the platform's operators: the admin dashboard (controllers/admin)
 
 
 class UserPlatform(StrEnum):

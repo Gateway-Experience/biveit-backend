@@ -24,6 +24,7 @@ dependencies = [
     "ruff>=0.15.17",
     "uvicorn[standard]>=0.49.0",
     "biveit-session-runner",
+    "psutil>=7.2.2",
 ]
 
 # The session runner (its own repo, a sibling checkout): the backend starts it, and takes the protocol between

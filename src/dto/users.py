@@ -25,6 +25,7 @@ class User(TypedDict):
     language: str  # UserLanguage -- the FE's language picker
     platform: str | None  # UserPlatform -- WEB | GOOGLE; None for guests
     platform_id: str | None  # WEB: the username; GOOGLE: Google's `sub` (not the email)
+    role: str | None  # UserRole -- None for a normal user; set by hand only (see 0001_users.sql)
     tags: list[str]
     meta: dict[str, Any]  # app-level data, incl. FE-sent profile keys with no column of their own
     created_at: Any  # datetime

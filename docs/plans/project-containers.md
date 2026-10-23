@@ -31,7 +31,7 @@ Commits 4 and 5 are DEPLOYED together (see commit 4).
 - **Session runner**: its own repo, `biveit-session-runner` (with the skills/MCP bundle). `docker cp`'d into each container
   at `/opt/session-runner`, root-owned (the agent can read but not change it), own venv (`uv sync --frozen`), version
   (git commit) checked and reinstalled at every container start -- always ensured.
-- **Network**: own bridge `biveit-projects`, subnet `10.213.0.0/24` (setting, default), gateway `10.213.0.1`. Containers
+- **Network**: own bridge `biveit-projects`, subnet `10.213.0.0/16` (setting, default), gateway `10.213.0.1`. Containers
   reach the host only at the gateway: Mongo and the backend's agent listener. Dev ports published on the host's
   `127.0.0.1` only (host side 8000+id / 16000+id; fixed internal ports 8000 / 5173). Server firewall: no other host
   ports, no private ranges.
@@ -90,7 +90,7 @@ The container exists but runs nothing yet.
 - `scripts/build_devenv_image.sh <tag>`: build + push to Docker Hub (private repository).
 - Constants: `DEVENV_IMAGE` (current tag), `DEVENV_NETWORK = "biveit-projects"`, `DEVENV_PROJECT_PATH = "/project"`,
   `DEVENV_SOCKETS_PATH = "/sockets"`, `DEVENV_LIMITS` (memory 3g, cpus 1.0, pids 2048, nofile 65536, tmp 256m).
-  Setting: `DEVENV_NETWORK_SUBNET` (default `10.213.0.0/24`; gateway = first address).
+  Setting: `DEVENV_NETWORK_SUBNET` (default `10.213.0.0/16`; gateway = first address).
 - `services/devenv/containers.py` (new):
   - `get_container_name(project_id)`, `get_host_socket_dir(project_id)`, `to_container_path(project, host_path)`
     (raises if the path isn't under the project folder), `get_gateway_ip()`.

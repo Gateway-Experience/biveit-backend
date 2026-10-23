@@ -1,6 +1,7 @@
-# scripts/manage.py's model key switching: what a key set may hold, and how it's written into .env.<env> --
-# the old provider's lines all gone, everything else untouched, the file's permissions kept, nothing written
-# on a dry run. Runs in a temp folder standing in for the repo root.
+# The model key switching (services/agent_api_keys, driven by scripts/manage.py's `keys use`): what a key set
+# may hold, and how it's written into .env.<env> -- the old provider's lines all gone, everything else
+# untouched, the file's permissions kept, nothing written on a dry run. Runs in a temp folder standing in for
+# the repo root.
 
 import os
 import stat
@@ -8,6 +9,7 @@ import stat
 import pytest
 
 from scripts import manage
+from src.services import agent_api_keys
 
 _ENV_TEXT = """ENV=prod
 # the model
@@ -18,7 +20,7 @@ JWT_SECRET=keep-me
 
 
 def test_switching_drops_every_old_key_line_and_keeps_the_rest():
-    text = manage.to_env_text_with_key_set(_ENV_TEXT, {"ANTHROPIC_API_KEY": "sk-ant-new"})
+    text = agent_api_keys.to_env_text_with_key_set(_ENV_TEXT, {"ANTHROPIC_API_KEY": "sk-ant-new"})
     assert text == "ENV=prod\n# the model\nJWT_SECRET=keep-me\nANTHROPIC_API_KEY=sk-ant-new\n"
 
 
@@ -33,7 +35,7 @@ def test_switching_drops_every_old_key_line_and_keeps_the_rest():
     ],
 )
 def test_what_a_key_set_may_hold(key_set, is_ok):
-    assert (manage._check_key_set(key_set) == []) == is_ok
+    assert (agent_api_keys.check_key_set(key_set) == []) == is_ok
 
 
 @pytest.fixture
@@ -55,8 +57,8 @@ def test_a_dry_run_writes_nothing(repo_root):
 def test_applying_writes_the_set_and_keeps_the_files_permissions(repo_root):
     manage._use_keys("anthropic", "prod", is_applying=True)
     env_path = repo_root / ".env.prod"
-    assert manage._read_env_file(env_path)["ANTHROPIC_API_KEY"] == "sk-ant-new"
-    assert "ANTHROPIC_BASE_URL" not in manage._read_env_file(env_path)
+    assert agent_api_keys.read_env_file(env_path)["ANTHROPIC_API_KEY"] == "sk-ant-new"
+    assert "ANTHROPIC_BASE_URL" not in agent_api_keys.read_env_file(env_path)
     assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
     assert sorted(path.name for path in repo_root.iterdir()) == [".agent_api_keys", ".env.prod"]  # no temp left
 

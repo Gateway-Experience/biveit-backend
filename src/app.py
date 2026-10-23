@@ -18,6 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from src import debug_scratch
 from src.config import settings
 from src.constants import AGENT_LISTENER_PORT, DEVENV_IDLE_SWEEP_SECONDS, SERVER_GRACEFUL_SHUTDOWN_SECONDS
+from src.controllers.admin import router as admin_router
 from src.controllers.agent import router as agent_router
 from src.controllers.auth import router as auth_router
 from src.controllers.conversations import router as conversations_router
@@ -163,6 +164,7 @@ def create_app() -> FastAPI:
     app.include_router(conversations_router, prefix=_API_PREFIX)
     app.include_router(system_configurations_router, prefix=_API_PREFIX)
     app.include_router(system_router, prefix=_API_PREFIX)
+    app.include_router(admin_router, prefix=_API_PREFIX)
     return app
 
 

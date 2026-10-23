@@ -23,7 +23,7 @@ from src.utils import postgres
 # there IS one comes out (has_password), so the profile page knows to ask for the current password.
 _COLUMNS = """
     id, hash, user_type, username, platform, platform_id, first_name, last_name, profile_picture, language,
-    tags, meta, created_at, updated_at, deleted_at, (password_hash IS NOT NULL) AS has_password
+    role, tags, meta, created_at, updated_at, deleted_at, (password_hash IS NOT NULL) AS has_password
 """
 
 # What a caller may write. Anything outside this set is dropped.

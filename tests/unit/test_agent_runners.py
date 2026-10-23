@@ -11,6 +11,7 @@ from session_runner import main as runner
 from session_runner.testing import FakeClaudeClient
 
 from src.config import settings
+from src.constants import TurnState
 from src.services.agent import runner_installs, runners
 from src.utils.processes import CommandFailed
 
@@ -89,6 +90,17 @@ async def test_messages_reach_the_session_as_user_turns(served_runners):
     await runners.ensure_session(_PROJECT, 5)
     await runners.send(_PROJECT, 5, [_text("make it blue")])
     assert FakeClaudeClient.instances[0].turns == ["make it blue"]
+    await runners.stop_session(_PROJECT, 5)
+    await asyncio.wait_for(served_runners[0], 5)
+
+
+async def test_health_says_what_the_session_is_doing(served_runners):
+    assert await runners.get_health(_PROJECT, 5) == {"runner": "down"}
+    await runners.ensure_session(_PROJECT, 5)
+    assert (await runners.get_health(_PROJECT, 5))["turn"] == TurnState.IDLE
+    await runners.send(_PROJECT, 5, [_text("make it blue")])  # sent in, no result yet: mid-turn
+    health = await runners.get_health(_PROJECT, 5)
+    assert health["runner"] == "up" and health["turn"] == TurnState.WORKING and health["last_turn"] is None
     await runners.stop_session(_PROJECT, 5)
     await asyncio.wait_for(served_runners[0], 5)
 

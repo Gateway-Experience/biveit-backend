@@ -28,7 +28,7 @@ from fastapi.security import APIKeyCookie, HTTPAuthorizationCredentials, HTTPBea
 from jwt.warnings import InsecureKeyLengthWarning
 
 from src.config import settings
-from src.constants import ACCESS_TOKEN_COOKIE
+from src.constants import ACCESS_TOKEN_COOKIE, UserRole
 from src.dto.users import User
 from src.repositories import users
 from src.utils.common import utc_now
@@ -136,6 +136,15 @@ def set_access_cookie(response: Response, token: str) -> None:
 def clear_access_cookie(response: Response) -> None:
     # Must mirror set_access_cookie's attributes, or the browser treats it as a different cookie.
     response.delete_cookie(ACCESS_TOKEN_COOKIE, httponly=True, secure=settings.env != "local", samesite="lax")
+
+
+async def require_admin(user: User = Depends(get_current_user)) -> User:
+    """Route dependency: the logged-in caller's record if they're an admin (users.role ADMIN) -- 401 when
+    nobody's logged in, 403 for everyone else. Unlike require_superuser, this is a PERSON, logged in the
+    normal way: what the admin dashboard uses."""
+    if user.get("role") != UserRole.ADMIN:
+        raise _FORBIDDEN
+    return user
 
 
 def require_superuser(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
