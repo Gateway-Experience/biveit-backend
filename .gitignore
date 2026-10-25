@@ -29,6 +29,7 @@ wheels/
 
 # File storage (STORAGE_DIR) -- user project files, never committed
 data/storage_root/
+data/site_previews/
 data/agent2_sockets/
 
 # The agent template's Claude settings ARE committed: a fresh clone needs them (enableAllProjectMcpServers,

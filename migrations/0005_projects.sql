@@ -3,6 +3,10 @@
 -- Ownership points at users.id, which survives guest promotion (same row), so a guest's projects stay
 -- theirs after they sign up -- no rows need moving.
 -- Soft-deleted via deleted_at: NULL = live. Every read filters on it; nothing is ever hard-deleted.
+-- trashed_at: when the user moved it to Trash; NULL = not in Trash. A trashed project drops out of the
+-- project list (and can't be opened) but can be restored as it was -- name, pin and folder all kept.
+-- Deleting for good (deleted_at) only happens from Trash. Added after the table first shipped: an
+-- existing DB needs `ALTER TABLE projects ADD COLUMN IF NOT EXISTS trashed_at TIMESTAMPTZ;` by hand.
 -- (users are soft-deleted too, so the user_id FK never needs an ON DELETE rule -- it just guarantees
 -- the owner exists.)
 -- hash: a random, unguessable public handle (16 hex chars, filled in by the DB on insert). It names the
@@ -45,6 +49,7 @@ CREATE TABLE IF NOT EXISTS projects
     meta        jsonb        NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    trashed_at  TIMESTAMPTZ,                                   -- NULL = not in Trash
     deleted_at  TIMESTAMPTZ                                    -- NULL = live
 );
 

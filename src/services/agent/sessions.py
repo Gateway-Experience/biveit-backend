@@ -40,8 +40,19 @@ class SessionUnavailable(Exception):
 
 
 async def ensure_session(project: Project, conversation_id: int) -> None:
-    """Make sure the conversation's session is up. Idempotent -- safe on every visit and before every send.
-    Raises SessionUnavailable if it can't be brought up."""
+    """Make sure the conversation's session is up. Idempotent -- safe on every visit. Raises
+    SessionUnavailable if it can't be brought up.
+
+    A session that wasn't up had died (or was stopped) with whatever turn it was on, so an open turn is
+    closed (AGENT_IDLE): nothing will finish it now. Not on the way to a send (send uses _ensure_runner):
+    there the user's new message is already in the log, and the fresh session is about to take it up."""
+    was_up = await runners.is_session_up(project, conversation_id)
+    await _ensure_runner(project, conversation_id)
+    if not was_up:
+        await signals.end_open_turn(conversation_id, "The session had stopped")
+
+
+async def _ensure_runner(project: Project, conversation_id: int) -> None:
     try:
         await runners.ensure_session(project, conversation_id)
     except runners.RunnerUnavailable as error:
@@ -51,7 +62,7 @@ async def ensure_session(project: Project, conversation_id: int) -> None:
 async def send(project: Project, conversation_id: int, content: list[dict]) -> None:
     """Push a message (channel items) into the conversation's session, bringing it up first if it isn't.
     Raises SessionUnavailable if it can't be reached, or refuses the message."""
-    await ensure_session(project, conversation_id)
+    await _ensure_runner(project, conversation_id)
     try:
         await runners.send(project, conversation_id, content)
     except runners.RunnerUnavailable as error:
@@ -59,10 +70,12 @@ async def send(project: Project, conversation_id: int, content: list[dict]) -> N
 
 
 async def stop_session(project: Project, conversation_id: int) -> dict:
-    """Turn the conversation's session off and end any open build with a BUILDING_DONE (nobody's building
-    anything now). Idempotent. Returns what was stopped: {runner: whether one was running}."""
+    """Turn the conversation's session off, and end any open build with a BUILDING_DONE and any open turn
+    with an AGENT_IDLE (nobody's building or answering anything now). Idempotent. Returns what was
+    stopped: {runner: whether one was running}."""
     runner_stopped = await runners.stop_session(project, conversation_id)
     await signals.end_open_build(conversation_id, "The session was stopped")
+    await signals.end_open_turn(conversation_id, "The session was stopped")
     return {"runner": runner_stopped}
 
 
@@ -119,15 +132,20 @@ async def introduce_project(project: Project, conversation_id: int) -> None:
             "Their answers:",
             json.dumps(project.get("bootstrap_data") or {}, indent=2, ensure_ascii=False),
             f"Their language: {USER_LANGUAGE_NAMES.get(language, language)} ({language}). Talk to them in it.",
-            "Read CLAUDE.md, start the spec-ing stage now, and open the chat with a message along these lines:\n",
+            (
+                "Read CLAUDE.md, start the spec-ing stage now, and open the chat with a message along these lines, "
+                "split into bubbles where the <new_bubble/> tags are:\n"
+            ),
             "Welcome to your new project *<project name>*. I am your assistant and my role is ",
             "to help you build the website the way you envisioned. This will be an easy and fun ",
             "journey, just take it easy and follow along with me, I promise you will be happy with the end result.",
+            "<new_bubble/>",
             "First, before building the website, we'll go through the process of collecting requirements first, ",
             "so I know exactly what kind of website you want to create. This might feel like an interview at times, ",
             "but please bear with me as the more I understand about your website, down to the specific details, ",
             "the more it will turn out the way you want it to be.\n",
             "Let's get started!",
+            "<new_bubble/>",
             "<then ask them the first open-ended question to get the whole process rolling>.",
         ]
     )

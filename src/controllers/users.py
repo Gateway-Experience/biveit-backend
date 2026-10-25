@@ -22,7 +22,7 @@
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 
-from src.constants import AVATAR_MAX_BYTES
+from src.constants import AVATAR_MAX_BYTES, UserTour
 from src.dto.users import (
     AuthenticateRequest,
     ChangePasswordRequest,
@@ -72,6 +72,19 @@ async def change_password(
         await user_service.change_password(user["id"], body.current_password, body.new_password)
     except user_service.WrongPassword as error:
         raise HTTPException(status_code=400, detail="WRONG_PASSWORD") from error
+    except user_service.UserNotFound as error:
+        raise HTTPException(status_code=404, detail="USER_NOT_FOUND") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.post("/me/tours/{tour}/finish")
+async def finish_tour(tour: UserTour, request: Request, user: User = Depends(get_current_user)) -> User:
+    """The caller finished (or skipped) one of the FE's guided tours, so don't show it again. Returns the
+    user, bare like GET /me. An unknown tour is a 422."""
+    try:
+        return await user_service.finish_tour(user["id"], tour)
     except user_service.UserNotFound as error:
         raise HTTPException(status_code=404, detail="USER_NOT_FOUND") from error
     except Exception as error:

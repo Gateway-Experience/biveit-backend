@@ -1,7 +1,8 @@
 # Intentions: project business logic that spans more than the projects row -- getting a project ready
 # when the user opens it (open_project: its current conversation's workspace, agent session -- started
 # off with the starting form's answers the first time -- and, once implementing, dev environment, as
-# its stage says), turning it all off again (close_project), deleting it (delete_project), and the
+# its stage says), turning it all off again (close_project), moving it to Trash (trash_project) and
+# deleting it from there for good (delete_project), and the
 # user's edits from the project list and sidebar (update_project: rename, pin, file into a folder), and
 # finding projects by what the user wrote while prompting (search_prompts).
 # The workspace is per CONVERSATION (see services/devenv). Plain CRUD skips this layer and goes straight to
@@ -19,6 +20,7 @@ from src.repositories import project_folders as project_folders_repo
 from src.repositories import projects as projects_repo
 from src.services import activity, devenv
 from src.services import agent as agent_service
+from src.services.devenv import previews as site_previews
 from src.utils.common import spawn, utc_now
 from src.utils.logging import log_error
 
@@ -88,7 +90,8 @@ async def open_project(project: Project) -> None:
     agent has them, so the FE can show the chat right after. It's a warm-up, not a guarantee: a session
     can still die mid-visit, so sending a message to the agent must ensure the session again on its own.
 
-    Once implementing, the dev environment is ensured too -- in the background, since even a quick
+    Once implementing, the dev environment is ensured too (and the project list's picture of the site
+    taken, if it has none) -- in the background, since even a quick
     check of it takes seconds. That also finishes a setup that never completed and brings back dev
     servers a reboot (or a crash) took down. Its failures are only logged: the agent finds out on its
     own when it next uses them."""
@@ -100,7 +103,16 @@ async def open_project(project: Project) -> None:
         await agent_service.ensure_session(project, conversation["id"])
         await agent_service.ensure_introduced(project, conversation["id"])
     if project["stage"] == ProjectStage.IMPLEMENTING:
-        spawn(agent_service.restore_devenv(project, conversation["id"]))
+        spawn(_restore_devenv(project, conversation["id"]))
+
+
+async def _restore_devenv(project: Project, conversation_id: int) -> None:
+    """open_project's background half: bring the dev environment back, then -- for a project that has no
+    picture of its site yet (from before pictures were taken, or whose capture failed) -- take one, now
+    that the site's up."""
+    await agent_service.restore_devenv(project, conversation_id)
+    if site_previews.get_taken_at(project) is None:
+        await site_previews.capture(project)
 
 
 async def close_project(project: Project) -> dict:
@@ -146,11 +158,24 @@ async def stop_idle_projects() -> list[int]:
     return [*orphans, *pydash.map_(idle, "id")]
 
 
+async def trash_project(project: Project) -> Project | None:
+    """Move a project to Trash for its owner: turn off whatever runs for it (close_project), then stamp
+    trashed_at, so it drops out of the list and can't be opened until it's restored (repo find() skips
+    it). Its container stays, so a restore picks up right where it left off. Stopping is best effort,
+    same as delete_project's. Returns the trashed project (None if it vanished meanwhile)."""
+    try:
+        await close_project(project)
+    except Exception as error:
+        log_error(error, "trash_project: couldn't stop everything", {"project_id": project["id"]})
+    return await projects_repo.update(project["id"], {"trashed_at": utc_now()})
+
+
 async def delete_project(project: Project) -> None:
-    """Delete a project for its owner: turn off whatever runs for it (close_project) and remove its
-    container, then soft-delete the row, so it drops out of every read (the repo skips deleted_at rows).
-    Nothing on disk is removed, so a project deleted by mistake can still be brought back by hand (clear
-    deleted_at) -- its container just gets created afresh on the next open.
+    """Delete a project for its owner, for good (the FE only offers it from Trash): turn off whatever
+    runs for it (close_project) and remove its container, then soft-delete the row, so it drops out of
+    every read (the repo skips deleted_at rows). Nothing on disk is removed, so a project deleted by
+    mistake can still be brought back by hand (clear deleted_at) -- its container just gets created
+    afresh on the next open.
 
     Stopping is best effort: a session or dev server that won't stop must not keep the user from deleting
     the project, so its failure is only logged (whatever's left running finds no live project behind it)."""

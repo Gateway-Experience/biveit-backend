@@ -21,12 +21,14 @@ from src.constants import (
     AI_CONVERSATION_LOCK_TTL_SECONDS,
     AI_CONVERSATION_LOCK_WAIT_SECONDS,
     DEVENV_WAKEUP,
+    RUNNER_SIGNALS,
     SHOW_ARTIFACT_TOOL_NAME,
     SIGNAL_TAIL_SIZE,
     UPLOAD_MAX_BYTES,
     UPLOAD_MAX_FILES,
     AiMessageRole,
     AiSignal,
+    ProjectStage,
 )
 from src.dto.ai_conversations import AiConversation, AiMessage
 from src.dto.projects import Project
@@ -43,6 +45,7 @@ from src.services.agent.interactions import (
     validate_interaction_results,
     validate_session_content,
 )
+from src.services.devenv import previews as site_previews
 from src.utils import redis
 from src.utils.common import spawn
 
@@ -187,19 +190,34 @@ async def receive_session_message(conversation_id: int, content: list[dict[str, 
     conversation is gone (deleted while its session ran on), InvalidSessionMessage for content the agent
     may not send (interactions.validate_session_content)."""
     conversation = await get_live_conversation(conversation_id)
-    validate_session_content(content, (await get_conversation_project(conversation))["stage"])
-    return await _append(conversation["id"], AiMessageRole.ASSISTANT, sessions.to_stored_content(content), {})
+    project = await get_conversation_project(conversation)
+    validate_session_content(content, project["stage"])
+    message = await _append(conversation["id"], AiMessageRole.ASSISTANT, sessions.to_stored_content(content), {})
+    _refresh_site_preview(project)
+    return message
 
 
 async def receive_session_signal(
     conversation_id: int, slug: AiSignal, description: str | None, meta: dict[str, Any] | None
 ) -> AiMessage:
-    """Record a signal the conversation's session sent (its send_signal tool) and return it. Raises
-    ConversationNotFound, or SignalNotAllowed for one of the signals only we write."""
+    """Record a signal the conversation's session sent (the agent's send_signal tool, or the runner's own
+    AGENT_IDLE at the end of a turn) and return it. Raises ConversationNotFound, or SignalNotAllowed for one
+    of the signals only we write."""
     conversation = await get_live_conversation(conversation_id)
-    if slug not in AGENT_SIGNALS:
-        raise SignalNotAllowed(f"{slug} isn't the agent's to send", {"slug": slug, "allowed": AGENT_SIGNALS})
-    return await signals.append_signal(conversation["id"], slug, description, meta)
+    allowed = [*AGENT_SIGNALS, *RUNNER_SIGNALS]
+    if slug not in allowed:
+        raise SignalNotAllowed(f"{slug} isn't the session's to send", {"slug": slug, "allowed": allowed})
+    message = await signals.append_signal(conversation["id"], slug, description, meta)
+    _refresh_site_preview(await get_conversation_project(conversation))
+    return message
+
+
+def _refresh_site_preview(project: Project) -> None:
+    """The agent just said something while implementing, so its site may have changed: have the project
+    list's picture of it retaken once it goes quiet (services/devenv/previews). While specing there's no
+    site yet."""
+    if project["stage"] == ProjectStage.IMPLEMENTING:
+        spawn(site_previews.capture_later(project))
 
 
 async def upload_files(conversation: AiConversation, files: list[dict]) -> list[dict]:
@@ -331,7 +349,13 @@ async def _send_to_agent(conversation: AiConversation, user_message: AiMessage) 
     Raises sessions.SessionUnavailable if the session can't be reached. The message stays stored either
     way -- it just didn't get through."""
     project = await get_conversation_project(conversation)
-    await sessions.send(project, conversation["id"], sessions.to_session_content(user_message))
+    try:
+        await sessions.send(project, conversation["id"], sessions.to_session_content(user_message))
+    except sessions.SessionUnavailable:
+        # The agent never got it, so it isn't working on it: the user's screen mustn't wait on a reply
+        # (and lock the input) after a reload. A successful resend hands it over again.
+        await signals.append_signal(conversation["id"], AiSignal.AGENT_IDLE, "Couldn't reach the agent")
+        raise
 
 
 async def _get_mock_reply(conversation: AiConversation, user_message: AiMessage) -> list[dict] | None:

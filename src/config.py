@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     # (missing files only, never overwriting). Relative paths resolve against the process's cwd.
     storage_dir: str = "data/storage_root"
     template_dir: str = "data/template"
+    # The dev sites' screenshots for the project list (services/devenv/previews): ours alone, so NOT under
+    # storage_dir's project folders (those are mounted into the agents' containers).
+    site_previews_dir: str = "data/site_previews"
 
     # Signs the token each agent session calls back into us with (services/agent/tokens). Empty -> no
     # session can be started, and no session call is accepted (fail closed). Long and random per env.

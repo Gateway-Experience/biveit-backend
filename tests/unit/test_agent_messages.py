@@ -217,6 +217,12 @@ def test_the_agent_sends_building_signals(client, db):
     assert db["messages"][1]["content"] == [{"type": "signal", "slug": "BUILDING_DONE"}]
 
 
+def test_the_runner_says_when_the_agent_goes_idle(client, db):
+    response = client.post("/api/agent/signals", json={"slug": "AGENT_IDLE"}, headers=_session())
+    assert response.status_code == 201
+    assert db["messages"][0]["content"] == [{"type": "signal", "slug": "AGENT_IDLE"}]
+
+
 def test_the_agent_cant_send_our_signals(client, db):
     response = client.post("/api/agent/signals", json={"slug": "IMPLEMENTATION_DONE"}, headers=_session())
     assert response.status_code == 403 and response.json()["detail"] == "SIGNAL_NOT_ALLOWED"
@@ -238,6 +244,41 @@ async def test_stopping_the_session_ends_an_open_build(db, monkeypatch):
     assert db["messages"][-1]["content"][0]["slug"] == "BUILDING_DONE"
     await sessions.stop_session({"id": 3}, 5)
     assert len(db["messages"]) == 2  # nothing open the second time, so nothing more written
+
+
+async def test_stopping_or_finding_the_session_dead_ends_an_open_turn(db, monkeypatch):
+    async def fake_runner_stop(project, conversation_id):
+        return True
+
+    async def fake_runner_ensure(project, conversation_id):
+        pass
+
+    runner_state = {"up": False}
+
+    async def fake_is_up(project, conversation_id):
+        return runner_state["up"]
+
+    monkeypatch.setattr(sessions.runners, "stop_session", fake_runner_stop)
+    monkeypatch.setattr(sessions.runners, "ensure_session", fake_runner_ensure)
+    monkeypatch.setattr(sessions.runners, "is_session_up", fake_is_up)
+    user_message = {"conversation_id": 5, "role": "user", "content": [{"type": "text", "text": "hi"}], "meta": {}}
+
+    await sessions.ai_messages_repo.insert(user_message)
+    await sessions.stop_session({"id": 3}, 5)
+    assert _slugs(db) == [None, "AGENT_IDLE"]
+    await sessions.stop_session({"id": 3}, 5)
+    assert _slugs(db) == [None, "AGENT_IDLE"]  # closed already
+
+    # Found dead on an open: the turn it was on is over.
+    await sessions.ai_messages_repo.insert(user_message)
+    await sessions.ensure_session({"id": 3}, 5)
+    assert _slugs(db)[-1] == "AGENT_IDLE"
+
+    # Found up: whatever it's on is still going.
+    runner_state["up"] = True
+    await sessions.ai_messages_repo.insert(user_message)
+    await sessions.ensure_session({"id": 3}, 5)
+    assert _slugs(db)[-1] is None
 
 
 # --- the implementing milestones (the user's approvals) ---

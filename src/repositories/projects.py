@@ -1,5 +1,7 @@
 # Intentions: data access for the `projects` table -- the sites/apps a user builds, each owned by one
-# user. Schema: migrations/0005_projects.sql. Every read skips soft-deleted rows (deleted_at IS NULL).
+# user. Schema: migrations/0005_projects.sql. Every read skips soft-deleted rows (deleted_at IS NULL), and
+# find() also skips the ones in Trash (trashed_at): to the rest of the app a trashed project isn't there.
+# Trash has its own read (find_trashed).
 #
 # Writes take only real columns (_WRITABLE_COLUMNS); anything else is dropped. Deciding what a CLIENT
 # may set (e.g. never user_id) is the caller's job -- this layer trusts its caller. `hash` isn't
@@ -17,7 +19,7 @@ from src.utils import postgres
 
 _COLUMNS = """
     id, hash, user_id, name, description, stage, bootstrap_data, implementation_done_at, pinned_at,
-    folder_id, meta, created_at, updated_at, deleted_at
+    folder_id, meta, created_at, updated_at, trashed_at, deleted_at
 """
 
 # `updated_at` IS writable, and never set implicitly: it means "the user last edited this project" (the
@@ -34,6 +36,7 @@ _WRITABLE_COLUMNS = [
     "folder_id",
     "meta",
     "updated_at",
+    "trashed_at",
     "deleted_at",
 ]
 
@@ -49,15 +52,36 @@ def _with_user_hash(statement: str, order_by: str = "") -> str:
     """
 
 
-async def find(criteria: dict[str, Any]) -> list[Project]:
-    """Live projects matching `criteria` (column = value, ANDed), most recently edited first. A user's
-    list ({"user_id": ..}) rides idx_projects_user_updated. No pagination yet -- a user's own project list is small."""
+async def _find(criteria: dict[str, Any], is_in_trash: bool, order_by: str) -> list[Project]:
+    """Projects matching `criteria` (column = value, ANDed) that aren't deleted, either in Trash or not."""
     where = pydash.pick(criteria, "id", *_WRITABLE_COLUMNS)
+    trash_condition = "trashed_at IS NOT NULL" if is_in_trash else "trashed_at IS NULL"
     sql = _with_user_hash(
-        f"SELECT {_COLUMNS} FROM projects WHERE {postgres.to_where_clause(where)} AND deleted_at IS NULL",
-        "ORDER BY project_rows.updated_at DESC, project_rows.id DESC",
+        f"""SELECT {_COLUMNS} FROM projects
+            WHERE {postgres.to_where_clause(where)} AND deleted_at IS NULL AND {trash_condition}""",
+        order_by,
     )
     return cast("list[Project]", await postgres.fetch(sql, where))
+
+
+async def find(criteria: dict[str, Any]) -> list[Project]:
+    """Live projects (not in Trash) matching `criteria`, most recently edited first. A user's list
+    ({"user_id": ..}) rides idx_projects_user_updated. No pagination yet -- a user's own project list is small."""
+    return await _find(criteria, False, "ORDER BY project_rows.updated_at DESC, project_rows.id DESC")
+
+
+async def find_trashed(criteria: dict[str, Any]) -> list[Project]:
+    """The projects in Trash matching `criteria`, most recently trashed first."""
+    return await _find(criteria, True, "ORDER BY project_rows.trashed_at DESC, project_rows.id DESC")
+
+
+async def has_ever_created(user_id: int) -> bool:
+    """Whether the user has ever made a project, counting the ones in Trash and the ones deleted for good
+    (deletes are soft, so their rows are still here)."""
+    row = await postgres.fetchrow(
+        "SELECT EXISTS (SELECT 1 FROM projects WHERE user_id = $user_id) AS has_created", {"user_id": user_id}
+    )
+    return bool(row and row["has_created"])
 
 
 async def insert(data: dict[str, Any]) -> Project:
@@ -69,7 +93,7 @@ async def insert(data: dict[str, Any]) -> Project:
 
 
 async def update(project_id: int, updates: dict[str, Any], expected: dict[str, Any] | None = None) -> Project | None:
-    """Apply `updates` to a live project and return the NEW row, or None if there's no such project. Only
+    """Apply `updates` to a live project (in Trash or not) and return the NEW row, or None if there's no such project. Only
     the given columns change; `meta` is MERGED rather than replaced. updated_at changes only if it's
     in `updates` (see _WRITABLE_COLUMNS).
 

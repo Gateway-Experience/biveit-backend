@@ -2,7 +2,7 @@
 #  - The Project INTERFACE (TypedDict) over the projects-row dict the repo returns.
 #  - The request CONTRACTS (Pydantic) validating untrusted HTTP bodies.
 
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, NotRequired, TypedDict
 
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 
@@ -27,7 +27,11 @@ class Project(TypedDict):
     meta: dict[str, Any]
     created_at: Any  # datetime
     updated_at: Any  # datetime -- "last edited"; the list is sorted by it
+    trashed_at: Any  # datetime | None -- when the user moved it to Trash; None = not in Trash
     deleted_at: Any  # datetime | None -- always None on anything a read returns (reads skip deleted rows)
+    # When the project list's picture of its dev site was taken (services/devenv/previews), None = there's
+    # none. Not a column: the API adds it where the FE shows the picture (controllers/projects).
+    site_preview_at: NotRequired[Any]  # datetime | None
 
 
 class CreateProjectRequest(BaseModel):

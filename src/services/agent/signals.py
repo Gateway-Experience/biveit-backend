@@ -42,6 +42,22 @@ def is_build_open(messages: list[AiMessage]) -> bool:
     return pydash.last(build_slugs) == AiSignal.BUILDING
 
 
+def is_turn_open(messages: list[AiMessage]) -> bool:
+    """[Pure] Whether the agent still owes an AGENT_IDLE in `messages` (in seq order): the user said
+    something after the latest one (or there's none yet). A question waiting on the user counts as open
+    too -- the runner holds its turn while it waits."""
+    last_user_seq = pydash.last([message["seq"] for message in messages if message["role"] == AiMessageRole.USER])
+    idle_seqs = [
+        message["seq"]
+        for message in messages
+        if any(
+            block.get("type") == SIGNAL_BLOCK_TYPE and block.get("slug") == AiSignal.AGENT_IDLE
+            for block in message["content"]
+        )
+    ]
+    return last_user_seq is not None and last_user_seq > (pydash.last(idle_seqs) or 0)
+
+
 async def append_signal(
     conversation_id: int, slug: AiSignal, description: str | None = None, meta: dict[str, Any] | None = None
 ) -> AiMessage:
@@ -56,6 +72,15 @@ async def append_signal(
     )
     await wakeups.publish_wakeup(conversation_id, str(message["seq"]))
     return message
+
+
+async def end_open_turn(conversation_id: int, description: str) -> None:
+    """Write an AGENT_IDLE if the agent's turn is still open -- for whatever ends one without the runner
+    saying so (the session stopping, or dying), so the user's screen stops showing the agent as working.
+    Reads only the log's tail (SIGNAL_TAIL_SIZE)."""
+    tail = await ai_messages_repo.find_before(conversation_id, None, SIGNAL_TAIL_SIZE)
+    if is_turn_open(tail):
+        await append_signal(conversation_id, AiSignal.AGENT_IDLE, description)
 
 
 async def end_open_build(conversation_id: int, description: str) -> None:

@@ -708,10 +708,19 @@ def test_an_unreachable_session_is_503_but_the_message_is_kept(client, db, real_
     async def unreachable(project, conversation_id, content):
         raise sessions.SessionUnavailable("nobody home")
 
+    async def reachable(project, conversation_id, content):
+        pass
+
     monkeypatch.setattr(sessions, "send", unreachable)
-    response = _say(client, _open_conversation(client), "hello?")
+    conversation_id = _open_conversation(client)
+    response = _say(client, conversation_id, "hello?")
     assert response.status_code == 503 and response.json()["detail"] == "AGENT_UNAVAILABLE"
-    assert [m["content"][0]["text"] for m in db["messages"]] == ["hello?"]
+    # Kept, and marked as not being worked on (the agent never got it), so no screen waits on a reply.
+    assert [m["content"][0].get("text") or m["content"][0]["slug"] for m in db["messages"]] == ["hello?", "AGENT_IDLE"]
+    # The resend still finds it: the signal isn't something said.
+    monkeypatch.setattr(sessions, "send", reachable)
+    resent = client.post(f"/api/conversations/{conversation_id}/resend")
+    assert resent.status_code == 200 and resent.json()["content"] == [{"type": "text", "text": "hello?"}]
 
 
 # --- answering several questions of one message ---

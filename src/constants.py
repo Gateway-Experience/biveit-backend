@@ -12,6 +12,7 @@ SESSION_TOKEN_ENV = _runner_protocol.TOKEN_ENV
 RUNNER_SOCKET_ENV = _runner_protocol.SOCKET_ENV
 AiSignal = _runner_protocol.AiSignal
 AGENT_SIGNALS = _runner_protocol.AGENT_SIGNALS
+RUNNER_SIGNALS = _runner_protocol.RUNNER_SIGNALS
 AgentAction = _runner_protocol.AgentAction
 ApprovalDecision = _runner_protocol.ApprovalDecision
 InteractionStatus = _runner_protocol.InteractionStatus
@@ -43,6 +44,13 @@ class UserLanguage(StrEnum):
 
     EN = "en"
     VI = "vi"
+
+
+class UserTour(StrEnum):
+    """The FE's guided tours (spotlights walking a user through a page). Each is shown once per account:
+    finishing or skipping it is recorded in the user's meta (services/users.finish_tour)."""
+
+    PROJECTS = "projects"
 
 
 # How the agent is told about a language (services/agent/sessions.introduce_project).
@@ -198,6 +206,9 @@ DEVENV_NGINX_TEMPLATE = "nginx-dev.conf.tmpl"
 # What the dev backend answers once it's up; checked after the servers start.
 DEVENV_BACKEND_HEALTH_PATH = "/api/debug/health"
 DEVENV_HEALTH_WAIT_SECONDS = 90
+# How long the agent has to go quiet (no message, no signal) while implementing before its site is
+# photographed for the project list (services/devenv/previews): its changes need a moment to show.
+SITE_PREVIEW_DELAY_SECONDS = 20
 # Per-conversation mutex around setting up. Generous: a first setup runs uv sync and npm install. A
 # second caller waits it out and then re-runs the (by then quick) setup, so it gets a real answer too.
 DEVENV_LOCK_TTL_SECONDS = 900

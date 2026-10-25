@@ -10,13 +10,14 @@
 
 import asyncio
 import hmac
+from datetime import UTC, datetime
 from typing import Any
 
 import bcrypt
 import pydash
 
 from src.config import settings
-from src.constants import UserPlatform, UserType
+from src.constants import UserPlatform, UserTour, UserType
 from src.dto.users import User
 from src.repositories import users as users_repo
 from src.repositories.users import DuplicateUser
@@ -185,6 +186,23 @@ async def update(user_id: int, updates: dict[str, Any]) -> User:
     """Apply a self-service profile edit. The caller (controller) has already narrowed `updates` to the
     fields a user may change about themselves -- see dto.users.UpdateMeRequest."""
     user = await users_repo.update(user_id, updates)
+    if user is None:
+        raise UserNotFound("no such user", {"user_id": user_id})
+    return user
+
+
+def get_tour_finished_key(tour: UserTour) -> str:
+    """[Pure] The meta key that says when the user finished (or skipped) a tour, e.g.
+    projects_tour_finished_at. The FE reads it off the user to know whether to show the tour."""
+    return f"{tour}_tour_finished_at"
+
+
+async def finish_tour(user_id: int, tour: UserTour) -> User:
+    """Record that the user is done with one of the FE's guided tours, so it isn't shown to them again on
+    any device. It's a timestamp in meta (merged in, the rest of meta stays): when they finished it.
+    Finishing again just moves the time."""
+    finished_at = datetime.now(UTC).isoformat()
+    user = await users_repo.update(user_id, {"meta": {get_tour_finished_key(tour): finished_at}})
     if user is None:
         raise UserNotFound("no such user", {"user_id": user_id})
     return user

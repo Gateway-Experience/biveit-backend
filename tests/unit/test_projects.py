@@ -32,6 +32,7 @@ def _project(**overrides):
         "meta": {},
         "created_at": "2026-10-01T00:00:00Z",
         "updated_at": "2026-10-02T00:00:00Z",
+        "trashed_at": None,
         "deleted_at": None,
         **overrides,
     }
@@ -118,6 +119,21 @@ def owned_project(monkeypatch):
 
     monkeypatch.setattr(projects_repo, "find", fake_find)
     monkeypatch.setattr(agent_service, "get_current_conversation", fake_current_conversation)
+
+
+@pytest.fixture
+def trashed_project(monkeypatch):
+    """The caller's project 1 sits in their Trash: find() doesn't see it, find_trashed() does."""
+
+    async def fake_find(criteria):
+        return []
+
+    async def fake_find_trashed(criteria):
+        trashed = _project(trashed_at="2026-10-03T00:00:00Z")
+        return [trashed] if criteria == {"id": 1, "user_id": _CALLER["id"]} else []
+
+    monkeypatch.setattr(projects_repo, "find", fake_find)
+    monkeypatch.setattr(projects_repo, "find_trashed", fake_find_trashed)
 
 
 def test_open_while_mocking_seeds_the_workspace_without_starting_a_session(
@@ -236,12 +252,68 @@ def test_filing_into_a_folder_checks_the_folder_is_the_owners(client, owned_proj
     assert updates_seen == [{"folder_id": 5}, {"folder_id": None}]
 
 
-def test_rename_or_delete_someone_elses_project_is_404(client, owned_project):
+def test_rename_or_trash_someone_elses_project_is_404(client, owned_project):
     assert client.patch("/api/projects/2", json={"name": "mine now"}).status_code == 404
-    assert client.delete("/api/projects/2").status_code == 404
+    assert client.post("/api/projects/2/trash").status_code == 404
 
 
-def test_delete_stops_what_runs_then_soft_deletes(client, owned_project, monkeypatch):
+def test_trash_stops_what_runs_then_stamps_trashed_at(client, owned_project, monkeypatch):
+    calls = []
+
+    async def fake_close(project):
+        calls.append(("close", project["id"]))
+        return {}
+
+    async def fake_update(project_id, updates, expected=None):
+        calls.append(("update", project_id, list(updates)))
+        return _project(**updates)
+
+    monkeypatch.setattr(project_service, "close_project", fake_close)
+    monkeypatch.setattr(projects_repo, "update", fake_update)
+
+    response = client.post("/api/projects/1/trash")
+    assert response.status_code == 200
+    assert response.json()["trashed_at"]
+    assert calls == [("close", 1), ("update", 1, ["trashed_at"])]
+
+
+def test_trash_still_trashes_when_stopping_fails(client, owned_project, monkeypatch):
+    async def failing_close(project):
+        raise RuntimeError("pm2 is having a bad day")
+
+    async def fake_update(project_id, updates, expected=None):
+        return _project(**updates)
+
+    monkeypatch.setattr(project_service, "close_project", failing_close)
+    monkeypatch.setattr(projects_repo, "update", fake_update)
+
+    assert client.post("/api/projects/1/trash").status_code == 200
+
+
+def test_restore_clears_trashed_at_without_counting_as_an_edit(client, trashed_project, monkeypatch):
+    updates_seen = []
+
+    async def fake_update(project_id, updates, expected=None):
+        updates_seen.append(updates)
+        return _project(**updates)
+
+    monkeypatch.setattr(projects_repo, "update", fake_update)
+
+    assert client.post("/api/projects/1/restore").status_code == 200
+    assert client.post("/api/projects/2/restore").status_code == 404
+    assert updates_seen == [{"trashed_at": None}]
+
+
+def test_only_a_project_in_trash_can_be_deleted(client, owned_project, monkeypatch):
+    # Project 1 is live (owned_project), not in Trash: deleting it straight away is refused.
+    async def fake_find_trashed(criteria):
+        return []
+
+    monkeypatch.setattr(projects_repo, "find_trashed", fake_find_trashed)
+    assert client.delete("/api/projects/1").status_code == 404
+
+
+def test_delete_stops_what_runs_then_soft_deletes(client, trashed_project, monkeypatch):
     calls = []
 
     async def fake_close(project):
@@ -259,7 +331,7 @@ def test_delete_stops_what_runs_then_soft_deletes(client, owned_project, monkeyp
     assert calls == [("close", 1), ("update", 1, ["deleted_at"])]
 
 
-def test_delete_still_deletes_when_stopping_fails(client, owned_project, monkeypatch):
+def test_delete_still_deletes_when_stopping_fails(client, trashed_project, monkeypatch):
     deleted = []
 
     async def failing_close(project):
@@ -274,3 +346,19 @@ def test_delete_still_deletes_when_stopping_fails(client, owned_project, monkeyp
 
     assert client.delete("/api/projects/1").status_code == 204
     assert deleted == [1]
+
+
+@pytest.mark.parametrize("has_created", [True, False])
+def test_project_history_says_whether_the_caller_ever_made_a_project(client, monkeypatch, has_created):
+    asked_for = []
+
+    async def fake_has_ever_created(user_id):
+        asked_for.append(user_id)
+        return has_created
+
+    monkeypatch.setattr(projects_repo, "has_ever_created", fake_has_ever_created)
+
+    response = client.get("/api/projects/history")
+    assert response.status_code == 200
+    assert response.json() == {"has_created_project": has_created}
+    assert asked_for == [_CALLER["id"]]

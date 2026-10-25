@@ -68,13 +68,33 @@ async def test_open_project_ensures_the_devenv_only_once_implementing(stage, mon
         "ensure_introduced",
         lambda project, conversation_id: _record(calls, "introduced"),
     )
-    monkeypatch.setattr(
-        projects_service.agent_service, "restore_devenv", lambda project, conversation_id: ("devenv", conversation_id)
-    )
-    monkeypatch.setattr(projects_service, "spawn", lambda job: calls.append(job))
+    # What gets spawned is named, then dropped unrun (its own test is below).
+    monkeypatch.setattr(projects_service, "spawn", lambda job: calls.append(job.__qualname__) or job.close())
 
     await projects_service.open_project({"id": 1, "user_id": 7, "stage": stage})
-    assert calls == (["session", "introduced", ("devenv", 5)] if stage == "implementing" else ["session", "introduced"])
+    expected = ["session", "introduced", "_restore_devenv"] if stage == "implementing" else ["session", "introduced"]
+    assert calls == expected
+
+
+@pytest.mark.parametrize("has_picture", [False, True])
+async def test_restoring_the_devenv_takes_a_site_picture_only_when_there_is_none(has_picture, monkeypatch):
+    calls = []
+
+    async def fake_restore(project, conversation_id):
+        calls.append(("restore", conversation_id))
+
+    async def fake_capture(project):
+        calls.append("capture")
+        return True
+
+    monkeypatch.setattr(projects_service.agent_service, "restore_devenv", fake_restore)
+    monkeypatch.setattr(
+        projects_service.site_previews, "get_taken_at", lambda project: "earlier" if has_picture else None
+    )
+    monkeypatch.setattr(projects_service.site_previews, "capture", fake_capture)
+
+    await projects_service._restore_devenv({"id": 1, "hash": "p1"}, 5)
+    assert calls == ([("restore", 5)] if has_picture else [("restore", 5), "capture"])
 
 
 @pytest.fixture

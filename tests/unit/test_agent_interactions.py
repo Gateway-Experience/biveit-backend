@@ -219,6 +219,21 @@ def test_a_build_is_open_until_its_done():
     assert not signals.is_build_open([text, _signal("IMPLEMENTATION_DONE")])
 
 
+def test_a_turn_is_open_from_the_users_message_until_the_agent_goes_idle():
+    def _at(seq, message):
+        return {**message, "seq": seq}
+
+    said = _at(1, _msg("user", {"type": "text", "text": "add a menu page"}))
+    reply = _at(2, _msg("assistant", {"type": "text", "text": "done"}))
+    idle = _at(3, _signal("AGENT_IDLE"))
+    answer = _at(4, _msg("user", {"type": "tool_result", "tool_use_id": "toolu_1", "content": []}))
+    assert not signals.is_turn_open([])
+    assert signals.is_turn_open([said])
+    assert signals.is_turn_open([said, reply])  # the reply alone doesn't end it: the runner's idle does
+    assert not signals.is_turn_open([said, reply, idle])
+    assert signals.is_turn_open([said, reply, idle, answer])  # an answer wakes the agent too
+
+
 # --- to_tool_result_block ---
 
 

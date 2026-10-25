@@ -54,7 +54,7 @@ class PostAgentMessageRequest(BaseModel):
 
 class PostAgentSignalRequest(BaseModel):
     """POST /agent/signals body: a signal from the project's agent session (see AiSignal). Only
-    AGENT_SIGNALS are accepted -- the service says no to the rest."""
+    AGENT_SIGNALS and RUNNER_SIGNALS are accepted -- the service says no to the rest."""
 
     model_config = {"extra": "forbid"}
 

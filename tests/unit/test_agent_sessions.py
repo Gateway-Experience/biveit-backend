@@ -118,6 +118,10 @@ async def test_sessions_go_through_the_runner(monkeypatch):
     await sessions.send({"id": 3}, 5, [{"type": "text", "text": "hi"}])
     assert calls == [("ensure", 5), ("send", 5, [{"type": "text", "text": "hi"}])]
 
+    async def is_up(project, conversation_id):
+        return True
+
+    monkeypatch.setattr(sessions.runners, "is_session_up", is_up)
     monkeypatch.setattr(sessions.runners, "ensure_session", no_runner)
     with pytest.raises(sessions.SessionUnavailable):  # callers only ever see SessionUnavailable
         await sessions.ensure_session({"id": 3}, 5)
@@ -132,4 +136,5 @@ async def test_stopping_stops_the_runner(monkeypatch):
 
     monkeypatch.setattr(sessions.runners, "stop_session", fake_runner_stop)
     monkeypatch.setattr(sessions.signals, "end_open_build", no_open_build)
+    monkeypatch.setattr(sessions.signals, "end_open_turn", no_open_build)
     assert await sessions.stop_session({"id": 3}, 5) == {"runner": True}
