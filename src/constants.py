@@ -46,11 +46,16 @@ class UserLanguage(StrEnum):
     VI = "vi"
 
 
-class UserTour(StrEnum):
-    """The FE's guided tours (spotlights walking a user through a page). Each is shown once per account:
-    finishing or skipping it is recorded in the user's meta (services/users.finish_tour)."""
+class UserJourney(StrEnum):
+    """The flows the FE walks a user through step by step. The steps they take are logged in
+    user_journey_steps (see its migration); which steps there are is the FE's call, not ours."""
 
-    PROJECTS = "projects"
+    # The first-time intro on the projects page, for accounts that have never made a project.
+    PROJECTS_INTRO = "projects_intro"
+
+
+# A journey step's name: the column's varchar limit (migrations/0009_user_journey_steps.sql).
+JOURNEY_STEP_MAX_LENGTH = 100
 
 
 # How the agent is told about a language (services/agent/sessions.introduce_project).

@@ -56,7 +56,7 @@ async def list_trashed_projects(request: Request, user: User = Depends(get_curre
 @router.get("/projects/history")
 async def get_project_history(request: Request, user: User = Depends(get_current_user)) -> dict:
     """{has_created_project}: whether the caller has ever made a project, even one since trashed or deleted
-    for good. The FE's first-time tour is only for accounts that haven't."""
+    for good. The FE's first-time intro is only for accounts that haven't."""
     try:
         return {"has_created_project": await projects_repo.has_ever_created(user["id"])}
     except Exception as error:

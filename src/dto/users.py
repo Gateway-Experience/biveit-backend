@@ -8,7 +8,7 @@ from typing import Annotated, Any, TypedDict
 
 from pydantic import BaseModel, Field, StringConstraints, field_validator
 
-from src.constants import MIN_PASSWORD_LENGTH, USER_NAME_MAX_LENGTH, UserLanguage
+from src.constants import JOURNEY_STEP_MAX_LENGTH, MIN_PASSWORD_LENGTH, USER_NAME_MAX_LENGTH, UserLanguage
 
 
 class User(TypedDict):
@@ -32,6 +32,18 @@ class User(TypedDict):
     updated_at: Any  # datetime
     deleted_at: Any  # datetime | None -- always None on anything a read returns (reads skip deleted rows)
     has_password: bool  # derived from password_hash (which itself never leaves the repo); False for Google-only
+
+
+class UserJourneyStep(TypedDict):
+    """A user_journey_steps row: one step a user took through one of the FE's journeys."""
+
+    id: int
+    user_id: int
+    journey: str  # UserJourney
+    step: str  # named by the journey's designer (the FE), e.g. "finished"
+    data: dict[str, Any]  # whatever the step keeps, e.g. an answer the user gave
+    created_at: Any  # datetime -- when they took it
+    deleted_at: Any  # datetime | None -- always None on anything a read returns
 
 
 # Signup asks for both names; last_name may be blank (not everyone has one). Whitespace is trimmed first.
@@ -87,6 +99,15 @@ class ChangePasswordRequest(BaseModel):
 
     current_password: str | None = None
     new_password: str = Field(min_length=MIN_PASSWORD_LENGTH)
+
+
+class AddJourneyStepRequest(BaseModel):
+    """POST /me/journeys/{journey}/steps body: the step the user just took, and whatever it keeps."""
+
+    model_config = {"extra": "forbid"}
+
+    step: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=JOURNEY_STEP_MAX_LENGTH)]
+    data: dict[str, Any] = {}
 
 
 class UpdateMeRequest(BaseModel):

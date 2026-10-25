@@ -2,6 +2,8 @@
 #   GET   /me                    (auth)   the current user
 #   PATCH /me                    (auth)   self-service profile edit
 #   POST  /me/password           (auth)   change my password (or set a first one, for Google-only accounts)
+#   GET   /me/journeys           (auth)   where I am in each of the FE's journeys (e.g. first-time intros)
+#   POST  /me/journeys/{journey}/steps (auth) log a step I took in one
 #   PUT   /me/avatar             (auth)   upload my profile picture (multipart `file`)
 #   DELETE /me/avatar            (auth)   back to no profile picture
 #   GET   /avatars/{hash}/{file} (public) an uploaded profile picture
@@ -13,17 +15,20 @@
 #   POST  /user/reset-password   (public) set a new password from that link, and log in
 # Google login lives in controllers/auth (a redirect flow, not a JSON endpoint).
 # Protocol-only: parse, authenticate, delegate to services/users, map outcomes to HTTP. The guest
-# lifecycle these endpoints expose is explained in services/users.
+# lifecycle these endpoints expose is explained in services/users. Journeys are plain CRUD, so they go
+# straight to the repo (repositories/user_journey_steps).
 #
 # Every endpoint that signs someone in also sets the session cookie (utils/auth.set_access_cookie), so
 # all login methods land in the same session. The token is still returned in the body for the FE's
 # current localStorage model -- drop it once the FE runs purely on the cookie.
 
+import pydash
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 
-from src.constants import AVATAR_MAX_BYTES, UserTour
+from src.constants import AVATAR_MAX_BYTES, UserJourney
 from src.dto.users import (
+    AddJourneyStepRequest,
     AuthenticateRequest,
     ChangePasswordRequest,
     ForgotPasswordRequest,
@@ -32,7 +37,9 @@ from src.dto.users import (
     ResetPasswordRequest,
     UpdateMeRequest,
     User,
+    UserJourneyStep,
 )
+from src.repositories import user_journey_steps as user_journey_steps_repo
 from src.services import users as user_service
 from src.utils.auth import get_current_user, set_access_cookie
 from src.utils.logging import log_http_error
@@ -79,14 +86,25 @@ async def change_password(
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
 
 
-@router.post("/me/tours/{tour}/finish")
-async def finish_tour(tour: UserTour, request: Request, user: User = Depends(get_current_user)) -> User:
-    """The caller finished (or skipped) one of the FE's guided tours, so don't show it again. Returns the
-    user, bare like GET /me. An unknown tour is a 422."""
+@router.get("/me/journeys")
+async def get_my_journeys(request: Request, user: User = Depends(get_current_user)) -> dict[str, UserJourneyStep]:
+    """Where the caller is in each journey they've started: {journey: its latest step}. A journey that's
+    missing hasn't been started."""
     try:
-        return await user_service.finish_tour(user["id"], tour)
-    except user_service.UserNotFound as error:
-        raise HTTPException(status_code=404, detail="USER_NOT_FOUND") from error
+        return pydash.key_by(await user_journey_steps_repo.find_latest(user["id"]), "journey")
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.post("/me/journeys/{journey}/steps", status_code=201)
+async def add_journey_step(
+    journey: UserJourney, body: AddJourneyStepRequest, request: Request, user: User = Depends(get_current_user)
+) -> UserJourneyStep:
+    """The caller took a step in one of the FE's journeys (e.g. step "finished" once they're
+    through it, or skipped it); returns the step. An unknown journey is a 422."""
+    try:
+        return await user_journey_steps_repo.insert({"user_id": user["id"], "journey": journey, **body.model_dump()})
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error

@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.config import settings
-from src.constants import UserTour, UserType
+from src.constants import UserType
 from src.dto.users import RegisterRequest, UpdateMeRequest
 from src.repositories import users as users_repo
 from src.services import users as user_service
@@ -408,32 +408,3 @@ async def test_a_google_only_account_sets_its_first_password_without_one(monkeyp
     state = _patch_auth(monkeypatch, None)
     await user_service.change_password(1, None, "first-password")
     assert bcrypt.checkpw(b"first-password", state["password_hash"].encode())
-
-
-# --- guided tours ---
-
-
-async def test_finishing_a_tour_merges_its_time_into_meta(monkeypatch):
-    calls = []
-
-    async def fake_update(user_id, row):
-        calls.append((user_id, row))
-        return _user(meta={"colour": "red", **row["meta"]})
-
-    monkeypatch.setattr(users_repo, "update", fake_update)
-
-    user = await user_service.finish_tour(1, UserTour.PROJECTS)
-    # Only the tour's own key is sent: the repo merges it in, so the rest of meta is left alone.
-    assert list(calls[0][1]["meta"]) == ["projects_tour_finished_at"]
-    assert user["meta"]["colour"] == "red"
-    assert user["meta"]["projects_tour_finished_at"]
-
-
-async def test_finishing_a_tour_for_a_vanished_user_fails(monkeypatch):
-    async def fake_update(user_id, row):
-        return None
-
-    monkeypatch.setattr(users_repo, "update", fake_update)
-
-    with pytest.raises(user_service.UserNotFound):
-        await user_service.finish_tour(1, UserTour.PROJECTS)
