@@ -2,8 +2,8 @@
 #   conversations.py  the chat: messages in from the session and the user, out to the user's tabs
 #   interactions.py   the rules of the agent's questions/actions to the user (pending, valid answers),
 #                     and of what the agent may send at all
-#   signals.py        timestamped markers in the log (BUILDING, IMPLEMENTATION_DONE...), state read off its tail
-#   implementation.py the implementing milestones the user's approvals set off (start, sign-off)
+#   signals.py        timestamped markers in the log (BUILDING, BUILD_APPROVED...), state read off its tail
+#   stages.py the stage milestones the user's approvals set off (start, sign-off)
 #   storage.py        the chat's files in the workspace (uploads, artifacts) and the guards
 #                     on client-given names and paths
 #   sessions.py       the session as the app sees it: keeping it running, and talking to it over its
@@ -41,7 +41,7 @@ from src.services.agent.conversations import (
     watch_messages,
 )
 from src.services.agent.devenvs import (
-    ImplementationNotStarted,
+    BuildingNotStarted,
     control_dev_servers,
     get_devenv_status,
     restore_devenv,
@@ -54,9 +54,9 @@ from src.services.agent.storage import FileNotAvailable
 from src.services.agent.tokens import get_token_conversation_id
 
 __all__ = [
+    "BuildingNotStarted",
     "ConversationNotFound",
     "FileNotAvailable",
-    "ImplementationNotStarted",
     "InteractionNotFound",
     "InteractionPending",
     "InvalidSessionMessage",

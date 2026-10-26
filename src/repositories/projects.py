@@ -18,7 +18,7 @@ from src.dto.projects import Project
 from src.utils import postgres
 
 _COLUMNS = """
-    id, hash, user_id, name, description, stage, bootstrap_data, implementation_done_at, pinned_at,
+    id, hash, user_id, name, description, stage, bootstrap_data, build_approved_at, pinned_at,
     folder_id, meta, created_at, updated_at, trashed_at, deleted_at
 """
 
@@ -31,7 +31,7 @@ _WRITABLE_COLUMNS = [
     "description",
     "stage",
     "bootstrap_data",
-    "implementation_done_at",
+    "build_approved_at",
     "pinned_at",
     "folder_id",
     "meta",

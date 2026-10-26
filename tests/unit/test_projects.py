@@ -24,9 +24,9 @@ def _project(**overrides):
         "user_hash": "u7hash",
         "name": "Portfolio",
         "description": None,
-        "stage": "specing",
+        "stage": "planning",
         "bootstrap_data": {},
-        "implementation_done_at": None,
+        "build_approved_at": None,
         "pinned_at": None,
         "folder_id": None,
         "meta": {},
@@ -82,7 +82,7 @@ def test_create_owns_the_project_by_the_caller(monkeypatch, client):
     response = client.post(
         "/api/projects", json={"name": "Landing page", "description": "For the launch", "bootstrap_data": form}
     )
-    assert response.status_code == 201 and response.json()["stage"] == "specing"
+    assert response.status_code == 201 and response.json()["stage"] == "planning"
     assert calls["data"] == {
         "name": "Landing page",
         "description": "For the launch",

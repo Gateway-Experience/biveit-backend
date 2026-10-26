@@ -29,7 +29,7 @@ def captured_sql(monkeypatch):
 
 
 async def test_update_never_touches_updated_at_implicitly(captured_sql):
-    await projects_repo.update(1, {"name": "Renamed", "stage": "specing"})
+    await projects_repo.update(1, {"name": "Renamed", "stage": "planning"})
     assert "updated_at" not in captured_sql["sql"].split("RETURNING")[0]
 
 
@@ -50,8 +50,8 @@ async def _record(calls, what):
     calls.append(what)
 
 
-@pytest.mark.parametrize("stage", ["specing", "implementing"])
-async def test_open_project_ensures_the_devenv_only_once_implementing(stage, monkeypatch):
+@pytest.mark.parametrize("stage", ["planning", "building"])
+async def test_open_project_ensures_the_devenv_only_once_building(stage, monkeypatch):
     calls = []
 
     async def fake_current_conversation(project_id, user_id):
@@ -72,7 +72,7 @@ async def test_open_project_ensures_the_devenv_only_once_implementing(stage, mon
     monkeypatch.setattr(projects_service, "spawn", lambda job: calls.append(job.__qualname__) or job.close())
 
     await projects_service.open_project({"id": 1, "user_id": 7, "stage": stage})
-    expected = ["session", "introduced", "_restore_devenv"] if stage == "implementing" else ["session", "introduced"]
+    expected = ["session", "introduced", "_restore_devenv"] if stage == "building" else ["session", "introduced"]
     assert calls == expected
 
 

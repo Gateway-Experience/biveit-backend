@@ -13,14 +13,14 @@
 -- project's folder on disk (<STORAGE_DIR>/<user hash>/<project hash>/...) and its dev site
 -- (<hash>.<DEV_DOMAIN>), so paths and URLs don't give away or enumerate ids.
 -- Rows that existed before it was added have hash = id::text (their folders were already named by id).
--- stage: where the project is in the building process -- specing (chatting with the agent to work out
--- the spec) -> implementing (the app is set up). Moves forward only, through the agent's
--- start_implementation (services/agent/devenvs). It's what the project SHOULD be: the workspace and dev
--- servers are brought in line with it on each open. (Before specing there's the starting form, but
+-- stage: where the project is in the website creation process -- planning (chatting with the agent to work
+-- out the spec) -> building (the app is set up). Moves forward only, when the user approves the plan
+-- (services/agent/stages). It's what the project SHOULD be: the workspace and dev
+-- servers are brought in line with it on each open. (Before planning there's the starting form, but
 -- that's the FE's alone: the project is only created once the form is submitted.)
--- implementation_done_at: when the agent signalled that the user is happy with the implemented site
--- (its implementing_done tool). Set once and kept: from then on the FE offers payment/deployment, even
--- if the user goes back to more spec-ing or implementing. A milestone, not a stage -- the stage says
+-- build_approved_at: when the user first approved the built site (the APPROVE_BUILD approval). Set once
+-- and kept: from then on the FE offers payment/deployment, even
+-- if the user goes back to more planning or building. A milestone, not a stage -- the stage says
 -- where the project is now, this says it got there once.
 -- bootstrap_data: the starting form's answers, as the FE sent them when creating the project. Handed
 -- to the agent to start the chat with.
@@ -42,9 +42,9 @@ CREATE TABLE IF NOT EXISTS projects
     user_id     BIGINT       NOT NULL REFERENCES users (id),  -- owner
     name        varchar(200) NOT NULL,
     description text,
-    stage       varchar(32)  NOT NULL DEFAULT 'specing',       -- ProjectStage
+    stage       varchar(32)  NOT NULL DEFAULT 'planning',      -- ProjectStage
     bootstrap_data jsonb      NOT NULL DEFAULT '{}',          -- the starting form's answers
-    implementation_done_at TIMESTAMPTZ,                        -- NULL until the user signed off a version
+    build_approved_at TIMESTAMPTZ,                             -- NULL until the user signed off a version
     pinned_at   TIMESTAMPTZ,                                   -- NULL = not pinned
     meta        jsonb        NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),

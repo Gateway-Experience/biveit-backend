@@ -11,7 +11,7 @@ from src.utils.auth import get_current_user
 
 _ADMIN = {"id": 1, "username": "admin@biveit.com", "user_type": "USER", "role": "ADMIN"}
 _USER = {"id": 2, "username": "someone@x.com", "user_type": "USER", "role": None}
-_PROJECT = {"id": 16, "name": "Portfolio", "stage": "implementing"}
+_PROJECT = {"id": 16, "name": "Portfolio", "stage": "building"}
 _SECTION = {"title": "Platform", "rows": [{"label": "env", "value": "local"}]}
 
 

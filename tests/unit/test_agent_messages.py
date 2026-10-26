@@ -1,7 +1,7 @@
 # The session's endpoints (controllers/agent): the session-token gate, then each endpoint -- messages
 # stored for the token's conversation (and refused when the agent may not send them), signals recorded,
-# dev servers controlled. Plus the implementing milestones the user's approvals set off
-# (services/agent/implementation) and the session stop ending a build. Repos are faked -- no db.
+# dev servers controlled. Plus the stage milestones the user's approvals set off
+# (services/agent/stages) and the session stop ending a build. Repos are faked -- no db.
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,15 +14,15 @@ from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
 from src.services import devenv
-from src.services.agent import implementation, sessions, tokens
+from src.services.agent import sessions, stages, tokens
 
 _PROJECT = {
     "id": 3,
     "hash": "p3hash",
     "user_id": 7,
     "user_hash": "u7hash",
-    "stage": "specing",
-    "implementation_done_at": None,
+    "stage": "planning",
+    "build_approved_at": None,
 }
 _CONVERSATION = {"id": 5, "project_id": 3, "user_id": 7}
 _CONTENT = [{"type": "text", "text": "Here's your homepage!"}]
@@ -153,10 +153,10 @@ def test_keeps_unknown_block_fields_verbatim(client, db):
 @pytest.mark.parametrize(
     ("content", "reason"),
     [
-        ([{"type": "signal", "slug": "IMPLEMENTATION_DONE"}], "send_signal"),
+        ([{"type": "signal", "slug": "BUILD_APPROVED"}], "send_signal"),
         ([{"type": "tool_use", "input": {"actions": [{"name": "DEPLOY_NOW", "params": {}}]}}], "unknown actions"),
-        # _PROJECT is still spec-ing: there's no implementation to approve yet.
-        ([{"type": "tool_use", "input": {"actions": [{"name": "APPROVE_IMPLEMENTATION", "params": {}}]}}], "spec"),
+        # _PROJECT is still planning: there's no implementation to approve yet.
+        ([{"type": "tool_use", "input": {"actions": [{"name": "APPROVE_BUILD", "params": {}}]}}], "plan"),
     ],
 )
 def test_refuses_what_the_agent_may_not_send(content, reason, client, db):
@@ -167,7 +167,7 @@ def test_refuses_what_the_agent_may_not_send(content, reason, client, db):
 
 
 def test_an_approval_request_is_stored_as_request_actions(client, db):
-    content = [{"type": "tool_use", "input": {"actions": [{"name": "APPROVE_SPEC", "params": {}}]}}]
+    content = [{"type": "tool_use", "input": {"actions": [{"name": "APPROVE_PLAN", "params": {}}]}}]
     assert client.post("/api/agent/messages", json={"content": content}, headers=_session()).status_code == 201
     stored = db["messages"][0]["content"][0]
     assert stored["name"] == "request_actions" and stored["id"].startswith("toolu_")
@@ -176,10 +176,10 @@ def test_an_approval_request_is_stored_as_request_actions(client, db):
 # --- dev servers ---
 
 
-def test_dev_servers_need_implementing_to_have_started(client, db, monkeypatch):
+def test_dev_servers_need_building_to_have_started(client, db, monkeypatch):
     monkeypatch.setattr(devenv, "has_app", lambda project, conversation_id: False)
     response = client.post("/api/agent/dev-servers", json={"action": "status"}, headers=_session())
-    assert response.status_code == 409 and response.json()["detail"] == "IMPLEMENTATION_NOT_STARTED"
+    assert response.status_code == 409 and response.json()["detail"] == "BUILDING_NOT_STARTED"
 
 
 def test_dev_servers_are_controlled_for_the_tokens_project(client, db, monkeypatch):
@@ -224,7 +224,7 @@ def test_the_runner_says_when_the_agent_goes_idle(client, db):
 
 
 def test_the_agent_cant_send_our_signals(client, db):
-    response = client.post("/api/agent/signals", json={"slug": "IMPLEMENTATION_DONE"}, headers=_session())
+    response = client.post("/api/agent/signals", json={"slug": "BUILD_APPROVED"}, headers=_session())
     assert response.status_code == 403 and response.json()["detail"] == "SIGNAL_NOT_ALLOWED"
     assert db["messages"] == []
 
@@ -281,7 +281,7 @@ async def test_stopping_or_finding_the_session_dead_ends_an_open_turn(db, monkey
     assert _slugs(db)[-1] is None
 
 
-# --- the implementing milestones (the user's approvals) ---
+# --- the stage milestones (the user's approvals) ---
 
 
 _READY = {
@@ -297,7 +297,7 @@ def _slugs(db):
 
 @pytest.fixture
 def pushed(monkeypatch):
-    """Runs start_implementation's background job inline and records what it pushes into the session."""
+    """Runs start_building's background job inline and records what it pushes into the session."""
     state = {"jobs": [], "pushed": []}
 
     async def fake_ensure_session(project, conversation_id):
@@ -306,25 +306,25 @@ def pushed(monkeypatch):
     async def fake_send(project, conversation_id, content):
         state["pushed"] = [*state["pushed"], content]
 
-    monkeypatch.setattr(implementation, "spawn", lambda job: state["jobs"].append(job))
+    monkeypatch.setattr(stages, "spawn", lambda job: state["jobs"].append(job))
     monkeypatch.setattr(sessions, "ensure_session", fake_ensure_session)
     monkeypatch.setattr(sessions, "send", fake_send)
     return state
 
 
-async def test_approving_the_spec_starts_implementing_and_reports_ready(db, pushed, monkeypatch):
+async def test_approving_the_spec_starts_building_and_reports_ready(db, pushed, monkeypatch):
     async def fake_ensure_devenv(project, conversation_id):
         assert (project["id"], conversation_id) == (3, 5)
         return _READY
 
-    monkeypatch.setattr(implementation.devenv, "ensure_devenv", fake_ensure_devenv)
-    await implementation.apply_approvals(_PROJECT, 5, ["APPROVE_SPEC"])
-    # The stage moves first, compare-and-set from specing -- before anything is set up.
-    assert db["project_updates"] == [(3, {"stage": "implementing"}, {"stage": "specing"})]
-    assert _slugs(db) == ["IMPLEMENTATION_STARTED"] and pushed["pushed"] == []  # setup's in the background
+    monkeypatch.setattr(stages.devenv, "ensure_devenv", fake_ensure_devenv)
+    await stages.apply_approvals(_PROJECT, 5, ["APPROVE_PLAN"])
+    # The stage moves first, compare-and-set from planning -- before anything is set up.
+    assert db["project_updates"] == [(3, {"stage": "building"}, {"stage": "planning"})]
+    assert _slugs(db) == ["PLAN_APPROVED"] and pushed["pushed"] == []  # setup's in the background
 
     await pushed["jobs"][0]
-    assert _slugs(db) == ["IMPLEMENTATION_STARTED", "BUILDING"]  # the first build starts right away
+    assert _slugs(db) == ["PLAN_APPROVED", "BUILDING"]  # the first build starts right away
     report = pushed["pushed"][0][0]["text"]
     assert report.startswith("[Dev environment ready]")
     assert "https://project-3.dev.example.com" in report and "BUILDING_DONE" in report
@@ -334,10 +334,10 @@ async def test_a_failed_devenv_is_recorded_and_reported_to_the_agent(db, pushed,
     async def failing_ensure_devenv(project, conversation_id):
         raise RuntimeError("`npm install` exited 1: ERESOLVE")
 
-    monkeypatch.setattr(implementation.devenv, "ensure_devenv", failing_ensure_devenv)
-    await implementation.apply_approvals(_PROJECT, 5, ["APPROVE_SPEC"])
+    monkeypatch.setattr(stages.devenv, "ensure_devenv", failing_ensure_devenv)
+    await stages.apply_approvals(_PROJECT, 5, ["APPROVE_PLAN"])
     await pushed["jobs"][0]
-    assert _slugs(db) == ["IMPLEMENTATION_STARTED", "DEVENV_FAILED"]
+    assert _slugs(db) == ["PLAN_APPROVED", "DEVENV_FAILED"]
     assert "ERESOLVE" in db["messages"][-1]["content"][0]["description"]
     report = pushed["pushed"][0][0]["text"]
     assert report.startswith("[Dev environment failed]") and "ERESOLVE" in report
@@ -347,15 +347,15 @@ async def test_reapproving_the_spec_keeps_the_stage_and_just_reruns_the_setup(db
     async def fake_ensure_devenv(project, conversation_id):
         return _READY
 
-    monkeypatch.setattr(implementation.devenv, "ensure_devenv", fake_ensure_devenv)
-    await implementation.apply_approvals({**_PROJECT, "stage": "implementing"}, 5, ["APPROVE_SPEC"])
+    monkeypatch.setattr(stages.devenv, "ensure_devenv", fake_ensure_devenv)
+    await stages.apply_approvals({**_PROJECT, "stage": "building"}, 5, ["APPROVE_PLAN"])
     assert db["project_updates"] == [] and _slugs(db) == []  # already there: no new milestone
     await pushed["jobs"][0]
     assert _slugs(db) == ["BUILDING"]
 
 
 async def test_signing_off_is_recorded_once_and_ends_the_build(db, monkeypatch):
-    project = {**_PROJECT, "stage": "implementing", "implementation_done_at": None}
+    project = {**_PROJECT, "stage": "building", "build_approved_at": None}
 
     async def update_project(project_id, updates, expected=None):
         project.update(updates)  # the fake db row
@@ -363,15 +363,15 @@ async def test_signing_off_is_recorded_once_and_ends_the_build(db, monkeypatch):
 
     monkeypatch.setattr(projects_repo, "update", update_project)
     await sessions.signals.append_signal(5, "BUILDING", "Last tweaks")
-    await implementation.apply_approvals(project, 5, ["APPROVE_IMPLEMENTATION"])
-    first_done_at = project["implementation_done_at"]
-    assert first_done_at and _slugs(db) == ["BUILDING", "IMPLEMENTATION_DONE", "BUILDING_DONE"]
+    await stages.apply_approvals(project, 5, ["APPROVE_BUILD"])
+    first_done_at = project["build_approved_at"]
+    assert first_done_at and _slugs(db) == ["BUILDING", "BUILD_APPROVED", "BUILDING_DONE"]
 
-    await implementation.apply_approvals(project, 5, ["APPROVE_IMPLEMENTATION"])
-    assert project["implementation_done_at"] == first_done_at  # the first sign-off is kept
-    assert _slugs(db)[-1] == "IMPLEMENTATION_DONE"  # every sign-off is in the log; no build left to end
+    await stages.apply_approvals(project, 5, ["APPROVE_BUILD"])
+    assert project["build_approved_at"] == first_done_at  # the first sign-off is kept
+    assert _slugs(db)[-1] == "BUILD_APPROVED"  # every sign-off is in the log; no build left to end
 
 
-async def test_signing_off_while_specing_does_nothing(db):
-    await implementation.apply_approvals(_PROJECT, 5, ["APPROVE_IMPLEMENTATION"])  # _PROJECT is specing
+async def test_signing_off_while_planning_does_nothing(db):
+    await stages.apply_approvals(_PROJECT, 5, ["APPROVE_BUILD"])  # _PROJECT is planning
     assert db["messages"] == [] and db["project_updates"] == []

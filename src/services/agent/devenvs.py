@@ -4,9 +4,9 @@
 #                         (its pm2 also runs its own session), so it never runs pm2 itself.
 # For the user's tabs:
 #   get_devenv_status     the stage, the preview URL and the dev servers, for the preview screen
-#   restore_devenv        bring an implementing project's servers back on a visit (services/projects)
+#   restore_devenv        bring a building project's servers back on a visit (services/projects)
 #   stop_devenv           turn the dev servers off (services/projects.close_project)
-# Setting the environment up in the first place follows the user approving the spec (implementation.py).
+# Setting the environment up in the first place follows the user approving the spec (stages.py).
 # Whatever may change the environment ends with publish_devenv_changed, so open tabs re-read the status.
 
 from src.constants import DevServerAction
@@ -20,17 +20,17 @@ from src.services.agent.conversations import (
 from src.services.agent.wakeups import publish_devenv_changed
 
 
-class ImplementationNotStarted(Exception):
+class BuildingNotStarted(Exception):
     """The dev servers were asked for before there's an app to run (the spec isn't approved yet). 409."""
 
 
 async def control_dev_servers(conversation_id: int, action: DevServerAction) -> list[dict]:
     """Do `action` to the conversation project's dev servers; returns their statuses. Raises
-    ConversationNotFound, or ImplementationNotStarted if there's no app to run yet."""
+    ConversationNotFound, or BuildingNotStarted if there's no app to run yet."""
     conversation = await get_live_conversation(conversation_id)
     project = await get_conversation_project(conversation)
     if not devenv.has_app(project, conversation_id):
-        raise ImplementationNotStarted(f"conversation {conversation_id}", {"conversation_id": conversation_id})
+        raise BuildingNotStarted(f"conversation {conversation_id}", {"conversation_id": conversation_id})
     statuses = await devenv.control_dev_servers(project, conversation_id, action)
     await publish_devenv_changed(conversation_id)
     return statuses
@@ -46,18 +46,18 @@ async def stop_devenv(project: Project, conversation_id: int) -> list[str]:
 
 async def get_devenv_status(conversation: AiConversation) -> dict:
     """The conversation's dev environment for the preview screen: the project's stage and
-    implementation_done_at, plus devenv.get_devenv_status (busy, preview_url, servers). Whether the agent
+    build_approved_at, plus devenv.get_devenv_status (busy, preview_url, servers). Whether the agent
     is building isn't here -- that's a signal in the message log (services/agent/signals)."""
     project = await get_conversation_project(conversation)
     return {
         "stage": project["stage"],
-        "implementation_done_at": project["implementation_done_at"],
+        "build_approved_at": project["build_approved_at"],
         **await devenv.get_devenv_status(project, conversation["id"]),
     }
 
 
 async def restore_devenv(project: Project, conversation_id: int) -> None:
-    """Re-run the setup of a project that's implementing (a visit's warm-up: it brings back servers a
+    """Re-run the setup of a project that's building (a visit's warm-up: it brings back servers a
     reboot took down), then let open tabs know. No report to the agent -- it didn't ask. Raises like
     devenv.ensure_devenv; the tabs are told either way, since a failure changes the status too."""
     try:

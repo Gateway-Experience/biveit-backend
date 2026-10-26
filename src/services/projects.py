@@ -1,6 +1,6 @@
 # Intentions: project business logic that spans more than the projects row -- getting a project ready
 # when the user opens it (open_project: its current conversation's workspace, agent session -- started
-# off with the starting form's answers the first time -- and, once implementing, dev environment, as
+# off with the starting form's answers the first time -- and, once building, dev environment, as
 # its stage says), turning it all off again (close_project), moving it to Trash (trash_project) and
 # deleting it from there for good (delete_project), and the
 # user's edits from the project list and sidebar (update_project: rename, pin, file into a folder), and
@@ -90,7 +90,7 @@ async def open_project(project: Project) -> None:
     agent has them, so the FE can show the chat right after. It's a warm-up, not a guarantee: a session
     can still die mid-visit, so sending a message to the agent must ensure the session again on its own.
 
-    Once implementing, the dev environment is ensured too (and the project list's picture of the site
+    Once building, the dev environment is ensured too (and the project list's picture of the site
     taken, if it has none) -- in the background, since even a quick
     check of it takes seconds. That also finishes a setup that never completed and brings back dev
     servers a reboot (or a crash) took down. Its failures are only logged: the agent finds out on its
@@ -102,7 +102,7 @@ async def open_project(project: Project) -> None:
     else:
         await agent_service.ensure_session(project, conversation["id"])
         await agent_service.ensure_introduced(project, conversation["id"])
-    if project["stage"] == ProjectStage.IMPLEMENTING:
+    if project["stage"] == ProjectStage.BUILDING:
         spawn(_restore_devenv(project, conversation["id"]))
 
 

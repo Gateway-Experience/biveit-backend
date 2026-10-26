@@ -4,7 +4,7 @@
 #   <STORAGE_DIR>/<user hash>/<project hash>/                    the project
 #   <STORAGE_DIR>/<user hash>/<project hash>/<conversation_id>/  a workspace, where its agent session works.
 #       CLAUDE.md, .claude/              the agent's files, from TEMPLATE_DIR (from the start)
-#       backend/, frontend/              the app, from BOILERPLATE_DIR (once implementing starts), each
+#       backend/, frontend/              the app, from BOILERPLATE_DIR (once building starts), each
 #                                        with its own CLAUDE.md
 #       uploads/, artifacts/             the chat's files (services/agent/storage)
 #

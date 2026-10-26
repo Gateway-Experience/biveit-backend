@@ -111,7 +111,7 @@ class Settings(BaseSettings):
     anthropic_base_url: str = ""
     anthropic_auth_token: str = ""
 
-    # Dev environments (services/devenv), set up once a conversation's agent starts implementing.
+    # Dev environments (services/devenv), set up once a conversation's agent starts building.
     # The session runner's checkout (the biveit-session-runner repo, also the backend's own dependency): what
     # gets installed into each project's container (services/agent/runner_installs).
     session_runner_dir: str = "../biveit-session-runner"

@@ -16,11 +16,11 @@ class Project(TypedDict):
     user_hash: str  # the owner's hash, joined in on every read -- its folder sits inside the owner's
     name: str
     description: str | None
-    stage: str  # ProjectStage -- specing | implementing
+    stage: str  # ProjectStage -- planning | building
     bootstrap_data: dict[str, Any]  # the starting form's answers, sent when the project was created
-    # When the user first signed off the implemented site (the agent's implementing_done); None before.
+    # When the user first signed off the built site (the APPROVE_BUILD approval); None before.
     # From then on the FE offers payment/deployment, whatever the stage.
-    implementation_done_at: Any  # datetime | None
+    build_approved_at: Any  # datetime | None
     pinned_at: Any  # datetime | None -- when the user pinned it to the top of their sidebar
     # The folder it sits directly in, or None (the root). Always a live folder: deleting one clears this.
     folder_id: int | None

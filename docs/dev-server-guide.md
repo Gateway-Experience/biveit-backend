@@ -174,7 +174,7 @@ sudo ss -ltnp        # public: only 22, 80, 443. 10.213.0.1: only 3002 and 7017.
 ENV=prod uv run python -m scripts.manage status
 ```
 
-Open a project and let it start implementing. Then, against its container:
+Open a project and let it start building. Then, against its container:
 
 ```bash
 c=biveit-prod-project-<id>

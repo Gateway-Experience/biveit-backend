@@ -5,7 +5,7 @@ Insert new record in `projects` table.
 
 Create the project dir at: `<STORAGE_DIR>/<user hash>/<project hash>/`. The agent actually works one level down, in `<STORAGE_DIR>/<user hash>/<project hash>/<conversation id>/` (where the code, spec docs and uploads go).
 - STORAGE_DIR is currently `/home/ubuntu/data/storage_root/` on the VPS.
-Copy content of data/template into that conversation folder (for now there is only the CLAUDE.md **building process instruction** file)
+Copy content of data/template into that conversation folder (for now there is only the CLAUDE.md **website creation process instruction** file)
 Create a docker container for the project (which will be used for running the claude session, and for running the project's developmental FE and BE servers)
 - The docker container will have a limit on ram (3GB), cpu (1 core), number of processes and open files (to prevent it from hogging the VPS's resources)
 - The name of the docker container is derived from the project id (because we will have many projects running at the same time, so we need a way to tell the containers apart)
@@ -15,7 +15,7 @@ Create a docker container for the project (which will be used for running the cl
 - Copy and install the runner (which include claude sdk, skills, mcps) into the container, so the claude session can run in the container. It's read-only for the agent (it can't modify its own runner), and it's version-checked every time it starts, so runner updates reach every project automatically.
 Start the runner inside the container (a python file). This file basically starts a claude session (in sdk mode), and then acts as a middleman between the sdk and the BE
 - If the runner restarts (crash, idle shutdown, server reboot), it continues the same claude session from its transcript, saved in the project dir (`.devenv/home/.claude/...`), so the agent doesn't forget the conversation.
-- Send the session a first message with the project's info (project name, description, the starting form's answers, user's language), telling it to start spec-ing and send the first message to the user. This only happens once per conversation.
+- Send the session a first message with the project's info (project name, description, the starting form's answers, user's language), telling it to start planning and send the first message to the user. This only happens once per conversation.
 
 With this, a project (code, session etc) is contained and are safe from touching the main BE server or other projects.
 
@@ -55,9 +55,9 @@ When external services sends back to claude session, there are many messages the
 
 Sometimes the session also uses the communication MCP (we wrote it) to send special signals, like "Website is being built", or "Website building is done"
 
-# When a project goes into implementation stage:
+# When a project goes into Building stage:
 
-Implementing starts once user clicks Approve to approve the spec. Then the project record in db is updated so we know it has entered the implementation stage at least once.
+Building starts once user clicks Approve to approve the spec. Then the project record in db is updated so we know it has entered the Building stage at least once.
 - To be clear this is the postgres db (the BE db, not to be confused with mongodb which the projects use).
 
 Copy the boilerplate frontend and backend into the project's folder (which had been mounted above).
@@ -72,7 +72,7 @@ Start the FE and BE servers inside the container.
 
 Generate a domain name for the preview site under `<project hash>.<DEV_DOMAIN>` (e.g. `<project hash>.proj.biveit.com`), and configure nginx to make it public. The preview site should now be ready.
 
-Start implementing (writing code) for the site. The project's FE and BE dev servers should hot-reload as the code changes.
+Start building (writing code) for the site. The project's FE and BE dev servers should hot-reload as the code changes.
 
 Things that would consume resources (RAM etc.) here:
 - The container itself

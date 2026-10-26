@@ -28,12 +28,12 @@ The claude sessions are started in auto mode so it can do work without need a hu
 
 When a project is first started they go through the following *stages*:
 - Bootstrap form: providing name, description and some basic information. The project is not created at this stage, until "Submit" button is clicked.
-- Spec-ing: after creating the project, the development env and the claude session is initialized and the first message is sent to the user. The user proceeds to answer agent's questions and discussing the spec of the webiste. This has 3 substages:
+- Planning: after creating the project, the development env and the claude session is initialized and the first message is sent to the user. The user proceeds to answer agent's questions and discussing the spec of the webiste. This has 3 substages:
   - Gathering business requirements: just general domain and business requirements and the overall website functionality.
   - Confirming ERD: flesh out important entities and their relationships.
   - Confirming the flows: flesh out sequential user flows.
   - Confirming the web pages: individual pages (dashboard, listing page, details page etc) that the website will have.
-- Implementing: once the user approves everything in the spec-ing stage, the agent starts implementing (writing code), turns on the project servers and show the user the preview after it's done. They can then iterate on the website as much as they want.
+- Building: once the user approves everything in the Planning stage, the agent starts building (writing code), turns on the project servers and show the user the preview after it's done. They can then iterate on the website as much as they want.
 - Deployment: after the user is happy with the website, we should them the payment modal, which marks the transition to the deployment stage. Nothing is being done in this stage yet. Also means we don't have any payment logic yet (just showing them a mockup price).
 
 Once the user has been to a stage, then dont go back to a previous stage (even if they might redo some work there). So once the user is shown the preview the preview section will never disappear, even if the user might decide to re-spec the website.
@@ -70,11 +70,11 @@ Each project will have 1 directory like that. The structure of the directory:
 
 CLAUDE.md and backend, frontend are prepared when the platform is setup. For each new project they are copied over that new project's directory.
 
-When the user transitions from the spec-ing phase to the implementing phase, the agent will continue to write codes in backend and frontend, then it will starts the frontend and backend server (using pm2).
+When the user transitions from the planning phase to the building phase, the agent will continue to write codes in backend and frontend, then it will starts the frontend and backend server (using pm2).
 
 So:
-- In spec-ing mode: directory created, claude session online.
-- In implementing mode: directory created, claude session online, project servers online.
+- In planning mode: directory created, claude session online.
+- In building mode: directory created, claude session online, project servers online.
 
 To avoid wasting resources, the claude session and the server processes of each project don't have to be on all the time. Projects that haven't been visited for some time can have their session and servers turned off to save resources. Currently it has to be done manually but later we will design a mechanism to automatically turn off stale projects.
 - Currently we can only withstand 2 projects at a time on the BE. To start a new one we'd usually need to turn off the existing ones. Turning on for 1 project is automatic though (the BE makes sure the claude session and the project servers are on whenever the user visits a project).

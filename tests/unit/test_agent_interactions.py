@@ -27,7 +27,7 @@ def _ask(tool_id="toolu_1", name=ASK_USER_TOOL_NAME):
 
 
 def _approve(tool_id="toolu_a", *names):
-    actions = [{"name": name, "params": {}} for name in names or [AgentAction.APPROVE_SPEC]]
+    actions = [{"name": name, "params": {}} for name in names or [AgentAction.APPROVE_PLAN]]
     return {"type": "tool_use", "id": tool_id, "name": REQUEST_ACTIONS_TOOL_NAME, "input": {"actions": actions}}
 
 
@@ -144,7 +144,7 @@ def test_rejects_invalid_submissions(results, reason):
 
 
 def test_action_answers_are_a_decision():
-    two = _approve("toolu_a", AgentAction.APPROVE_SPEC, AgentAction.APPROVE_IMPLEMENTATION)
+    two = _approve("toolu_a", AgentAction.APPROVE_PLAN, AgentAction.APPROVE_BUILD)
     validate_interaction_results(two, [_decided("approved"), _decided("iterate")])
     validate_interaction_results(two, [{"status": "aborted"}, {"status": "untouched"}])
     with pytest.raises(InvalidSubmission, match="decision"):
@@ -159,10 +159,10 @@ def test_action_answers_are_a_decision():
 def test_only_submitted_approvals_count():
     answered = [
         (_ask(), [_submitted(["Bold"])]),
-        (_approve("toolu_a", AgentAction.APPROVE_SPEC), [_decided("approved")]),
-        (_approve("toolu_b", AgentAction.APPROVE_IMPLEMENTATION), [_decided("iterate")]),
+        (_approve("toolu_a", AgentAction.APPROVE_PLAN), [_decided("approved")]),
+        (_approve("toolu_b", AgentAction.APPROVE_BUILD), [_decided("iterate")]),
     ]
-    assert get_approved_actions(answered) == [AgentAction.APPROVE_SPEC]
+    assert get_approved_actions(answered) == [AgentAction.APPROVE_PLAN]
     assert get_approved_actions([(_approve(), [{"status": "aborted"}])]) == []
 
 
@@ -175,17 +175,17 @@ def _channel_actions(*names):
 
 def test_the_agent_may_ask_for_approvals_that_fit_the_stage():
     validate_session_content(
-        [{"type": "text", "text": "ready?"}, _channel_actions("APPROVE_SPEC")], ProjectStage.SPECING
+        [{"type": "text", "text": "ready?"}, _channel_actions("APPROVE_PLAN")], ProjectStage.PLANNING
     )
-    validate_session_content([_channel_actions("APPROVE_IMPLEMENTATION")], ProjectStage.IMPLEMENTING)
+    validate_session_content([_channel_actions("APPROVE_BUILD")], ProjectStage.BUILDING)
 
 
 @pytest.mark.parametrize(
     ("content", "stage", "reason"),
     [
-        ([{"type": "signal", "slug": "IMPLEMENTATION_DONE"}], ProjectStage.IMPLEMENTING, "send_signal"),
-        ([_channel_actions("DEPLOY_NOW")], ProjectStage.IMPLEMENTING, "unknown actions"),
-        ([_channel_actions("APPROVE_IMPLEMENTATION")], ProjectStage.SPECING, "approve the spec first"),
+        ([{"type": "signal", "slug": "BUILD_APPROVED"}], ProjectStage.BUILDING, "send_signal"),
+        ([_channel_actions("DEPLOY_NOW")], ProjectStage.BUILDING, "unknown actions"),
+        ([_channel_actions("APPROVE_BUILD")], ProjectStage.PLANNING, "approve the plan first"),
     ],
 )
 def test_the_agent_may_not_send(content, stage, reason):
@@ -216,7 +216,7 @@ def test_a_build_is_open_until_its_done():
     assert signals.is_build_open([_signal("BUILDING"), text])
     assert signals.is_build_open([_signal("BUILDING_DONE"), _signal("BUILDING")])
     assert not signals.is_build_open([_signal("BUILDING"), text, _signal("BUILDING_DONE")])
-    assert not signals.is_build_open([text, _signal("IMPLEMENTATION_DONE")])
+    assert not signals.is_build_open([text, _signal("BUILD_APPROVED")])
 
 
 def test_a_turn_is_open_from_the_users_message_until_the_agent_goes_idle():

@@ -36,7 +36,7 @@ from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
 from src.services import activity
-from src.services.agent import implementation, mock, sessions, signals, storage, wakeups
+from src.services.agent import mock, sessions, signals, stages, storage, wakeups
 from src.services.agent.interactions import (
     InvalidSubmission,
     find_pending_interactions,
@@ -213,10 +213,10 @@ async def receive_session_signal(
 
 
 def _refresh_site_preview(project: Project) -> None:
-    """The agent just said something while implementing, so its site may have changed: have the project
-    list's picture of it retaken once it goes quiet (services/devenv/previews). While specing there's no
+    """The agent just said something while building, so its site may have changed: have the project
+    list's picture of it retaken once it goes quiet (services/devenv/previews). While planning there's no
     site yet."""
-    if project["stage"] == ProjectStage.IMPLEMENTING:
+    if project["stage"] == ProjectStage.BUILDING:
         spawn(site_previews.capture_later(project))
 
 
@@ -261,7 +261,7 @@ async def post_user_message(conversation: AiConversation, body: dict[str, Any]) 
     interaction is pending.
 
     Approvals take effect once the answer is stored and BEFORE it's handed to the agent
-    (implementation.apply_approvals): the user's click is what counts, so it holds even if the session
+    (stages.apply_approvals): the user's click is what counts, so it holds even if the session
     can't be reached right then (the 503 still comes, and resending only re-delivers)."""
     await activity.mark_active(conversation["id"])
     pending = find_pending_interactions(await ai_messages_repo.find(conversation["id"]))
@@ -299,7 +299,7 @@ async def post_user_message(conversation: AiConversation, body: dict[str, Any]) 
     approved_actions = get_approved_actions(answered)
     if approved_actions:
         project = await get_conversation_project(conversation)
-        await implementation.apply_approvals(project, conversation["id"], approved_actions)
+        await stages.apply_approvals(project, conversation["id"], approved_actions)
     await _deliver(conversation, user_message)
     return user_message
 

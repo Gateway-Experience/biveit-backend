@@ -10,8 +10,8 @@
 #                            never holds the key
 # Only the agent listener (src/app.py, on the containers' gateway) serves these, never the public API -- so
 # a session token copied out of a container can't spend on our account from outside.
-# Starting implementing and signing it off aren't the agent's to call: the user approves them in the chat
-# (services/agent/implementation).
+# Starting the Building stage and signing it off aren't the agent's to call: the user approves them in the chat
+# (services/agent/stages).
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -77,8 +77,8 @@ async def post_dev_servers(
         return {"servers": await agent_service.control_dev_servers(conversation_id, body.action)}
     except agent_service.ConversationNotFound as error:
         raise HTTPException(status_code=404, detail="CONVERSATION_NOT_FOUND") from error
-    except agent_service.ImplementationNotStarted as error:
-        raise HTTPException(status_code=409, detail="IMPLEMENTATION_NOT_STARTED") from error
+    except agent_service.BuildingNotStarted as error:
+        raise HTTPException(status_code=409, detail="BUILDING_NOT_STARTED") from error
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error

@@ -1,4 +1,4 @@
-# Intentions: signals -- timestamped markers in a conversation's log (BUILDING, IMPLEMENTATION_DONE...),
+# Intentions: signals -- timestamped markers in a conversation's log (BUILDING, BUILD_APPROVED...),
 # each alone in an ASSISTANT message. They replace state we used to keep on the side (the building flag in
 # redis): the log is the only record, and whatever's current is read off its tail. The agent sends a few
 # itself (AGENT_SIGNALS, through POST /agent/signals); the rest we write when we make the thing happen.

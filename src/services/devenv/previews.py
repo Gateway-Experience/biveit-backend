@@ -10,7 +10,7 @@
 # "PROJECT FOLDERS ARE UNTRUSTED INPUT" in CLAUDE.md), and the agent shouldn't get to pick the picture
 # the user is shown -- here it only ever comes out of our own capture.
 #
-# When: a while after the agent last said something while implementing (capture_later -- its changes
+# When: a while after the agent last said something while building (capture_later -- its changes
 # have usually settled by then), and on an open for a project that doesn't have one yet (an older project,
 # or one whose capture failed).
 

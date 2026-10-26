@@ -1,13 +1,13 @@
-# Intentions: the project's implementing milestones, driven by the user's approvals (the agent asks with
-# the APPROVE_SPEC / APPROVE_IMPLEMENTATION actions, the user clicks, conversations.post_user_message
-# hands us the answer). The agent can't start implementing or sign anything off itself -- it can only
+# Intentions: the project's stage milestones, driven by the user's approvals (the agent asks with
+# the APPROVE_PLAN / APPROVE_BUILD actions, the user clicks, conversations.post_user_message
+# hands us the answer). The agent can't start building or sign anything off itself -- it can only
 # ask. Each milestone is recorded twice on purpose, in one go: the project's columns (stage,
-# implementation_done_at -- what lists and payment read) and a signal in the log (when it happened, for
+# build_approved_at -- what lists and payment read) and a signal in the log (when it happened, for
 # the chat).
-#   approving the spec            -> stage implementing, IMPLEMENTATION_STARTED, then the dev environment
-#                                    set up in the background; BUILDING once it's up (the first build
-#                                    starts right away), or DEVENV_FAILED. Either way the session hears.
-#   approving the implementation  -> implementation_done_at, IMPLEMENTATION_DONE, any open build ended.
+#   approving the plan   -> stage building, PLAN_APPROVED, then the dev environment set up in the
+#                           background; the building status (BUILDING) once it's up -- the first build
+#                           starts right away -- or DEVENV_FAILED. Either way the session hears.
+#   approving the build  -> build_approved_at, BUILD_APPROVED, any open build ended.
 # References: AgentAction in constants.py, services/agent/signals.
 
 from datetime import UTC, datetime
@@ -24,30 +24,30 @@ from src.utils.logging import log_error
 
 async def apply_approvals(project: Project, conversation_id: int, approved_actions: list[AgentAction]) -> None:
     """Carry out what the user just approved (interactions.get_approved_actions). Both milestones are
-    idempotent, so approving twice is harmless. An implementation approval while still spec-ing does
+    idempotent, so approving twice is harmless. A build approval while still planning does
     nothing: the agent can't even ask for one then (interactions.validate_session_content)."""
-    if AgentAction.APPROVE_SPEC in approved_actions:
-        await start_implementation(project, conversation_id)
-    if AgentAction.APPROVE_IMPLEMENTATION in approved_actions and project["stage"] == ProjectStage.IMPLEMENTING:
-        await finish_implementation(project, conversation_id)
+    if AgentAction.APPROVE_PLAN in approved_actions:
+        await start_building(project, conversation_id)
+    if AgentAction.APPROVE_BUILD in approved_actions and project["stage"] == ProjectStage.BUILDING:
+        await approve_build(project, conversation_id)
 
 
-async def start_implementation(project: Project, conversation_id: int) -> None:
-    """Move the project to implementing, kick off its dev environment setup, and return right away -- a
-    first setup takes minutes. IMPLEMENTATION_STARTED is written only by the call that actually moves the
+async def start_building(project: Project, conversation_id: int) -> None:
+    """Move the project to building, kick off its dev environment setup, and return right away -- a
+    first setup takes minutes. PLAN_APPROVED is written only by the call that actually moves the
     stage. Calling it again (re-approving, or after a failed setup) is fine: the stage stays, and the
     setup waits for any running one, then reports too.
 
     The stage goes first, before anything is set up: it's what the project should be, and every later
     open re-runs the setup until the workspace matches it (services/projects.open_project) -- which is
     also how a failed setup gets retried."""
-    if project["stage"] == ProjectStage.SPECING:
+    if project["stage"] == ProjectStage.PLANNING:
         # Compare-and-set: of two racing calls only one writes; the other finds it already moved.
         moved = await projects_repo.update(
-            project["id"], {"stage": ProjectStage.IMPLEMENTING}, {"stage": ProjectStage.SPECING}
+            project["id"], {"stage": ProjectStage.BUILDING}, {"stage": ProjectStage.PLANNING}
         )
         if moved:
-            await signals.append_signal(conversation_id, AiSignal.IMPLEMENTATION_STARTED)
+            await signals.append_signal(conversation_id, AiSignal.PLAN_APPROVED)
         await publish_devenv_changed(conversation_id)
     spawn(_set_up_and_report(project, conversation_id))
 
@@ -61,7 +61,7 @@ async def _set_up_and_report(project: Project, conversation_id: int) -> None:
         await signals.append_signal(conversation_id, AiSignal.BUILDING, "Building the first version")
         report = _describe_ready(description)
     except Exception as error:
-        log_error(error, meta={"conversation_id": conversation_id, "source": "start_implementation"})
+        log_error(error, meta={"conversation_id": conversation_id, "source": "start_building"})
         # args[0] is the message; str() of an error raised with a meta dict too would be the tuple.
         reason = f"{type(error).__name__}: {error.args[0] if error.args else error}"
         await signals.append_signal(conversation_id, AiSignal.DEVENV_FAILED, reason)
@@ -96,13 +96,13 @@ def _describe_ready(description: dict) -> str:
     )
 
 
-async def finish_implementation(project: Project, conversation_id: int) -> None:
-    """The user signed off the implemented site. Records it on the project (implementation_done_at, the
+async def approve_build(project: Project, conversation_id: int) -> None:
+    """The user signed off the built site. Records it on the project (build_approved_at, the
     first time only -- it's a milestone, kept even if the user goes on iterating), writes
-    IMPLEMENTATION_DONE (every sign-off: each is a version the user approved), ends any open build, and
+    BUILD_APPROVED (every sign-off: each is a version the user approved), ends any open build, and
     wakes the FE, which starts offering payment/deployment."""
-    if not project["implementation_done_at"]:
-        await projects_repo.update(project["id"], {"implementation_done_at": datetime.now(UTC)})
-    await signals.append_signal(conversation_id, AiSignal.IMPLEMENTATION_DONE)
+    if not project["build_approved_at"]:
+        await projects_repo.update(project["id"], {"build_approved_at": datetime.now(UTC)})
+    await signals.append_signal(conversation_id, AiSignal.BUILD_APPROVED)
     await signals.end_open_build(conversation_id, "The user signed off the site")
     await publish_devenv_changed(conversation_id)

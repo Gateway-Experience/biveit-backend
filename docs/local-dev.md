@@ -18,7 +18,7 @@ browser ── biveit-frontend (Vite, :5173)
               │  starts, in tmux, one per conversation
               ▼
            claude  ── its communication MCP (src/mcps/communication) ── calls back into :3001
-              │  once the agent starts implementing
+              │  once the agent starts building
               ▼
            the user's project: backend :10101 + frontend :10102 (pm2), with its own Mongo db + Redis db
 ```
@@ -51,7 +51,7 @@ git clone <biveit-boilerplate repo URL> biveit-boilerplate
 ```
 
 The backend expects the boilerplate (the app copied into each project once the agent starts
-implementing) at `../biveit-boilerplate`. If you put it elsewhere, set `BOILERPLATE_DIR` in `.env.local`.
+building) at `../biveit-boilerplate`. If you put it elsewhere, set `BOILERPLATE_DIR` in `.env.local`.
 
 ## 3. Start the databases
 
@@ -138,7 +138,7 @@ tmux attach -t conv_9          # watch one (detach with Ctrl-b d, never Ctrl-c)
 ```
 
 **Where things are on disk:** `data/storage_root/<user hash>/<project hash>/<conversation id>/` is a
-project's workspace: the agent's files, the app (`backend/`, `frontend/`) once implementing, the chat's
+project's workspace: the agent's files, the app (`backend/`, `frontend/`) once building, the chat's
 `uploads/` and `artifacts/`, and the dev servers' `logs/`.
 
 ## Useful commands

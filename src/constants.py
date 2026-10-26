@@ -186,7 +186,7 @@ PROJECT_DEV_FRONTEND_PORT_BASE = 16000
 # at a time locally -- another project's would find the ports taken.
 LOCAL_DEV_BACKEND_PORT = 10101
 LOCAL_DEV_FRONTEND_PORT = 10102
-# The boilerplate's apps, copied into the workspace when implementing starts (projects.stage records
+# The boilerplate's apps, copied into the workspace when building starts (projects.stage records
 # that it started; these being there means the setup got that far).
 DEVENV_APP_DIRS = ["backend", "frontend"]
 # Never copied from the boilerplate, wherever they appear: VCS, dependencies, build output, caches, logs,
@@ -211,7 +211,7 @@ DEVENV_NGINX_TEMPLATE = "nginx-dev.conf.tmpl"
 # What the dev backend answers once it's up; checked after the servers start.
 DEVENV_BACKEND_HEALTH_PATH = "/api/debug/health"
 DEVENV_HEALTH_WAIT_SECONDS = 90
-# How long the agent has to go quiet (no message, no signal) while implementing before its site is
+# How long the agent has to go quiet (no message, no signal) while building before its site is
 # photographed for the project list (services/devenv/previews): its changes need a moment to show.
 SITE_PREVIEW_DELAY_SECONDS = 20
 # Per-conversation mutex around setting up. Generous: a first setup runs uv sync and npm install. A
@@ -257,12 +257,12 @@ DEVENV_CONTAINER_LIMITS = {"memory": "3g", "cpus": "1.0", "pids": 2048, "nofile"
 
 
 class ProjectStage(StrEnum):
-    """projects.stage -- where a project is in the building process. Moves forward only (see
-    migrations/0005_projects.sql). The starting form before it is the FE's alone: a project only exists
-    once that's submitted."""
+    """projects.stage -- where a project is in the website creation process: Describing (the starting
+    form, the FE's alone: a project only exists once that's submitted) -> PLANNING -> BUILDING ->
+    Launching (deploying; not a stage here yet). Moves forward only (see migrations/0005_projects.sql)."""
 
-    SPECING = "specing"  # chatting with the agent to work out the spec; no app yet
-    IMPLEMENTING = "implementing"  # the app is set up (or being set up): there's something to preview
+    PLANNING = "planning"  # chatting with the agent to work out the spec; no app yet
+    BUILDING = "building"  # the app is set up (or being set up): there's something to preview
 
 
 # Whether user messages are answered by the stand-in agent (services/agent/mock) instead of being sent to

@@ -117,7 +117,7 @@ async def _claim_introduction(conversation_id: int) -> bool:
 async def introduce_project(project: Project, conversation_id: int) -> None:
     """Start the agent off on a new project: make sure its session is up, and push it the starting
     form's answers (projects.bootstrap_data) and the owner's language (users.language) with the cue to
-    begin spec-ing -- the agent opens the chat. Raises SessionUnavailable. Call ensure_introduced
+    begin planning -- the agent opens the chat. Raises SessionUnavailable. Call ensure_introduced
     instead, which makes it happen once.
 
     Gotcha: the language is only told here, once. If the user switches it later, the agent hears it
@@ -133,7 +133,7 @@ async def introduce_project(project: Project, conversation_id: int) -> None:
             json.dumps(project.get("bootstrap_data") or {}, indent=2, ensure_ascii=False),
             f"Their language: {USER_LANGUAGE_NAMES.get(language, language)} ({language}). Talk to them in it.",
             (
-                "Read CLAUDE.md, start the spec-ing stage now, and open the chat with a message along these lines, "
+                "Read CLAUDE.md, start the Planning stage now, and open the chat with a message along these lines, "
                 "split into bubbles where the <new_bubble/> tags are:\n"
             ),
             "Welcome to your new project *<project name>*. I am your assistant and my role is ",

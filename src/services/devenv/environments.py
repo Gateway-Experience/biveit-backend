@@ -1,4 +1,4 @@
-# Intentions: setting up a conversation's whole dev environment, once its agent starts implementing --
+# Intentions: setting up a conversation's whole dev environment, once its agent starts building --
 # the boilerplate's apps in the workspace, the owner's Mongo access, their env files, the project's
 # container, a first install and the dev servers (both inside it), the dev site -- and describing it.
 #

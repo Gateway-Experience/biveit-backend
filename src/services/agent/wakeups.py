@@ -5,7 +5,7 @@
 # until its next periodic check or reconnect.
 #
 # Its own file so everything that changes what tabs show can wake them (conversations, signals,
-# devenvs, implementation) without importing each other.
+# devenvs, stages) without importing each other.
 
 from src.constants import DEVENV_WAKEUP
 from src.utils import redis

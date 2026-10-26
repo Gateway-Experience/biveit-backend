@@ -91,7 +91,7 @@ def get_approved_actions(answered: list[tuple[dict, list[dict]]]) -> list[AgentA
 def validate_session_content(content: list[dict], stage: ProjectStage) -> None:
     """[Pure] Raise InvalidSessionMessage unless a message from the session (channel format) is one the
     agent may send: no signal blocks (signals go through POST /agent/signals, which checks who may send
-    which), only known actions, and APPROVE_IMPLEMENTATION only once there's an implementation to approve.
+    which), only known actions, and APPROVE_BUILD only once there's a build to approve.
     The MCP's own schema already keeps the agent in line -- this is the backend not trusting it to."""
     if any(block.get("type") == SIGNAL_BLOCK_TYPE for block in content):
         raise InvalidSessionMessage("signals can't be sent as a message -- use the send_signal tool")
@@ -104,10 +104,8 @@ def validate_session_content(content: list[dict], stage: ProjectStage) -> None:
     unknown = [name for name in action_names if name not in list(AgentAction)]
     if unknown:
         raise InvalidSessionMessage(f"unknown actions: {unknown}; known: {list(AgentAction)}")
-    if AgentAction.APPROVE_IMPLEMENTATION in action_names and stage != ProjectStage.IMPLEMENTING:
-        raise InvalidSessionMessage(
-            "APPROVE_IMPLEMENTATION only once implementing has started (approve the spec first)"
-        )
+    if AgentAction.APPROVE_BUILD in action_names and stage != ProjectStage.BUILDING:
+        raise InvalidSessionMessage("APPROVE_BUILD only once the Building stage has started (approve the plan first)")
 
 
 def _check_question_answer(index: int, question: dict, value: Any) -> str | None:

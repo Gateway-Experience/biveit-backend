@@ -28,10 +28,10 @@ _PROJECTS = [
         "hash": "p3hash",
         "user_id": 7,
         "user_hash": "u7hash",
-        "stage": "implementing",
-        "implementation_done_at": None,
+        "stage": "building",
+        "build_approved_at": None,
     },
-    {"id": 4, "hash": "p4hash", "user_id": 99, "user_hash": "u99hash", "stage": "specing"},
+    {"id": 4, "hash": "p4hash", "user_id": 99, "user_hash": "u99hash", "stage": "planning"},
 ]  # 4 is someone else's
 
 
@@ -412,8 +412,8 @@ async def test_the_devenv_status_route_checks_ownership(client, db, monkeypatch)
     response = client.get(f"/api/conversations/{conversation_id}/devenv")
     assert response.status_code == 200
     assert response.json() == {
-        "stage": "implementing",
-        "implementation_done_at": None,
+        "stage": "building",
+        "build_approved_at": None,
         "busy": False,
         "preview_url": "http://localhost:10102",
         "servers": [],
@@ -800,25 +800,25 @@ def approvals(monkeypatch):
         applied.append((project["id"], conversation_id, approved_actions))
 
     monkeypatch.setattr(settings, "session_token_secret", "session-token-secret-for-tests")
-    monkeypatch.setattr(conversations.implementation, "apply_approvals", fake_apply)
+    monkeypatch.setattr(conversations.stages, "apply_approvals", fake_apply)
     return applied
 
 
 def test_approving_takes_effect_and_the_agent_hears_it(client, db, real_agent, approvals):
     conversation_id = _open_conversation(client)
-    tool_use = _agent_requests_approval(client, conversation_id, "APPROVE_IMPLEMENTATION")  # project 3 implements
+    tool_use = _agent_requests_approval(client, conversation_id, "APPROVE_BUILD")  # project 3 implements
     approved = [{"status": "submitted", "value": {"decision": "approved"}}]
     response = client.post(
         f"/api/conversations/{conversation_id}/messages", json=_submission((tool_use["id"], approved))
     )
     assert response.status_code == 201
-    assert approvals == [(3, conversation_id, ["APPROVE_IMPLEMENTATION"])]
+    assert approvals == [(3, conversation_id, ["APPROVE_BUILD"])]
     assert real_agent == [[{"type": "tool_result", "tool_use_id": tool_use["id"], "content": approved}]]
 
 
 def test_keep_iterating_has_no_effect_beyond_the_answer(client, db, real_agent, approvals):
     conversation_id = _open_conversation(client)
-    tool_use = _agent_requests_approval(client, conversation_id, "APPROVE_IMPLEMENTATION")
+    tool_use = _agent_requests_approval(client, conversation_id, "APPROVE_BUILD")
     iterate = [{"status": "submitted", "value": {"decision": "iterate"}}]
     client.post(f"/api/conversations/{conversation_id}/messages", json=_submission((tool_use["id"], iterate)))
     assert approvals == []
@@ -830,19 +830,19 @@ def test_an_approval_holds_even_when_the_session_is_down(client, db, real_agent,
         raise sessions.SessionUnavailable("nobody home")
 
     conversation_id = _open_conversation(client)
-    tool_use = _agent_requests_approval(client, conversation_id, "APPROVE_SPEC")
+    tool_use = _agent_requests_approval(client, conversation_id, "APPROVE_PLAN")
     monkeypatch.setattr(sessions, "send", unreachable)
     approved = [{"status": "submitted", "value": {"decision": "approved"}}]
     response = client.post(
         f"/api/conversations/{conversation_id}/messages", json=_submission((tool_use["id"], approved))
     )
     assert response.status_code == 503
-    assert approvals == [(3, conversation_id, ["APPROVE_SPEC"])]  # the click counted anyway
+    assert approvals == [(3, conversation_id, ["APPROVE_PLAN"])]  # the click counted anyway
 
 
 def test_a_signal_after_the_question_doesnt_hide_it(client, db, real_agent, approvals):
     conversation_id = _open_conversation(client)
-    tool_use = _agent_requests_approval(client, conversation_id, "APPROVE_SPEC")
+    tool_use = _agent_requests_approval(client, conversation_id, "APPROVE_PLAN")
     _post_as_agent(conversation_id, "/api/agent/signals", {"slug": "BUILDING_DONE"})
     assert _say(client, conversation_id, "just text").status_code == 409  # still pending: answer it first
     approved = [{"status": "submitted", "value": {"decision": "approved"}}]
