@@ -146,6 +146,13 @@ class Settings(BaseSettings):
     # key: long, random, never shared. Empty -> rendering a template that asks for a secret fails.
     project_secret_seed: str = ""
 
+    # Name.com, the registrar we buy users' domains through (modules/domains/services/namecom). The api url picks
+    # the environment: https://api.dev.name.com (sandbox) with "<username>-test" + the test token, or
+    # https://api.name.com with the live username + token. Nothing that buys may run against live from a dev box.
+    namecom_api_url: str = "https://api.dev.name.com"
+    namecom_username: str = ""
+    namecom_api_token: str = ""
+
     # CORS -- comma-separated allowed browser origins. Empty falls back to frontend_url. No wildcard:
     # auth rides an httpOnly cookie, so CORS runs WITH credentials, and browsers reject "*" + credentials.
     cors_allowed_origins: str = ""
