@@ -33,6 +33,13 @@ def get_domains(project: Project) -> list[str]:
     return pydash.get(project, "domains.app_domains") or []
 
 
+def get_default_domain(project: Project) -> str | None:
+    """[Pure-ish] The subdomain of ours a project's site can always have, <project hash>.<prod_domain> (under our
+    wildcard certificate, so nothing to set up for it). None without a prod_domain. Only a suggestion: a site is
+    served on whatever's in its domains, this one included only once it's put there."""
+    return f"{project['hash']}.{settings.prod_domain}" if settings.prod_domain else None
+
+
 def get_site_urls(project: Project) -> list[str]:
     return [f"https://{domain}" for domain in get_domains(project)]
 

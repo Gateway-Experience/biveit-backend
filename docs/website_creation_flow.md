@@ -70,7 +70,7 @@ Install dependencies (npm install, uv sync etc).
 
 Start the FE and BE servers inside the container.
 
-Generate a domain name for the preview site under `<project hash>.<DEV_DOMAIN>` (e.g. `<project hash>.proj.biveit.com`), and configure nginx to make it public. The preview site should now be ready.
+Generate a domain name for the preview site under `<project hash>.<DEV_DOMAIN>` (e.g. `<project hash>.dev.biveitapp.com`), and configure nginx to make it public. The preview site should now be ready.
 
 Start building (writing code) for the site. The project's FE and BE dev servers should hot-reload as the code changes.
 

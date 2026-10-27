@@ -16,13 +16,14 @@ from src.modules.deployments.services.deployments import (
     get_deployment_status,
     list_deployments,
 )
-from src.modules.deployments.services.sites import InvalidDomain, set_domains
+from src.modules.deployments.services.sites import InvalidDomain, get_default_domain, set_domains
 
 __all__ = [
     "DeploymentInProgress",
     "InvalidDomain",
     "NothingToDeploy",
     "deploy",
+    "get_default_domain",
     "get_deployment_status",
     "list_deployments",
     "set_domains",

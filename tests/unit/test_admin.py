@@ -83,3 +83,49 @@ def test_an_unknown_project_is_404(services):
     assert client.get("/api/admin/projects/99").status_code == 404
     assert client.post("/api/admin/projects/99/stop").status_code == 404
     assert services["stopped"] == []
+
+
+@pytest.fixture
+def deploying(services, monkeypatch):
+    """The deployments module and the owner's conversation faked; records the domains set and what's deployed."""
+    calls = {"domains": [], "deployed": []}
+
+    async def find_projects(criteria):
+        return [{**_PROJECT, "user_id": 2}] if criteria == {"id": 16} else []
+
+    async def get_current_conversation(project_id, user_id):
+        assert user_id == 2  # as its owner
+        return {"id": 13}
+
+    async def set_domains(project, domains):
+        calls["domains"] = [*calls["domains"], domains]
+        return domains
+
+    async def deploy(project, conversation_id):
+        calls["deployed"] = [*calls["deployed"], (project["id"], conversation_id)]
+        return {"run_id": "r1", "commit": "abc"}
+
+    monkeypatch.setattr(admin.projects_repo, "find", find_projects)
+    monkeypatch.setattr(admin.agent_service, "get_current_conversation", get_current_conversation)
+    monkeypatch.setattr(admin.deployments, "set_domains", set_domains)
+    monkeypatch.setattr(admin.deployments, "deploy", deploy)
+    monkeypatch.setattr(admin.deployments, "get_default_domain", lambda project: "p16hash.prod.biveitapp.com")
+    return calls
+
+
+def test_deploying_without_a_domain_uses_the_default_one(deploying):
+    client = _client_as(_ADMIN)
+    response = client.post("/api/admin/projects/16/deployments", json={"domains": []})
+    assert response.status_code == 202 and response.json() == {"run_id": "r1", "commit": "abc"}
+    response = client.post("/api/admin/projects/16/deployments", json={"domains": ["shop.example.com"]})
+    assert response.status_code == 202
+    assert deploying["domains"] == [["p16hash.prod.biveitapp.com"], ["shop.example.com"]]
+    assert deploying["deployed"] == [(16, 13), (16, 13)]
+    assert _client_as(_USER).post("/api/admin/projects/16/deployments", json={"domains": []}).status_code == 403
+
+
+def test_deploying_without_any_domain_to_use_is_refused(deploying, monkeypatch):
+    monkeypatch.setattr(admin.deployments, "get_default_domain", lambda project: None)
+    response = _client_as(_ADMIN).post("/api/admin/projects/16/deployments", json={"domains": []})
+    assert response.status_code == 400 and response.json()["detail"] == "NO_DOMAIN"
+    assert deploying["deployed"] == []
