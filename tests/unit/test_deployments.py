@@ -413,6 +413,8 @@ async def test_a_subdomain_of_ours_uses_the_wildcard_certificate(host, monkeypat
     ]
     assert host["written"].count("/etc/letsencrypt/live/sites.biveit.app/fullchain.pem") == 1
     assert "/etc/letsencrypt/live/shop.example.com/fullchain.pem" in host["written"]
+    # HTTP/1.1 to the container, or its gzip stays off.
+    assert host["written"].count("proxy_http_version 1.1;") == len(domains)
 
 
 async def test_without_domains_there_is_no_site(host, tmp_path):

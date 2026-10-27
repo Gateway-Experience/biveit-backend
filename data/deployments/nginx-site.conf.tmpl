@@ -28,6 +28,10 @@ server {
     # The site's container, which serves everything (its own nginx routes /api/).
     location / {
         proxy_pass http://127.0.0.1:{{{site_port}}};
+        # nginx speaks HTTP/1.0 to upstreams by default, and the container's gzip only answers HTTP/1.1: without
+        # this every asset goes out uncompressed (a 1 MB bundle instead of ~380 KB).
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;
         # Overwrite, never append: the backend trusts the first hop as the client IP.
