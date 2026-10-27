@@ -20,6 +20,11 @@ SITE_CONTAINER_LIMITS = {"memory": "512m", "cpus": "0.5", "pids": 512, "tmp_size
 SITE_IMAGE_DIR = "data/deployments/image"
 SITE_NGINX_TEMPLATE = "data/deployments/nginx-site.conf.tmpl"
 SITE_ENV_TEMPLATE = "backend/.env.prod.tmpl"
+# The site's apps are built in a throwaway container (services/images): the devenv image running SITE_BUILD_SCRIPT
+# as SITE_BUILD_UID, with these ceilings. The whole build (install + compile) has SITE_BUILD_TIMEOUT_SECONDS.
+SITE_BUILD_SCRIPT = "data/deployments/build.sh"
+SITE_BUILD_UID = 10001
+SITE_BUILD_LIMITS = {"memory": "2g", "cpus": "1.0", "pids": 1024, "tmp_size": "256m"}
 SITE_BUILD_TIMEOUT_SECONDS = 20 * 60
 
 # A deployment tries this many times (each attempt picks up where the last one got to), waiting

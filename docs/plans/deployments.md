@@ -12,7 +12,7 @@ setup it needs, and how to check it by hand.
 
   | Step | Done when |
   |---|---|
-  | image `biveit-<env>-site-<id>:<commit>` | the tag exists (same commit, never built twice) |
+  | image `biveit-<env>-site-<id>:<commit>` (apps built in a sandboxed container, then packaged) | the tag exists (same commit, never built twice) |
   | prod Mongo user `site_<id>` on `db_project_<id>` | always ensured (idempotent) |
   | site container `biveit-<env>-site-<id>` | runs this commit (its label) and answers `/api/debug/health` |
   | nginx site + a certificate per domain (or our wildcard) | certbot keeps valid certs; nginx reloads only on change |
@@ -21,8 +21,12 @@ setup it needs, and how to check it by hand.
   After the last one, the commit that was live is rolled out again the same way (its image is still there).
 - **Nothing about what's live is stored:** docker's labels say what runs, git says whether the workspace changed
   since. The log is the `events` table (`deployment.*`, grouped by run id): history only.
-- **The site container**: our Dockerfile (`data/deployments/image/`) builds the frontend and the backend's venv;
-  the container runs nginx (built frontend, `/api/` to the backend), the backend and its own Redis. No mount of
+- **The build** runs the project's code (npm scripts, Vite config, Python build hooks), so it happens in a
+  throwaway container as sandboxed as a dev container: the devenv image, uid 10001, no capabilities, the projects'
+  network, limits, no host folder. `data/deployments/build.sh` builds the frontend and the backend's venv at
+  `/app`; the container is committed as a temporary image, and our Dockerfile (`data/deployments/image/`) only
+  copies the results out of it -- no project code runs in `docker build`.
+- **The site container** runs nginx (built frontend, `/api/` to the backend), the backend and its own Redis. No mount of
   the project's folder, a named volume for `/data`, published on `127.0.0.1:24000+id`, the projects' network,
   `--restart=unless-stopped`, no capabilities.
 - **Prod is apart from dev**: its own Mongo user and secrets (`project:<id>:prod:<name>`), rendered from the
@@ -72,8 +76,6 @@ setup it needs, and how to check it by hand.
 ## Not done yet
 
 - Gating (payment / plan) before the FE offers deploying.
-- The build's RUN steps (npm ci, vite, uv sync) run the project's code on docker's default build network: move them
-  to a buildx builder on the projects' network (firewalled).
 - Tearing a site down (project deleted / unpaid): container, volume, images, nginx file.
 - Env keys the agent adds in dev (`.env.local`) don't reach prod; only the template's do.
 - Prod "elsewhere": every prod command is local docker / sudo today.

@@ -269,7 +269,7 @@ def test_a_site_container_gets_no_host_folder_and_publishes_on_localhost_only():
     ]
 
 
-# --- the build context ---
+# --- the build ---
 
 
 def _tar(entries):
@@ -287,23 +287,51 @@ def _tar(entries):
     return buffer.getvalue()
 
 
-def test_the_build_context_is_our_files_plus_the_apps(tmp_path):
-    images._prepare_build_context(str(tmp_path), _tar([("backend/main.py", "file", b"app")]))
-    assert (tmp_path / "Dockerfile").is_file() and (tmp_path / "app" / "backend" / "main.py").read_bytes() == b"app"
+def test_the_apps_go_into_the_build_container_owned_by_its_user_with_links_left_as_links():
+    archive = images._to_build_archive(
+        _tar([("backend/main.py", "file", b"app"), ("backend/leak", "symlink", "/etc/passwd")])
+    )
+    with tarfile.open(fileobj=io.BytesIO(archive)) as packed:
+        members = {member.name: member for member in packed.getmembers()}
+        assert list(members) == ["app", "app/backend/main.py", "app/backend/leak"]
+        assert members["app"].isdir() and {(m.uid, m.gid) for m in members.values()} == {(10001, 10001)}
+        assert packed.extractfile("app/backend/main.py").read() == b"app"
+        assert members["app/backend/leak"].issym() and members["app/backend/leak"].linkname == "/etc/passwd"
 
 
-@pytest.mark.parametrize(
-    "entry",
-    [
-        ("backend/leak", "symlink", "/etc/passwd"),
-        ("backend/up", "symlink", "../../../../outside"),
-        ("../escape", "file", b"x"),
-    ],
-)
-def test_the_build_context_refuses_anything_pointing_out_of_it(tmp_path, entry):
-    with pytest.raises(tarfile.FilterError):
-        images._prepare_build_context(str(tmp_path / "context"), _tar([entry]))
-    assert not (tmp_path / "escape").exists()
+def test_the_build_container_is_sandboxed_like_a_dev_container():
+    argv = images._to_build_argv("biveit-dev-site-42-build")
+    assert {"--init", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--network=biveit-projects"} <= set(argv)
+    assert "--user=10001:10001" in argv and "--memory=2g" in argv and "--memory-swap=2g" in argv
+    assert not [option for option in argv if option.startswith(("--volume", "--mount", "--publish", "--privileged"))]
+    assert argv[-3:-1] == ["bash", "-c"] and "npm run build" in argv[-1]
+
+
+async def test_a_failed_build_still_cleans_up_its_container_and_image(monkeypatch):
+    state = {"ran": []}
+
+    async def fake_run_command(argv, cwd=None, input_text=None, timeout_seconds=600, env=None):
+        state["ran"] = [*state["ran"], argv]
+        if argv[:2] == ["docker", "start"]:
+            raise images.CommandFailed("npm ci exited 1")
+        return ""
+
+    async def nothing():
+        pass
+
+    monkeypatch.setattr(images, "run_command", fake_run_command)
+    monkeypatch.setattr(images.devenv, "ensure_network", nothing)
+    with pytest.raises(images.CommandFailed):
+        await images.build_image(42, "biveit-dev-site-42:abc", _tar([("backend/main.py", "file", b"app")]))
+    assert [argv[:3] for argv in state["ran"]] == [
+        ["docker", "rm", "--force"],
+        ["docker", "create", "--name=biveit-dev-site-42-build"],
+        ["docker", "cp", "-"],
+        ["docker", "start", "--attach"],
+        ["docker", "rm", "--force"],
+        ["docker", "image", "rm"],
+    ]
+    assert state["ran"][-1] == ["docker", "image", "rm", "biveit-dev-site-42-build:abc"]
 
 
 # --- the prod env ---
