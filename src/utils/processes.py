@@ -29,28 +29,51 @@ async def run_command(
     """Run argv (no shell) and return its output, stdout and stderr together. Raises CommandFailed on a
     non-zero exit or a timeout (the process is killed then). `input_text` (text, or raw bytes) is fed to its
     stdin; `env` replaces get_base_env() as the command's whole environment."""
+    output = await _run(argv, cwd, input_text, timeout_seconds, env, merge_stderr=True)
+    return output.decode(errors="replace")
+
+
+async def run_command_binary(
+    argv: list[str],
+    cwd: str | None = None,
+    timeout_seconds: float = 600,
+    env: dict[str, str] | None = None,
+) -> bytes:
+    """run_command for a command whose output is DATA (an archive...): its stdout as raw bytes, stderr kept
+    apart so it can't corrupt them -- it only shows up in the CommandFailed message."""
+    return await _run(argv, cwd, None, timeout_seconds, env, merge_stderr=False)
+
+
+async def _run(
+    argv: list[str],
+    cwd: str | None,
+    input_text: str | bytes | None,
+    timeout_seconds: float,
+    env: dict[str, str] | None,
+    merge_stderr: bool,
+) -> bytes:
     process = await asyncio.create_subprocess_exec(
         *argv,
         cwd=cwd,
         stdin=asyncio.subprocess.PIPE if input_text is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        stderr=asyncio.subprocess.STDOUT if merge_stderr else asyncio.subprocess.PIPE,
         env=env if env is not None else get_base_env(),
     )
     try:
-        stdout, _ = await asyncio.wait_for(
+        stdout, stderr = await asyncio.wait_for(
             process.communicate(input_text.encode() if isinstance(input_text, str) else input_text), timeout_seconds
         )
     except TimeoutError as error:
         process.kill()
         await process.wait()
         raise CommandFailed(f"`{shlex.join(argv)}` timed out after {timeout_seconds}s", {"cwd": cwd}) from error
-    output = stdout.decode(errors="replace")
     if process.returncode != 0:
+        output = (stdout if merge_stderr else stderr).decode(errors="replace")
         raise CommandFailed(
             f"`{shlex.join(argv)}` exited {process.returncode}:\n{output[-_OUTPUT_TAIL_CHARS:]}", {"cwd": cwd}
         )
-    return output
+    return stdout
 
 
 def get_base_env() -> dict[str, str]:

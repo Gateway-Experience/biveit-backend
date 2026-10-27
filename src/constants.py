@@ -194,7 +194,7 @@ DEVENV_APP_DIRS = ["backend", "frontend"]
 # stay in the boilerplate, which is the only place they're ever rendered from.
 DEVENV_COPY_SKIPPED_NAMES = [
     ".git", "node_modules", ".venv", "dist", "logs", "__pycache__", ".pytest_cache", ".ruff_cache",
-    ".env", ".env.local", ".env.dev", ".env.prod", ".env.local.tmpl", ".env.tmpl",
+    ".env", ".env.local", ".env.dev", ".env.prod", ".env.local.tmpl", ".env.tmpl", ".env.prod.tmpl",
 ]  # fmt: skip
 # The project's env files: (template, relative to BOILERPLATE_DIR -- each app keeps its own, since it knows
 # its own config keys; output, relative to the workspace). Written once, never overwritten: they hold

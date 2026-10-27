@@ -126,6 +126,16 @@ class Settings(BaseSettings):
     dev_domain: str = ""
     # Where each project's nginx site file goes (written with sudo, then nginx is reloaded).
     nginx_sites_dir: str = "/etc/nginx/conf.d"
+    # Production sites (modules/deployments) get a Let's Encrypt certificate per domain, from certbot's webroot
+    # challenge: certbot_webroot is the folder nginx serves /.well-known/acme-challenge/ from (the host's
+    # catch-all server and every site's port-80 block). certbot_email gets Let's Encrypt's expiry notices;
+    # empty -> registered without one.
+    certbot_webroot: str = "/var/www/certbot"
+    certbot_email: str = ""
+    # Our own domain for production sites, with a wildcard certificate for *.<prod_domain> set up once on the
+    # VPS (at /etc/letsencrypt/live/<prod_domain>/, like dev_domain's). A site domain right under it uses that
+    # certificate instead of getting its own. Empty -> every domain gets its own.
+    prod_domain: str = ""
     # The platform's Mongo, for the projects' own apps (databases db_project_dev_<id> / db_project_<id>).
     # project_mongo_uri is OUR login, used only to manage the per-owner Mongo users (services/devenv/
     # databases), so it needs the userAdmin role. project_mongo_host is where the projects' apps reach the

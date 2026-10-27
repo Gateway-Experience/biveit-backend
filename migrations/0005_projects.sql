@@ -31,6 +31,10 @@
 -- folder_id: the user's folder it sits directly in (project_folders); NULL = at the root. Always a live
 -- folder or NULL: deleting a folder clears it. Added by 0008_project_folders.sql, since that table comes
 -- after this one. Same rule: never touches updated_at.
+-- domains: where the project's production site is served (modules/deployments), as
+-- {"app_domains": [...]} -- the user's own domains and subdomains of ours alike, all listed. Added after the
+-- table first shipped: an existing DB needs
+-- `ALTER TABLE projects ADD COLUMN IF NOT EXISTS domains jsonb NOT NULL DEFAULT '{}';` by hand.
 -- meta: free-form app-level data (settings, flags) until a field earns its own column.
 -- Project content (pages, source files, assets, deployments) belongs in its own tables pointing at
 -- projects.id, not in columns here.
@@ -46,6 +50,7 @@ CREATE TABLE IF NOT EXISTS projects
     bootstrap_data jsonb      NOT NULL DEFAULT '{}',          -- the starting form's answers
     build_approved_at TIMESTAMPTZ,                             -- NULL until the user signed off a version
     pinned_at   TIMESTAMPTZ,                                   -- NULL = not pinned
+    domains     jsonb        NOT NULL DEFAULT '{}',            -- {"app_domains": [...]}
     meta        jsonb        NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),

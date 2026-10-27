@@ -1,0 +1,8 @@
+# The workspace is a git repository: every deployment of the site is a commit of it (the platform commits
+# whatever's there when it deploys). Each app ignores its own dependencies, build output and env files;
+# these are the workspace's own.
+logs/
+uploads/
+ecosystem.config.cjs
+node_modules/
+.venv/

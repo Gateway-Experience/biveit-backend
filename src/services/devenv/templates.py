@@ -1,5 +1,5 @@
-# Intentions: rendering a project's files from the templates in DEVENV_TEMPLATES_DIR (adapted from
-# gateway-exp-deployment's render_env.py).
+# Intentions: rendering a project's DEV files from the templates in DEVENV_TEMPLATES_DIR, with utils/templates
+# (adapted from gateway-exp-deployment's render_env.py). This file is the dev scope.
 #
 # A template is any text file where `{{{<python expression>}}}` is replaced by its value. In scope:
 #   project_id, conversation_id
@@ -11,24 +11,21 @@
 #   settings                the backend's settings, e.g. {{{settings.dev_domain}}} -- never its credentials:
 #                           whatever a template renders, the project's agent can read
 #   secret(name, length=48) a secret DERIVED from PROJECT_SECRET_SEED, the project id and the name
-#                           (devenv/secrets), so it's the same every time it's rendered (dev and prod env
-#                           files share it) and different in every project. Nothing to store.
+#                           (devenv/secrets), so it's the same every time it's rendered and different in
+#                           every project. Nothing to store. (Prod secrets are derived apart: modules/deployments.)
 # Credentials come in through `settings`, so the templates themselves hold none and can be committed.
 # Templates are ours and trusted: expressions run with eval, without builtins.
 
 import os
-import re
 
 from src.config import settings
 from src.constants import DEVENV_INTERNAL_BACKEND_PORT, DEVENV_INTERNAL_FRONTEND_PORT
 from src.dto.projects import Project
 from src.services.devenv import addresses, databases, secrets, workspaces
+from src.utils import templates
+from src.utils.templates import TemplateFailed
 
-_PLACEHOLDER = re.compile(r"\{\{\{(.+?)\}\}\}")
-
-
-class TemplateFailed(Exception):
-    """A template is missing, or one of its expressions failed. The message names the template."""
+__all__ = ["TemplateFailed", "render_template", "render_template_file"]
 
 
 def render_template(template_name: str, project: Project, conversation_id: int) -> str:
@@ -43,14 +40,7 @@ def render_template_file(template_path: str, project: Project, conversation_id: 
     """[Pure-ish] Any template of OURS (a platform template, or one in the boilerplate checkout) rendered for
     this project's workspace -- never one from a workspace: its expressions run (eval), and a workspace is
     the agent's. Raises TemplateFailed."""
-    template_name = os.path.basename(template_path)
-    scope = _get_scope(project, conversation_id)
-    try:
-        with open(template_path, encoding="utf-8") as template_file:
-            template_text = template_file.read()
-        return _PLACEHOLDER.sub(lambda match: str(eval(match.group(1), {"__builtins__": {}}, scope)), template_text)
-    except Exception as error:
-        raise TemplateFailed(f"{template_name}: {type(error).__name__}: {error}") from error
+    return templates.render_template_file(template_path, _get_scope(project, conversation_id))
 
 
 def _get_scope(project: Project, conversation_id: int) -> dict:

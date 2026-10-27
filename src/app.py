@@ -22,6 +22,7 @@ from src.controllers.admin import router as admin_router
 from src.controllers.agent import router as agent_router
 from src.controllers.auth import router as auth_router
 from src.controllers.conversations import router as conversations_router
+from src.controllers.deployments import router as deployments_router
 from src.controllers.domains import admin_router as domains_admin_router
 from src.controllers.domains import router as domains_router
 from src.controllers.project_folders import router as project_folders_router
@@ -164,6 +165,7 @@ def create_app() -> FastAPI:
     app.include_router(projects_router, prefix=_API_PREFIX)
     app.include_router(project_folders_router, prefix=_API_PREFIX)
     app.include_router(conversations_router, prefix=_API_PREFIX)
+    app.include_router(deployments_router, prefix=_API_PREFIX)
     app.include_router(domains_router, prefix=_API_PREFIX)
     app.include_router(domains_admin_router, prefix=_API_PREFIX)
     app.include_router(system_configurations_router, prefix=_API_PREFIX)

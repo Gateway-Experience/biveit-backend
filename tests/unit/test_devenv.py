@@ -12,7 +12,7 @@ from src.config import settings
 from src.constants import DEVENV_ENV_FILES, DevServerAction
 from src.services import devenv
 from src.services.devenv import addresses, containers, databases, environments, servers, sites, templates, workspaces
-from src.utils import paths
+from src.utils import nginx, paths
 from src.utils.processes import CommandFailed, get_base_env, run_command
 
 _PROJECT = {"id": 42, "hash": "p42hash", "user_id": 7, "user_hash": "u7hash"}
@@ -247,7 +247,7 @@ def commands(monkeypatch):
     async def running(project_id):
         return True
 
-    monkeypatch.setattr(sites, "run_command", fake_run_command)
+    monkeypatch.setattr(nginx, "run_command", fake_run_command)
     monkeypatch.setattr(containers, "run_in_container", fake_run_in_container)
     monkeypatch.setattr(containers, "is_container_running", running)
     monkeypatch.setattr(containers, "ensure_container", nothing_to_do)
@@ -432,7 +432,7 @@ async def test_a_site_nginx_rejects_is_removed_again(nginx_dir, monkeypatch):
             raise CommandFailed("`nginx -t` exited 1")
         return ""
 
-    monkeypatch.setattr(sites, "run_command", nginx_rejects)
+    monkeypatch.setattr(nginx, "run_command", nginx_rejects)
     with pytest.raises(CommandFailed):
         await sites.ensure_dev_site(_PROJECT, 9)
     assert ran[-1] == ["sudo", "-n", "rm", "-f", str(nginx_dir / "biveit-project-42.conf")]

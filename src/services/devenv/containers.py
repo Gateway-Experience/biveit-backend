@@ -37,7 +37,7 @@ from src.constants import (
 from src.dto.projects import Project
 from src.repositories import projects as projects_repo
 from src.services.devenv import addresses, workspaces
-from src.utils.processes import CommandFailed, run_command
+from src.utils.processes import CommandFailed, run_command, run_command_binary
 
 # The account the container's processes run as -- ours, by uid -- named inside the container, since some
 # tools look the user up by name.
@@ -144,18 +144,28 @@ async def run_in_container(
     its own environment -- so no secret shows up in `ps`."""
     env_vars = env or {}
     return await run_command(
-        [
-            "docker",
-            "exec",
-            *(["--workdir", cwd] if cwd else []),
-            *(["--user", user] if user else []),
-            *[option for name in env_vars for option in ("--env", name)],
-            get_container_name(project_id),
-            *argv,
-        ],
+        _to_exec_argv(project_id, argv, cwd, user, env_vars),
         timeout_seconds=timeout_seconds,
         env={**_get_docker_env(), **env_vars} if env_vars else None,
     )
+
+
+async def run_in_container_binary(project_id: int, argv: list[str], cwd: str | None = None) -> bytes:
+    """run_in_container for a command whose output is data (e.g. `git archive`): its stdout, as raw bytes."""
+    return await run_command_binary(_to_exec_argv(project_id, argv, cwd, None, {}))
+
+
+def _to_exec_argv(project_id: int, argv: list[str], cwd: str | None, user: str | None, env_vars: dict) -> list[str]:
+    """[Pure-ish] The `docker exec` running argv in the project's container (see run_in_container)."""
+    return [
+        "docker",
+        "exec",
+        *(["--workdir", cwd] if cwd else []),
+        *(["--user", user] if user else []),
+        *[option for name in env_vars for option in ("--env", name)],
+        get_container_name(project_id),
+        *argv,
+    ]
 
 
 async def extract_into_container(project_id: int, archive: bytes, container_dir: str) -> None:

@@ -19,7 +19,7 @@ from src.utils import postgres
 
 _COLUMNS = """
     id, hash, user_id, name, description, stage, bootstrap_data, build_approved_at, pinned_at,
-    folder_id, meta, created_at, updated_at, trashed_at, deleted_at
+    folder_id, domains, meta, created_at, updated_at, trashed_at, deleted_at
 """
 
 # `updated_at` IS writable, and never set implicitly: it means "the user last edited this project" (the
@@ -34,6 +34,7 @@ _WRITABLE_COLUMNS = [
     "build_approved_at",
     "pinned_at",
     "folder_id",
+    "domains",
     "meta",
     "updated_at",
     "trashed_at",

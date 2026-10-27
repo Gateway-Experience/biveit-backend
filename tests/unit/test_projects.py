@@ -29,6 +29,7 @@ def _project(**overrides):
         "build_approved_at": None,
         "pinned_at": None,
         "folder_id": None,
+        "domains": {},
         "meta": {},
         "created_at": "2026-10-01T00:00:00Z",
         "updated_at": "2026-10-02T00:00:00Z",

@@ -9,6 +9,7 @@
 #   templates.py     rendering a project's files from DEVENV_TEMPLATES_DIR
 #   addresses.py     a project's dev ports and URL, derived from its id
 #   containers.py    the project's container (where its dev servers, Redis and agent will run)
+#   secrets.py       secrets derived from PROJECT_SECRET_SEED (nothing stored)
 #
 # It doesn't know about the agent or the chat -- services/agent builds on it, never the other way round.
 # Callers import THIS package (`from src.services import devenv`), not the files.
@@ -25,6 +26,7 @@ from src.services.devenv.containers import (
     list_running_project_ids,
     remove_container,
     run_in_container,
+    run_in_container_binary,
     stop_container,
     to_container_path,
 )
@@ -35,6 +37,7 @@ from src.services.devenv.environments import (
     get_devenv_status,
     stop_dev_servers,
 )
+from src.services.devenv.secrets import derive_secret
 from src.services.devenv.workspaces import (
     ensure_workspace,
     get_conversation_dir,
@@ -45,6 +48,7 @@ from src.services.devenv.workspaces import (
 __all__ = [
     "ContainerUnavailable",
     "control_dev_servers",
+    "derive_secret",
     "describe_devenv",
     "ensure_container",
     "ensure_devenv",
@@ -62,6 +66,7 @@ __all__ = [
     "list_running_project_ids",
     "remove_container",
     "run_in_container",
+    "run_in_container_binary",
     "stop_container",
     "stop_dev_servers",
     "to_container_path",
