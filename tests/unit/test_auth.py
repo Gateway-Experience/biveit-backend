@@ -110,7 +110,7 @@ def _set_cookie_headers(response: Response) -> list[str]:
 
 
 def test_login_sets_a_readable_marker_for_the_landing_domain(monkeypatch):
-    monkeypatch.setattr(auth.settings, "signed_in_cookie_domain", "biveit.com")
+    monkeypatch.setattr(auth.settings, "root_domain", "biveit.com")
     response = Response()
     auth.set_access_cookie(response, "token")
     marker = next(header for header in _set_cookie_headers(response) if header.startswith(auth.SIGNED_IN_COOKIE))
