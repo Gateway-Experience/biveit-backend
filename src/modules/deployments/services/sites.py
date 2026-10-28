@@ -5,7 +5,8 @@
 #
 # Proving ownership of a user's own domain takes two DNS records: an A record pointing at the server (traffic,
 # and the certificate) and a TXT record at _biveit-verify.<domain> holding a token derived from the project and
-# the domain -- so nothing is stored, and nobody can attach a domain that points at us but isn't theirs.
+# the domain -- so nothing is stored, and nobody can attach a domain that points at us but isn't theirs. And no
+# AAAA record: Let's Encrypt tries IPv6 first, so one pointing at the domain's old host fails the certificate.
 #
 # A domain right under settings.prod_domain uses our wildcard certificate, which already exists. Every other
 # one gets its own Let's Encrypt certificate from certbot's webroot challenge: the first one is answered by the
@@ -76,8 +77,10 @@ async def attach_domain(project: Project, domain: str, kind: SiteDomainKind, act
 
 async def check_external_domain(project: Project, domain: str) -> dict:
     """Whether a user's own domain can be attached to the project, and whether its DNS records are in place:
-    {domain (normalized), blocked: None | "invalid" | "ours" | "taken", records: [{type, name, value, found}],
-    verified (both records found)}. The lookups ask public resolvers, not the server's cache, so a record the user
+    {domain (normalized), blocked: None | "invalid" | "ours" | "taken", records: [{type, name, value, action,
+    found}], verified}. action "add": a record the user must have (the A and the TXT); "remove": one they must take
+    off (any AAAA, listed only when there is one). verified = every "add" found and no "remove" left. The lookups
+    ask public resolvers, not the server's cache, so a record the user
     just added shows up as soon as it's out there. [I/O: reads]"""
     try:
         normalized = normalize_domain(domain)
@@ -92,16 +95,19 @@ async def check_external_domain(project: Project, domain: str) -> dict:
         blocked = None
     proof_name = f"{DOMAIN_PROOF_PREFIX}.{normalized}"
     proof_value = f"biveit-verify={get_domain_proof_token(project, normalized)}"
-    a_values, txt_values = await asyncio.gather(_resolve(normalized, "A"), _resolve(proof_name, "TXT"))
+    a_values, txt_values, aaaa_values = await asyncio.gather(
+        _resolve(normalized, "A"), _resolve(proof_name, "TXT"), _resolve(normalized, "AAAA")
+    )
     records = [
-        {"type": "A", "name": normalized, "value": settings.server_public_ip, "found": settings.server_public_ip in a_values},
-        {"type": "TXT", "name": proof_name, "value": proof_value, "found": proof_value in txt_values},
+        {"type": "A", "name": normalized, "value": settings.server_public_ip, "action": "add", "found": settings.server_public_ip in a_values},
+        {"type": "TXT", "name": proof_name, "value": proof_value, "action": "add", "found": proof_value in txt_values},
+        *[{"type": "AAAA", "name": normalized, "value": value, "action": "remove", "found": True} for value in sorted(aaaa_values)],
     ]  # fmt: skip
     return {
         "domain": normalized,
         "blocked": blocked,
         "records": records,
-        "verified": blocked is None and all(record["found"] for record in records),
+        "verified": blocked is None and all(record["found"] == (record["action"] == "add") for record in records),
     }
 
 

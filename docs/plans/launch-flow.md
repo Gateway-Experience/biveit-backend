@@ -93,8 +93,9 @@ subscription renews.
 
 ### 5. After payment
 - "Payment received" -> "going live" checklist: payment confirmed, domain registered, address set up, building
-  and starting the site, live. A brought domain without its records waits at "waiting for your DNS" (the site is
-  already built, so it goes live the moment DNS shows up).
+  and starting the site, live. A brought domain without its records waits at "waiting for your DNS" (records
+  re-checked every 30 s while the page is open, and every 5 minutes in the background), then the site is built and
+  goes live. If the site already runs on another domain, it stays there until the new one's records are found.
 - The dialog can be closed anytime; the Launch tab shows the same progress.
 - Done: "Your site is live at https://..." + open / preview.
 - Just the code: "Thanks! Download your code."

@@ -12,6 +12,7 @@ from src.dto.launch import LaunchCheckoutRequest
 from src.modules import deployments
 from src.modules.deployments.services import sites
 from src.modules.domains import DomainUnavailable, RegistrarError
+from src.services.launch import access as launch_access
 from src.services.launch import checkouts, fulfilment, intents, status
 
 _NOW = datetime(2026, 10, 28, 12, tzinfo=UTC)
@@ -124,6 +125,9 @@ def launch_world(monkeypatch):
     async def get_intent(launch_id):
         return state["intents"].get(launch_id)
 
+    async def get_domain_failures(project_id):
+        return state.get("failures", [])
+
     async def create_plan_checkout(user, project, plan, extra):
         state["checkouts"] = [*state["checkouts"], ("plan", plan)]
         return f"https://pay/{plan}"
@@ -139,6 +143,7 @@ def launch_world(monkeypatch):
     monkeypatch.setattr(checkouts.deployments, "check_external_domain", check_external_domain)
     monkeypatch.setattr(checkouts.intents, "record_intent", record_intent)
     monkeypatch.setattr(checkouts.intents, "get_intent", get_intent)
+    monkeypatch.setattr(checkouts.intents, "get_domain_failures", get_domain_failures)
     return state
 
 
@@ -184,6 +189,47 @@ async def test_finishing_a_yearly_launch_keeps_the_free_year(launch_world):
     )
     assert launch_world["checkouts"][-1] == ("domain", "other.com", 15, True)
     assert [checkout[0] for checkout in launch_world["checkouts"]].count("plan") == 1
+
+
+async def test_after_a_bought_domain_fails_another_can_be_bought_keeping_the_free_year(launch_world):
+    first = await checkouts.start_checkout(
+        _PROJECT, _USER, _request(plan="yearly", domain={"kind": "buy", "name": "a.com"}, registrant=_REGISTRANT)
+    )
+    # a.com was paid for, then couldn't be registered: its subscription is cancelled (but still "running" until
+    # its period ends) and the failure recorded.
+    launch_world["access"] = {
+        "can_download": True, "can_host": True, "plan": "yearly",
+        "plan_subscription": {"custom_data": {"launch_id": first["launch_id"]}},
+        "domain_subscription": {"provider_ref": "sub-a", "status": "cancelled", "product_data": {"domain": "a.com"}},
+    }  # fmt: skip
+    launch_world["failures"] = [{"subscription_ref": "sub-a", "launch_id": first["launch_id"], "domain": "a.com"}]
+    await checkouts.start_checkout(
+        _PROJECT,
+        _USER,
+        _request(domain={"kind": "buy", "name": "b.com"}, registrant=_REGISTRANT, launch_id=first["launch_id"]),
+    )
+    assert launch_world["checkouts"][-1] == ("domain", "b.com", 15, True)
+
+
+async def test_the_launchs_access_drops_a_domain_subscription_that_failed(monkeypatch):
+    subscription = {"provider_ref": "sub-a", "status": "cancelled"}
+
+    async def get_project_access(project_id):
+        return {"can_host": True, "domain_subscription": subscription}
+
+    async def get_domain_failures(project_id):
+        return [{"subscription_ref": "sub-a", "launch_id": "l1", "domain": "a.com"}] if project_id == 42 else []
+
+    monkeypatch.setattr(launch_access.payments, "get_project_access", get_project_access)
+    monkeypatch.setattr(launch_access.intents, "get_domain_failures", get_domain_failures)
+    failed = await launch_access.get_launch_access(42)
+    assert failed["domain_subscription"] is None and failed["domain_failures"][0]["domain"] == "a.com"
+    assert (await launch_access.get_launch_access(7))["domain_subscription"] == subscription
+
+
+def test_a_failed_domain_with_the_plan_running_asks_for_another_domain():
+    launch = {"domain": {"kind": "buy", "name": "a.com"}, "domain_failure": {"domain": "a.com"}}
+    assert status.to_stage(_status(launch=launch, domain_subscription=None)) == "choose_domain"
 
 
 @pytest.mark.parametrize(
@@ -327,6 +373,21 @@ async def test_a_users_own_domain_is_verified_once_both_records_are_there(dns):
     assert other["records"][1]["value"] != txt_record["value"] and not other["verified"]
 
 
+async def test_an_aaaa_record_must_go_before_the_domain_counts_as_ready(dns):
+    check = await deployments.check_external_domain(_PROJECT, "shop.example.com")
+    txt_value = check["records"][1]["value"]
+    dns["answers"] = {
+        ("shop.example.com", "A"): {"57.0.0.1"},
+        ("_biveit-verify.shop.example.com", "TXT"): {txt_value},
+        ("shop.example.com", "AAAA"): {"2001:db8::1"},
+    }
+    check = await deployments.check_external_domain(_PROJECT, "shop.example.com")
+    assert check["records"][2] == {
+        "type": "AAAA", "name": "shop.example.com", "value": "2001:db8::1", "action": "remove", "found": True,
+    }  # fmt: skip
+    assert not check["verified"]
+
+
 @pytest.mark.parametrize(
     ("domain", "blocked"),
     [
@@ -352,7 +413,8 @@ def fulfilment_world(monkeypatch):
     state = {
         "access": {"can_host": True, "domain_subscription": subscription, "plan_subscription": {"custom_data": {"launch_id": "l1"}}},
         "attached": [], "registered": [], "records": [], "refunded": [], "cancelled": [], "failures": [], "deployed": [],
-        "registrar_has": set(), "unavailable": False,
+        "registrar_has": set(), "unavailable": False, "dns_ready": True, "deployments": [], "live": [],
+        "intent_domain": {"kind": "buy", "name": "cozy.com"}, "now": _NOW,
     }  # fmt: skip
 
     async def get_project_access(project_id):
@@ -370,7 +432,7 @@ def fulfilment_world(monkeypatch):
     async def get_intent(launch_id):
         return {
             "plan": "yearly",
-            "domain": {"kind": "buy", "name": "cozy.com"},
+            "domain": state["intent_domain"],
             "registrant": {**_REGISTRANT, "country": "VN"},
         }
 
@@ -403,22 +465,38 @@ def fulfilment_world(monkeypatch):
         return state["attached"]
 
     async def attach_domain(project, domain, kind, activate):
-        state["attached"] = [
+        # Like the real one: kept if it's there; activating it clears the others.
+        known = next((row for row in state["attached"] if row["domain"] == domain), None)
+        attached = state["attached"] if known else [
             *state["attached"],
-            {"domain": domain, "kind": kind, "activated_at": _NOW if activate else None},
+            {"domain": domain, "kind": kind, "activated_at": None, "created_at": state["now"]},
+        ]  # fmt: skip
+        state["attached"] = [
+            {**row, "activated_at": (state["now"] if row["domain"] == domain else None)} if activate else row
+            for row in attached
         ]
 
+    async def check_external_domain(project, domain):
+        return {"domain": domain, "blocked": None, "records": [], "verified": state["dns_ready"]}
+
     async def get_served_domains(project):
-        return [row["domain"] for row in state["attached"] if row["activated_at"]]
+        return [
+            row["domain"]
+            for row in state["attached"]
+            if row["activated_at"] and (row["kind"] != "external" or state["dns_ready"])
+        ]
 
     async def list_deployments(project):
-        return []
+        return state["deployments"]
 
     async def get_current_conversation(project_id, user_id):
         return {"id": 9}
 
     async def deploy(project, conversation_id, enforce_cooldown=True):
+        # Like the real one, done at once: it serves what may be served now.
         state["deployed"] = [*state["deployed"], enforce_cooldown]
+        state["deployments"] = [{"started_at": state["now"], "outcome": "succeeded"}, *state["deployments"]]
+        state["live"] = await get_served_domains(project)
 
     async def cancel_subscription(ref):
         state["cancelled"] = [*state["cancelled"], ref]
@@ -443,6 +521,7 @@ def fulfilment_world(monkeypatch):
         (fulfilment.domains, "create_record", create_record),
         (fulfilment.deployments, "get_site_domains", get_site_domains),
         (fulfilment.deployments, "attach_domain", attach_domain),
+        (fulfilment.deployments, "check_external_domain", check_external_domain),
         (fulfilment.deployments, "get_served_domains", get_served_domains),
         (fulfilment.deployments, "list_deployments", list_deployments),
         (fulfilment.deployments, "deploy", deploy),
@@ -460,7 +539,7 @@ async def test_a_paid_domain_is_registered_pointed_at_us_attached_and_deployed(f
     assert fulfilment_world["deployed"] == [False]  # the platform's own deploy: no cooldown
     # Run again (every status poll does): the registrar isn't asked again.
     await fulfilment.fulfil(42)
-    assert len(fulfilment_world["registered"]) == 1
+    assert len(fulfilment_world["registered"]) == 1 and fulfilment_world["deployed"] == [False]
 
 
 async def test_a_domain_gone_by_payment_is_refunded_and_the_plan_stays(fulfilment_world):
@@ -477,6 +556,62 @@ async def test_nothing_happens_without_hosting(fulfilment_world):
     fulfilment_world["access"] = {**fulfilment_world["access"], "can_host": False}
     await fulfilment.fulfil(42)
     assert fulfilment_world["registered"] == [] and fulfilment_world["deployed"] == []
+
+
+async def test_a_launchs_own_domain_takes_over_from_an_older_one_once_its_dns_is_there(fulfilment_world):
+    world = fulfilment_world
+    world["access"] = {**world["access"], "domain_subscription": None}
+    world["intent_domain"] = {"kind": "own", "name": "mine.com"}
+    world["attached"] = [
+        {"domain": "old.com", "kind": "admin", "activated_at": _NOW - timedelta(days=1), "created_at": _NOW - timedelta(days=1)},
+    ]  # fmt: skip
+    world["dns_ready"] = False
+    await fulfilment.fulfil(42)
+    assert [(row["domain"], bool(row["activated_at"])) for row in world["attached"]] == [
+        ("old.com", True),
+        ("mine.com", False),
+    ]
+    assert world["live"] == ["old.com"]  # still served where it works
+    world["dns_ready"], world["now"] = True, _NOW + timedelta(hours=1)
+    await fulfilment.fulfil(42)
+    assert [(row["domain"], bool(row["activated_at"])) for row in world["attached"]] == [
+        ("old.com", False),
+        ("mine.com", True),
+    ]
+    assert world["live"] == ["mine.com"]
+
+
+async def test_a_launchs_own_domain_doesnt_undo_a_later_switch(fulfilment_world):
+    world = fulfilment_world
+    world["access"] = {**world["access"], "domain_subscription": None}
+    world["intent_domain"] = {"kind": "own", "name": "mine.com"}
+    world["attached"] = [
+        {"domain": "mine.com", "kind": "external", "activated_at": None, "created_at": _NOW - timedelta(days=2)},
+        {"domain": "other.com", "kind": "external", "activated_at": _NOW - timedelta(days=1), "created_at": _NOW - timedelta(days=1)},
+    ]  # fmt: skip
+    await fulfilment.fulfil(42)
+    assert [row["domain"] for row in world["attached"] if row["activated_at"]] == ["other.com"]
+
+
+async def test_the_sweep_fulfils_each_project_with_a_running_plan_once(monkeypatch):
+    plans = [
+        {"target_type": "PROJECT", "target_id": 1, "status": "active", "ends_at": None},
+        {"target_type": "PROJECT", "target_id": 1, "status": "expired", "ends_at": _NOW},
+        {"target_type": "PROJECT", "target_id": 2, "status": "cancelled", "ends_at": datetime.now(UTC) + timedelta(days=3)},
+        {"target_type": "PROJECT", "target_id": 3, "status": "expired", "ends_at": _NOW - timedelta(days=30)},
+    ]  # fmt: skip
+    swept = {"ids": []}
+
+    async def find_subscriptions(criteria):
+        return plans
+
+    async def fulfil(project_id):
+        swept["ids"] = [*swept["ids"], project_id]
+
+    monkeypatch.setattr(fulfilment.payments, "find_subscriptions", find_subscriptions)
+    monkeypatch.setattr(fulfilment, "fulfil", fulfil)
+    await fulfilment.fulfil_running_plans()
+    assert swept["ids"] == [1, 2]
 
 
 async def test_a_mock_payment_never_buys_a_real_domain(fulfilment_world, monkeypatch):

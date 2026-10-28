@@ -19,6 +19,7 @@ from src.dto.launch import LaunchCheckoutRequest
 from src.dto.projects import Project
 from src.dto.users import User
 from src.modules import deployments, payments
+from src.services.launch import access as launch_access
 from src.services.launch import fulfilment, intents, offers
 from src.utils.common import spawn
 
@@ -40,7 +41,7 @@ async def start_checkout(project: Project, user: User, request: LaunchCheckoutRe
     away (no checkouts). Raises LaunchRefused."""
     if not project.get("build_approved_at"):
         raise LaunchRefused("NOT_APPROVED")
-    access = await payments.get_project_access(project["id"])
+    access = await launch_access.get_launch_access(project["id"])
     previous_intent = await intents.get_intent(request.launch_id)
     if previous_intent and previous_intent.get("project_id") != project["id"]:
         raise LaunchRefused("UNKNOWN_LAUNCH", 404)

@@ -17,7 +17,12 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from src import debug_scratch
 from src.config import settings
-from src.constants import AGENT_LISTENER_PORT, DEVENV_IDLE_SWEEP_SECONDS, SERVER_GRACEFUL_SHUTDOWN_SECONDS
+from src.constants import (
+    AGENT_LISTENER_PORT,
+    DEVENV_IDLE_SWEEP_SECONDS,
+    LAUNCH_SWEEP_SECONDS,
+    SERVER_GRACEFUL_SHUTDOWN_SECONDS,
+)
 from src.controllers.admin import router as admin_router
 from src.controllers.agent import router as agent_router
 from src.controllers.auth import router as auth_router
@@ -34,6 +39,7 @@ from src.controllers.system_configurations import router as system_configuration
 from src.controllers.users import router as users_router
 from src.services import devenv, system_config
 from src.services import projects as projects_service
+from src.services.launch import fulfilment
 from src.utils import http, postgres, redis
 from src.utils.logging import configure_logging, log_error
 
@@ -74,10 +80,12 @@ async def lifespan(app: FastAPI):
 
     agent_listener = await _serve_agent_listener()
     idle_sweep = asyncio.create_task(_sweep_idle_projects())
+    launch_sweep = asyncio.create_task(_sweep_launches())
 
     yield
 
     idle_sweep.cancel()
+    launch_sweep.cancel()
     if agent_listener:
         agent_listener.should_exit = True
         await agent_listener.shutdown()
@@ -99,6 +107,19 @@ async def _sweep_idle_projects() -> None:
                     _log.info("idle projects stopped: %s", stopped)
         except Exception as error:
             log_error(error, "the idle sweep failed; the next round tries again")
+
+
+async def _sweep_launches() -> None:
+    """Every LAUNCH_SWEEP_SECONDS, move along the launches nobody is watching (fulfilment.fulfil_running_plans) --
+    a user's own domain going live once its DNS is there. Like the idle sweep: one worker per round, a failed
+    round logged and tried again next time."""
+    while True:
+        await asyncio.sleep(LAUNCH_SWEEP_SECONDS)
+        try:
+            if await redis.set_if_absent("launch:sweep", LAUNCH_SWEEP_SECONDS - 10):
+                await fulfilment.fulfil_running_plans()
+        except Exception as error:
+            log_error(error, "the launch sweep failed; the next round tries again")
 
 
 async def _serve_agent_listener() -> uvicorn.Server | None:

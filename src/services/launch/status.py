@@ -11,6 +11,7 @@ from src.dto.projects import Project
 from src.dto.users import User
 from src.modules import deployments, payments
 from src.services import agent as agent_service
+from src.services.launch import access as launch_access
 from src.services.launch import fulfilment, intents
 from src.services.launch.checkouts import LaunchRefused
 from src.utils.common import spawn
@@ -33,7 +34,7 @@ async def get_launch_status(project: Project, user: User) -> dict:
     launch           the plan's launch {launch_id, plan, domain (no registrant), domain_failure} | None
     deployment       deployments.get_deployment_status
     server_ip        where a user's own domain must point"""
-    access = await payments.get_project_access(project["id"])
+    access = await launch_access.get_launch_access(project["id"])
     conversation = await agent_service.get_current_conversation(project["id"], user["id"])
     deployment = await deployments.get_deployment_status(project, conversation["id"])
     active = pydash.find(deployment["site_domains"], lambda row: row["activated_at"] is not None)
@@ -44,9 +45,10 @@ async def get_launch_status(project: Project, user: User) -> dict:
     )
     launch_id = pydash.get(access, "plan_subscription.custom_data.launch_id")
     intent = await intents.get_intent(launch_id)
-    failures = await intents.get_domain_failures(project["id"])
     domain_failure = (
-        pydash.find_last(failures, lambda failure: failure["launch_id"] == launch_id) if launch_id else None
+        pydash.find_last(access["domain_failures"], lambda failure: failure["launch_id"] == launch_id)
+        if launch_id
+        else None
     )
     status = {
         "plans": payments.get_plans(),
@@ -133,7 +135,7 @@ async def activate_domain(project: Project, domain: str) -> None:
     deployment fulfilment starts for it. A user's own domain only once its DNS records check out, so a live site
     never moves to a domain it can't be served on. Raises LaunchRefused (PLAN_REQUIRED, UNKNOWN_DOMAIN,
     DOMAIN_NOT_VERIFIED)."""
-    access = await payments.get_project_access(project["id"])
+    access = await launch_access.get_launch_access(project["id"])
     if not access["can_host"]:
         raise LaunchRefused("PLAN_REQUIRED")
     attached = await deployments.get_site_domains(project)
