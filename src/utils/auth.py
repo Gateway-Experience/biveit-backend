@@ -154,7 +154,7 @@ def clear_access_cookie(response: Response) -> None:
 # Intentions: the landing site (biveit.com) is for visitors who aren't signed in. It used to find out by
 # calling GET /me, which meant drawing the whole page first and then redirecting a second later. This
 # cookie lets it decide before drawing anything: readable by JS (it's only a "1", no token), and set for
-# the parent domain (settings.signed_in_cookie_domain) so the landing host can see it. It's a hint, not
+# the parent domain (settings.root_domain) so the landing host can see it. It's a hint, not
 # auth: the session cookie stays the proof. Set by every login and refreshed by GET /me (so sessions from
 # before it existed pick it up); dropped on logout and on any 401 (see get_current_user).
 # References: biveit-landing's layouts/Base.astro.
@@ -165,7 +165,7 @@ def set_signed_in_cookie(response: Response) -> None:
         SIGNED_IN_COOKIE,
         "1",
         max_age=settings.jwt_expiry_seconds,
-        domain=settings.signed_in_cookie_domain or None,
+        domain=settings.root_domain or None,
         secure=settings.env != "local",
         samesite="lax",
     )
@@ -175,7 +175,7 @@ def clear_signed_in_cookie(response: Response) -> None:
     # Same Domain as set_signed_in_cookie, or the browser treats it as a different cookie.
     response.delete_cookie(
         SIGNED_IN_COOKIE,
-        domain=settings.signed_in_cookie_domain or None,
+        domain=settings.root_domain or None,
         secure=settings.env != "local",
         samesite="lax",
     )
