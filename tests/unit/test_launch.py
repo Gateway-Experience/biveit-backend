@@ -245,6 +245,41 @@ async def test_an_unapproved_site_cant_launch(launch_world):
         await checkouts.start_checkout({**_PROJECT, "build_approved_at": None}, _USER, _request(plan="one_time"))
 
 
+@pytest.mark.parametrize(
+    ("attached", "verified", "activates"),
+    [
+        ([], False, True),  # nothing served yet: it's the site's domain from now on
+        ([{"domain": "live.com", "activated_at": _NOW}], False, False),  # a live site stays where it is
+        ([{"domain": "live.com", "activated_at": _NOW}], True, True),  # ready to serve: switch now
+    ],
+)
+async def test_an_own_domain_on_a_running_plan_only_goes_active_when_it_can_be_served(
+    launch_world, monkeypatch, attached, verified, activates
+):
+    launch_world["access"] = {**launch_world["access"], "can_download": True, "plan": "monthly", "can_host": True}
+    attaches = {"calls": []}
+
+    async def check_external_domain(project, domain):
+        return {"domain": domain, "blocked": None, "records": [], "verified": verified}
+
+    async def get_site_domains(project):
+        return attached
+
+    async def attach_domain(project, domain, kind, activate):
+        attaches["calls"] = [*attaches["calls"], (domain, kind, activate)]
+
+    async def fulfil(project_id):
+        return None
+
+    monkeypatch.setattr(checkouts.deployments, "check_external_domain", check_external_domain)
+    monkeypatch.setattr(checkouts.deployments, "get_site_domains", get_site_domains)
+    monkeypatch.setattr(checkouts.deployments, "attach_domain", attach_domain)
+    monkeypatch.setattr(checkouts.fulfilment, "fulfil", fulfil)
+    result = await checkouts.start_checkout(_PROJECT, _USER, _request(domain={"kind": "own", "name": "mine.com"}))
+    assert result["checkouts"] == []
+    assert attaches["calls"] == [("mine.com", "external", activates)]
+
+
 def test_buying_a_domain_needs_its_registrant():
     with pytest.raises(ValueError, match="registrant"):
         _request(plan="yearly", domain={"kind": "buy", "name": "cozy.com"})

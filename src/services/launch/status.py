@@ -130,7 +130,9 @@ def to_stage(status: dict) -> str:
 
 async def activate_domain(project: Project, domain: str) -> None:
     """Switch the site to another of its attached domains: it becomes the active one now, and is served from the
-    deployment fulfilment starts for it. Raises LaunchRefused (PLAN_REQUIRED, UNKNOWN_DOMAIN)."""
+    deployment fulfilment starts for it. A user's own domain only once its DNS records check out, so a live site
+    never moves to a domain it can't be served on. Raises LaunchRefused (PLAN_REQUIRED, UNKNOWN_DOMAIN,
+    DOMAIN_NOT_VERIFIED)."""
     access = await payments.get_project_access(project["id"])
     if not access["can_host"]:
         raise LaunchRefused("PLAN_REQUIRED")
@@ -138,5 +140,10 @@ async def activate_domain(project: Project, domain: str) -> None:
     row = pydash.find(attached, {"domain": deployments.normalize_domain(domain)})
     if row is None:
         raise LaunchRefused("UNKNOWN_DOMAIN", 404)
+    if (
+        row["kind"] == deployments.SiteDomainKind.EXTERNAL
+        and not (await deployments.check_external_domain(project, row["domain"]))["verified"]
+    ):
+        raise LaunchRefused("DOMAIN_NOT_VERIFIED", 409)
     await deployments.attach_domain(project, row["domain"], row["kind"], activate=True)
     spawn(fulfilment.fulfil(project["id"]))

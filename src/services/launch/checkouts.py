@@ -68,9 +68,14 @@ async def start_checkout(project: Project, user: User, request: LaunchCheckoutRe
         else []
     )  # fmt: skip
     if domain and domain["kind"] == "own" and request.plan is None:
-        # Plan already running: switch the site to the user's own domain now. Fulfilment serves it once its DNS
-        # checks out.
-        await deployments.attach_domain(project, domain["name"], deployments.SiteDomainKind.EXTERNAL, activate=True)
+        # Intentions: plan already running, so the user's own domain is attached now. It only becomes the active
+        # one if there's none yet or its DNS already checks out -- a live site must not move to a domain that
+        # can't be served yet (the user switches to it later, from the Launch tab).
+        attached = await deployments.get_site_domains(project)
+        has_active = any(row["activated_at"] for row in attached)
+        await deployments.attach_domain(
+            project, domain["name"], deployments.SiteDomainKind.EXTERNAL, activate=not has_active or domain["verified"]
+        )
         spawn(fulfilment.fulfil(project["id"]))
     return {"launch_id": launch_id, "checkouts": [*plan_checkouts, *domain_checkouts]}
 
@@ -99,7 +104,13 @@ async def _check_domain_choice(
         check = await deployments.check_external_domain(project, request.domain.name)
         if check["blocked"]:
             raise LaunchRefused(f"DOMAIN_{check['blocked'].upper()}", 400 if check["blocked"] == "invalid" else 409)
-        return {"kind": "own", "name": check["domain"], "price_per_year": None, "free_first_year": False}
+        return {
+            "kind": "own",
+            "name": check["domain"],
+            "price_per_year": None,
+            "free_first_year": False,
+            "verified": check["verified"],
+        }
     if access["domain_subscription"]:
         raise LaunchRefused("DOMAIN_ALREADY_BOUGHT")
     try:
