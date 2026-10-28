@@ -14,6 +14,7 @@
 
 import asyncio
 import uuid
+from datetime import UTC, datetime, timedelta
 from itertools import groupby
 
 import pydash
@@ -21,6 +22,7 @@ import pydash
 from src.dto.projects import Project
 from src.modules.deployments.constants import (
     DEPLOYMENT_ATTEMPTS,
+    DEPLOYMENT_COOLDOWN_SECONDS,
     DEPLOYMENT_ERROR_CHARS,
     DEPLOYMENT_LOCK_TTL_SECONDS,
     DEPLOYMENT_OUTCOMES,
@@ -43,13 +45,25 @@ class NothingToDeploy(Exception):
     """The project has no app yet (it hasn't reached building). 409."""
 
 
-async def deploy(project: Project, conversation_id: int) -> dict:
+class DeploymentCooldown(Exception):
+    """The last deployment started less than DEPLOYMENT_COOLDOWN_SECONDS ago. `until`: when the next can start."""
+
+    def __init__(self, until: datetime):
+        super().__init__(f"next deployment possible at {until.isoformat()}")
+        self.until = until
+
+
+async def deploy(project: Project, conversation_id: int, enforce_cooldown: bool = True) -> dict:
     """Deploy what's in the conversation's workspace now: commit it, then roll it out in the background
-    (_roll_out). Returns {run_id, commit} as soon as the commit is pinned. Raises NothingToDeploy, or
+    (_roll_out). Returns {run_id, commit} as soon as the commit is pinned. Raises NothingToDeploy,
+    DeploymentCooldown (only with `enforce_cooldown` -- a user's own deploys; the platform's skip it), or
     DeploymentInProgress while another deployment of the project runs (the lock is held from here until the
     background half finishes)."""
     if not devenv.has_app(project, conversation_id):
         raise NothingToDeploy(f"project {project['id']} has no app to deploy")
+    cooldown_until = await get_cooldown_until(project)
+    if enforce_cooldown and cooldown_until:
+        raise DeploymentCooldown(cooldown_until)
     if not await redis.set_if_absent(_get_lock_key(project["id"]), DEPLOYMENT_LOCK_TTL_SECONDS):
         raise DeploymentInProgress(f"project {project['id']} is being deployed")
     try:
@@ -75,14 +89,17 @@ async def get_deployment_status(project: Project, conversation_id: int) -> dict:
                             (the dev container is stopped -- not worth waking for a status)
     can_deploy              there's an app, nothing's deploying, and there's something new to deploy (or
                             we can't tell)
-    domains, urls           where the site is served
+    domains, urls           where the site is served right now (its active domain, if it may be served)
+    site_domains            every domain attached to it: [{domain, kind, activated_at, created_at}]
+    cooldown_until          when a user may deploy again (None = now)
     last_deployment         the newest entry of list_deployments, None if never deployed"""
     live = await containers.get_live_release(project["id"])
     deploying = await redis.flag_exists(_get_lock_key(project["id"]))
     has_app = devenv.has_app(project, conversation_id)
     has_changes = await sources.has_changes_since(project, conversation_id, pydash.get(live, "commit"))
     deployments = await list_deployments(project)
-    domains = await sites.get_domains(project)
+    domains = await sites.get_served_domains(project)
+    cooldown_until = await get_cooldown_until(project)
     return {
         "live": live,
         "deploying": deploying,
@@ -90,8 +107,20 @@ async def get_deployment_status(project: Project, conversation_id: int) -> dict:
         "can_deploy": has_app and not deploying and has_changes is not False,
         "domains": domains,
         "urls": sites.to_site_urls(domains),
+        "site_domains": await sites.get_site_domains(project),
+        "cooldown_until": cooldown_until,
         "last_deployment": pydash.head(deployments),
     }
+
+
+async def get_cooldown_until(project: Project) -> datetime | None:
+    """When a user may next deploy the project: DEPLOYMENT_COOLDOWN_SECONDS after its last deployment started, or
+    None if that's already passed (or it never was)."""
+    started = await events_repo.find(
+        {"type": DeploymentEvent.STARTED, "subject_type": "project", "subject_ref": str(project["id"])}
+    )
+    until = pydash.last(started)["created_at"] + timedelta(seconds=DEPLOYMENT_COOLDOWN_SECONDS) if started else None
+    return until if until and until > datetime.now(UTC) else None
 
 
 async def list_deployments(project: Project) -> list[dict]:
@@ -143,7 +172,7 @@ async def ensure_release(project: Project, conversation_id: int, commit: str) ->
         )
     await environment.ensure_database_access(project)
     # Read once, so the site's CORS origins and its nginx file agree within an attempt.
-    domains = await sites.get_domains(project)
+    domains = await sites.get_served_domains(project)
     site_env = environment.render_site_env(project, sites.to_site_urls(domains))
     await containers.ensure_site_container(project, image_tag, commit, site_env)
     await sites.ensure_site(project, domains)

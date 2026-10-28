@@ -1,23 +1,38 @@
 # Intentions: a project's site on its domains -- the host's nginx in front of the site's container. The domains
-# are the project's rows in site_domains (the user's own and subdomains of ours alike, DNS already pointing at
-# us; a domain is only ever one project's); one nginx file per project (utils/nginx) holds a server block per
-# domain.
+# attached to a project are its rows in site_domains (a domain is only ever one project's); the site is served on
+# the ACTIVE one, if it may be: one we bought or an admin set, or the user's own once its ownership proof checks
+# out (check_external_domain). One nginx file per project (utils/nginx) holds a server block per served domain.
+#
+# Proving ownership of a user's own domain takes two DNS records: an A record pointing at the server (traffic,
+# and the certificate) and a TXT record at _biveit-verify.<domain> holding a token derived from the project and
+# the domain -- so nothing is stored, and nobody can attach a domain that points at us but isn't theirs.
 #
 # A domain right under settings.prod_domain uses our wildcard certificate, which already exists. Every other
 # one gets its own Let's Encrypt certificate from certbot's webroot challenge: the first one is answered by the
 # catch-all server set up once on the host (docs/plans/deployments.md), renewals by the site's own port-80
 # block. Needs passwordless sudo for certbot, on top of what utils/nginx needs.
 
+import asyncio
 import os
 import re
+from urllib.parse import urlsplit
 
+import dns.asyncresolver
+import dns.exception
 import pydash
 
 from src.config import settings
 from src.dto.projects import Project
-from src.modules.deployments.constants import SITE_NGINX_TEMPLATE
+from src.modules.deployments.constants import (
+    DOMAIN_CHECK_NAMESERVERS,
+    DOMAIN_CHECK_TIMEOUT_SECONDS,
+    DOMAIN_PROOF_PREFIX,
+    SITE_NGINX_TEMPLATE,
+    SiteDomainKind,
+)
 from src.modules.deployments.repositories import site_domains as site_domains_repo
 from src.modules.deployments.services import containers
+from src.services import devenv
 from src.utils import nginx, templates
 from src.utils.processes import run_command
 
@@ -30,9 +45,79 @@ class InvalidDomain(ValueError):
     """Not a host name we'd serve a site on."""
 
 
-async def get_domains(project: Project) -> list[str]:
-    """The domains the project's site is served on, oldest first."""
-    return [row["domain"] for row in await site_domains_repo.find({"project_id": project["id"]})]
+async def get_site_domains(project: Project) -> list[dict]:
+    """The domains attached to the project, oldest first: [{domain, kind, activated_at (None = not active),
+    created_at}]."""
+    return await site_domains_repo.find({"project_id": project["id"]})
+
+
+async def get_served_domains(project: Project) -> list[str]:
+    """What the site should be served on right now: its active domain, if it may be (see the top of this file),
+    else nothing."""
+    active = pydash.find(await get_site_domains(project), lambda row: row["activated_at"] is not None)
+    if active is None:
+        return []
+    if (
+        active["kind"] == SiteDomainKind.EXTERNAL
+        and not (await check_external_domain(project, active["domain"]))["verified"]
+    ):
+        return []
+    return [active["domain"]]
+
+
+async def attach_domain(project: Project, domain: str, kind: SiteDomainKind, activate: bool) -> None:
+    """Attach a domain to the project (kept if it's already there), and make it the active one if `activate`. It's
+    served from the next deployment. Raises InvalidDomain, DomainTaken."""
+    normalized = normalize_domain(domain)
+    await site_domains_repo.attach(project["id"], normalized, kind)
+    if activate:
+        await site_domains_repo.activate(project["id"], normalized)
+
+
+async def check_external_domain(project: Project, domain: str) -> dict:
+    """Whether a user's own domain can be attached to the project, and whether its DNS records are in place:
+    {domain (normalized), blocked: None | "invalid" | "ours" | "taken", records: [{type, name, value, found}],
+    verified (both records found)}. The lookups ask public resolvers, not the server's cache, so a record the user
+    just added shows up as soon as it's out there. [I/O: reads]"""
+    try:
+        normalized = normalize_domain(domain)
+    except InvalidDomain:
+        return {"domain": domain, "blocked": "invalid", "records": [], "verified": False}
+    owners = await site_domains_repo.find({"domain": normalized})
+    if _is_ours(normalized):
+        blocked = "ours"
+    elif owners and owners[0]["project_id"] != project["id"]:
+        blocked = "taken"
+    else:
+        blocked = None
+    proof_name = f"{DOMAIN_PROOF_PREFIX}.{normalized}"
+    proof_value = f"biveit-verify={get_domain_proof_token(project, normalized)}"
+    a_values, txt_values = await asyncio.gather(_resolve(normalized, "A"), _resolve(proof_name, "TXT"))
+    records = [
+        {"type": "A", "name": normalized, "value": settings.server_public_ip, "found": settings.server_public_ip in a_values},
+        {"type": "TXT", "name": proof_name, "value": proof_value, "found": proof_value in txt_values},
+    ]  # fmt: skip
+    return {
+        "domain": normalized,
+        "blocked": blocked,
+        "records": records,
+        "verified": blocked is None and all(record["found"] for record in records),
+    }
+
+
+def get_domain_proof_token(project: Project, domain: str) -> str:
+    """[Pure-ish] The token a user's TXT record must hold to prove `domain` is theirs for this project."""
+    return devenv.derive_secret(f"project:{project['id']}:site-domain:{domain}", 32).lower()
+
+
+def normalize_domain(domain: str) -> str:
+    """[Pure] A domain the way we keep it: trimmed, lower case, no scheme / path / trailing dot. Raises
+    InvalidDomain if what's left isn't a plain host name."""
+    host = urlsplit(domain.strip().lower() if "://" in domain else f"//{domain.strip().lower()}").hostname or ""
+    normalized = host.rstrip(".")
+    if not _DOMAIN_PATTERN.match(normalized):
+        raise InvalidDomain(f"not a domain: {domain}")
+    return normalized
 
 
 def get_default_domain(project: Project) -> str | None:
@@ -48,19 +133,18 @@ def to_site_urls(domains: list[str]) -> list[str]:
 
 
 async def set_domains(project: Project, domains: list[str]) -> list[str]:
-    """Record the domains the project's site is served on (trimmed, lower-cased, deduped) and return them.
-    They take effect at the next deployment. Raises InvalidDomain, or DomainTaken when one is another
-    project's (then nothing changes)."""
-    normalized = pydash.uniq([domain.strip().lower().rstrip(".") for domain in domains])
-    invalid = [domain for domain in normalized if not _DOMAIN_PATTERN.match(domain)]
-    if invalid:
-        raise InvalidDomain(f"not a domain: {', '.join(invalid)}")
+    """Admin only: make `domains` (normalized, deduped) exactly the project's, trusted as they are, the first one
+    active, and return them. They take effect at the next deployment. Raises InvalidDomain, or DomainTaken when one
+    is another project's (then nothing changes)."""
+    normalized = pydash.uniq([normalize_domain(domain) for domain in domains])
     await site_domains_repo.replace(project["id"], normalized)
+    if normalized:
+        await site_domains_repo.activate(project["id"], normalized[0])
     return normalized
 
 
 async def ensure_site(project: Project, domains: list[str]) -> None:
-    """Make sure every one of `domains` (the project's, see get_domains) has its certificate and routes to its
+    """Make sure every one of `domains` (what it's served on, see get_served_domains) has its certificate and routes to its
     container -- or, with none, that there's no nginx site at all. Idempotent: certbot keeps a certificate that
     isn't due for renewal, and nginx is only reloaded when the file changes."""
     site_path = os.path.join(settings.nginx_sites_dir, f"biveit-site-{project['id']}.conf")
@@ -127,3 +211,25 @@ async def _ensure_certificate(domain: str) -> None:
             ),
         ]
     )
+
+
+def _is_ours(domain: str) -> bool:
+    """[Pure-ish] Whether a domain is one of the platform's own (the app's, the dev / prod sites' -- by their
+    registered domain, e.g. anything under biveitapp.com): never a user's to bring."""
+    ours = pydash.compact([settings.dev_domain, settings.prod_domain, urlsplit(settings.frontend_url).hostname or ""])
+    registered = {".".join(host.split(".")[-2:]) for host in ours if "." in host}
+    return any(domain == parent or domain.endswith(f".{parent}") for parent in registered)
+
+
+async def _resolve(name: str, record_type: str) -> set[str]:
+    """[I/O] The values of a DNS name's records of one type (TXT strings unquoted), from public resolvers; empty
+    when there are none (or the lookup fails -- to the caller that's "not found yet")."""
+    resolver = dns.asyncresolver.Resolver(configure=False)
+    resolver.nameservers = DOMAIN_CHECK_NAMESERVERS
+    try:
+        answer = await resolver.resolve(name, record_type, lifetime=DOMAIN_CHECK_TIMEOUT_SECONDS)
+    except dns.exception.DNSException:
+        return set()
+    if record_type == "TXT":
+        return {b"".join(record.strings).decode(errors="replace") for record in answer}
+    return {record.to_text() for record in answer}

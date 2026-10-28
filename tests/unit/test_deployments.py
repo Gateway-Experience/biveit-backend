@@ -140,6 +140,11 @@ def deploy_world(monkeypatch, log):
     monkeypatch.setattr(deployment_service.redis, "set_if_absent", set_if_absent)
     monkeypatch.setattr(deployment_service, "spawn", lambda coro: log.update(spawned=True) or coro.close())
 
+    async def get_cooldown_until(project):
+        return log.get("cooldown_until")
+
+    monkeypatch.setattr(deployment_service, "get_cooldown_until", get_cooldown_until)
+
 
 async def test_deploy_pins_a_commit_and_hands_the_rest_to_the_background(deploy_world, log):
     result = await deployments.deploy(_PROJECT, 9)
@@ -161,6 +166,27 @@ async def test_there_is_nothing_to_deploy_before_the_app_exists(deploy_world, mo
     monkeypatch.setattr(deployment_service.devenv, "has_app", lambda project, conversation_id: False)
     with pytest.raises(deployments.NothingToDeploy):
         await deployments.deploy(_PROJECT, 9)
+
+
+async def test_a_user_waits_out_the_cooldown_but_the_platform_doesnt(deploy_world, log):
+    log["cooldown_until"] = datetime.now(UTC) + timedelta(minutes=3)
+    with pytest.raises(deployments.DeploymentCooldown):
+        await deployments.deploy(_PROJECT, 9)
+    assert not log["events"]
+    assert (await deployments.deploy(_PROJECT, 9, enforce_cooldown=False))["commit"] == "c0ffee"
+
+
+@pytest.mark.parametrize(("minutes_ago", "waits"), [(2, True), (6, False)])
+async def test_the_cooldown_runs_from_the_last_deployment_start(monkeypatch, minutes_ago, waits):
+    started_at = datetime.now(UTC) - timedelta(minutes=minutes_ago)
+
+    async def find(criteria):
+        assert criteria["type"] == DeploymentEvent.STARTED
+        return [{"created_at": started_at - timedelta(hours=1)}, {"created_at": started_at}]
+
+    monkeypatch.setattr(deployment_service.events_repo, "find", find)
+    until = await deployment_service.get_cooldown_until(_PROJECT)
+    assert (until == started_at + timedelta(minutes=5)) if waits else until is None
 
 
 # --- the history ---
@@ -424,17 +450,23 @@ def test_the_prod_env_has_its_own_secrets_and_database(monkeypatch):
 
 
 async def test_domains_are_normalized_and_anything_else_refused(monkeypatch):
-    state = {"replaced": []}
+    state = {"replaced": [], "activated": []}
 
     async def replace(project_id, domains):
         state["replaced"] = [*state["replaced"], (project_id, domains)]
 
+    async def activate(project_id, domain):
+        state["activated"] = [*state["activated"], domain]
+        return True
+
     monkeypatch.setattr(sites.site_domains_repo, "replace", replace)
+    monkeypatch.setattr(sites.site_domains_repo, "activate", activate)
     assert await deployments.set_domains(_PROJECT, [" Shop.Example.com. ", "shop.example.com", "www.shop.io"]) == [
         "shop.example.com",
         "www.shop.io",
     ]
     assert state["replaced"] == [(42, ["shop.example.com", "www.shop.io"])]
+    assert state["activated"] == ["shop.example.com"]  # the first one is served
     for bad in ["shop.example.com; include /etc/passwd", "localhost", "-x.com", "a..com", "*.example.com"]:
         with pytest.raises(deployments.InvalidDomain):
             await deployments.set_domains(_PROJECT, [bad])

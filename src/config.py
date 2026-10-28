@@ -163,6 +163,18 @@ class Settings(BaseSettings):
     namecom_username: str = ""
     namecom_api_token: str = ""
 
+    # Lemon Squeezy, the payment provider (modules/payments; merchant of record, so it handles taxes). API key + store
+    # for its API, the webhook signing secret to check its webhooks. payments_mock swaps it for a stand-in (fake
+    # checkout page, webhooks sent to ourselves) -- for local dev and testing before the store exists. It has to be
+    # switched on explicitly: a deployment that just forgot its key must fail, not hand out free plans.
+    lemonsqueezy_api_key: str = ""
+    lemonsqueezy_store_id: str = ""
+    lemonsqueezy_webhook_secret: str = ""
+    payments_mock: bool = False
+    # The server's public IPv4 -- what a domain bought through us gets its A record pointed at, and what a user's
+    # own domain must point at to be served (the launch flow, modules/deployments).
+    server_public_ip: str = ""
+
     # CORS -- comma-separated allowed browser origins. Empty falls back to frontend_url. No wildcard:
     # auth rides an httpOnly cookie, so CORS runs WITH credentials, and browsers reject "*" + credentials.
     cors_allowed_origins: str = ""

@@ -4,16 +4,16 @@
 #   GET  /projects/{id}/deployments         (auth)  the deployment history, newest first
 #   GET  /projects/{id}/deployments/status  (auth)  what's live, whether a deployment runs, whether there's
 #                                                   anything new to deploy
-#   PUT  /projects/{id}/domains             (auth)  {domains}: where the site is served, from the next deployment
-# Errors: 404 PROJECT_NOT_FOUND (not the caller's), 409 NOTHING_TO_DEPLOY (no app yet), 409
-# DEPLOYMENT_IN_PROGRESS, 400 INVALID_DOMAIN, 409 DOMAIN_TAKEN (another project's).
-# TODO: deploying isn't gated on anything yet (payment, plan) -- it must be before the FE offers it.
+# A site's domains are set through the launch flow (controllers/launch), never here.
+# Errors: 404 PROJECT_NOT_FOUND (not the caller's), 402 PLAN_REQUIRED (no hosting plan running), 409
+# NOTHING_TO_DEPLOY (no app yet), 409 DEPLOYMENT_IN_PROGRESS, 429 DEPLOYMENT_COOLDOWN (+ until).
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 
-from src.dto.projects import Project, SetDomainsRequest
+from src.dto.projects import Project
 from src.dto.users import User
-from src.modules import deployments
+from src.modules import deployments, payments
 from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
 from src.utils.auth import get_current_user
@@ -29,14 +29,22 @@ async def _get_owned_project(project_id: int, user: User) -> Project:
     return projects[0]
 
 
-@router.post("/projects/{project_id}/deployments", status_code=202)
-async def deploy_project(project_id: int, request: Request, user: User = Depends(get_current_user)) -> dict:
+@router.post("/projects/{project_id}/deployments", status_code=202, response_model=None)
+async def deploy_project(
+    project_id: int, request: Request, user: User = Depends(get_current_user)
+) -> dict | JSONResponse:
     try:
         project = await _get_owned_project(project_id, user)
+        if not (await payments.get_project_access(project_id))["can_host"]:
+            raise HTTPException(status_code=402, detail="PLAN_REQUIRED")
         conversation = await agent_service.get_current_conversation(project_id, user["id"])
         return await deployments.deploy(project, conversation["id"])
     except HTTPException:
         raise
+    except deployments.DeploymentCooldown as cooldown:
+        return JSONResponse(
+            status_code=429, content={"detail": "DEPLOYMENT_COOLDOWN", "until": cooldown.until.isoformat()}
+        )
     except deployments.NothingToDeploy as error:
         raise HTTPException(status_code=409, detail="NOTHING_TO_DEPLOY") from error
     except deployments.DeploymentInProgress as error:
@@ -66,24 +74,6 @@ async def get_deployment_status(project_id: int, request: Request, user: User = 
         return await deployments.get_deployment_status(project, conversation["id"])
     except HTTPException:
         raise
-    except Exception as error:
-        log_http_error(error, request)
-        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
-
-
-@router.put("/projects/{project_id}/domains")
-async def set_domains(
-    project_id: int, body: SetDomainsRequest, request: Request, user: User = Depends(get_current_user)
-) -> dict:
-    try:
-        project = await _get_owned_project(project_id, user)
-        return {"domains": await deployments.set_domains(project, body.domains)}
-    except HTTPException:
-        raise
-    except deployments.InvalidDomain as error:
-        raise HTTPException(status_code=400, detail="INVALID_DOMAIN") from error
-    except deployments.DomainTaken as error:
-        raise HTTPException(status_code=409, detail="DOMAIN_TAKEN") from error
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error

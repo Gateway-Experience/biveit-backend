@@ -101,7 +101,8 @@ def deploying(services, monkeypatch):
         calls["domains"] = [*calls["domains"], domains]
         return domains
 
-    async def deploy(project, conversation_id):
+    async def deploy(project, conversation_id, enforce_cooldown=True):
+        assert not enforce_cooldown  # an admin's deploy skips the user cooldown
         calls["deployed"] = [*calls["deployed"], (project["id"], conversation_id)]
         return {"run_id": "r1", "commit": "abc"}
 

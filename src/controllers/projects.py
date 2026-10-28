@@ -3,10 +3,9 @@
 #   GET  /projects/trash      (auth)  my projects in Trash, most recently trashed first
 #   GET  /projects/search?q=  (auth)  my projects where I wrote q while prompting, with the bit that matched
 #   GET  /projects/{id}/site-preview?v=  (auth)  the picture of my project's dev site (a JPEG), for its card
-#   GET  /projects/{id}/code  (auth)  my project's code as it is right now, a zip (modules/deployments).
+#   GET  /projects/{id}/code  (auth)  my project's code as it is right now, a zip (modules/deployments). Only
+#                             once something's been paid for it (modules/payments): 402 PURCHASE_REQUIRED.
 #                             409 NOTHING_TO_DOWNLOAD before there's an app.
-#                             TODO: only for projects the user has paid for (docs/plans/launch-flow.md), once
-#                             payments exist.
 #   POST /projects            (auth)  create a project owned by me, from the submitted starting form
 #   POST /projects/{id}/open  (auth)  get my project ready to work on: call it right after creating it,
 #                                     and whenever the user opens it
@@ -23,7 +22,7 @@ from fastapi.responses import FileResponse, Response
 
 from src.dto.projects import CreateProjectRequest, Project, UpdateProjectRequest
 from src.dto.users import User
-from src.modules import deployments
+from src.modules import deployments, payments
 from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
 from src.services import projects as project_service
@@ -114,6 +113,8 @@ async def download_code(project_id: int, request: Request, user: User = Depends(
         projects = await projects_repo.find({"id": project_id, "user_id": user["id"]})
         if not projects:
             raise HTTPException(status_code=404, detail="PROJECT_NOT_FOUND")
+        if not (await payments.get_project_access(project_id))["can_download"]:
+            raise HTTPException(status_code=402, detail="PURCHASE_REQUIRED")
         conversation = await agent_service.get_current_conversation(project_id, user["id"])
         folder_name, archive = await deployments.archive_workspace(projects[0], conversation["id"])
         return Response(

@@ -1,7 +1,11 @@
 # Launch flow (business design)
 
-Status: business flow agreed (2026-10-28); implementation not planned yet. Prices and limits are placeholders to
-fine-tune. Payments go through Lemon Squeezy (merchant of record), mocked until the integration exists.
+Status: business flow agreed (2026-10-28); first version built (2026-10-28) -- modules/payments (Lemon Squeezy,
+mocked with PAYMENTS_MOCK until the store exists), services/launch (checkout, fulfilment, status), controllers/launch +
+payments, and the FE's launch dialog / Launch tab. Prices and limits are placeholders to fine-tune. Not built yet: the
+free <slug> address, AI domain suggestions (the registrar's own ideas stand in), the agent's read-only domain
+check, a fair-use allowance, site teardown when a plan ends, renewing domains at the registrar when their
+subscription renews.
 
 ## Pricing
 

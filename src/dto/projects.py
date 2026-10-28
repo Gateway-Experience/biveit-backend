@@ -111,8 +111,8 @@ class UpdateProjectFolderRequest(BaseModel):
 
 
 class SetDomainsRequest(BaseModel):
-    """PUT /projects/{id}/domains body -- the whole list of domains the project's site is served on (validated
-    by the deployments module). An empty list takes the site off every domain at the next deployment."""
+    """POST /admin/projects/{id}/deployments body -- the whole list of domains the project's site gets, trusted as
+    an admin's (the first one served; validated by the deployments module). Empty: the default domain."""
 
     model_config = {"extra": "forbid"}
 

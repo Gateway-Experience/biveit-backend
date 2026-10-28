@@ -9,27 +9,45 @@
 # docs/plans/deployments.md.
 # Callers import THIS package (`from src.modules import deployments`), not the files.
 
+from src.modules.deployments.constants import SiteDomainKind
 from src.modules.deployments.repositories.site_domains import DomainTaken
 from src.modules.deployments.services.deployments import (
+    DeploymentCooldown,
     DeploymentInProgress,
     NothingToDeploy,
     deploy,
     get_deployment_status,
     list_deployments,
 )
-from src.modules.deployments.services.sites import InvalidDomain, get_default_domain, set_domains
+from src.modules.deployments.services.sites import (
+    InvalidDomain,
+    attach_domain,
+    check_external_domain,
+    get_default_domain,
+    get_served_domains,
+    get_site_domains,
+    normalize_domain,
+    set_domains,
+)
 from src.modules.deployments.services.sources import NothingToDownload, archive_workspace
 
 __all__ = [
+    "DeploymentCooldown",
     "DeploymentInProgress",
     "DomainTaken",
     "InvalidDomain",
     "NothingToDeploy",
     "NothingToDownload",
+    "SiteDomainKind",
     "archive_workspace",
+    "attach_domain",
+    "check_external_domain",
     "deploy",
     "get_default_domain",
     "get_deployment_status",
+    "get_served_domains",
+    "get_site_domains",
     "list_deployments",
+    "normalize_domain",
     "set_domains",
 ]

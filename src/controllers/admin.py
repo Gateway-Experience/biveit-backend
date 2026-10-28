@@ -109,7 +109,7 @@ async def deploy_project(project_id: int, body: SetDomainsRequest, request: Requ
     try:
         await deployments.set_domains(project, domains)
         conversation = await agent_service.get_current_conversation(project_id, project["user_id"])
-        return await deployments.deploy(project, conversation["id"])
+        return await deployments.deploy(project, conversation["id"], enforce_cooldown=False)
     except deployments.InvalidDomain as error:
         raise HTTPException(status_code=400, detail="INVALID_DOMAIN") from error
     except deployments.DomainTaken as error:

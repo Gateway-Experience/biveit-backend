@@ -27,6 +27,24 @@ SITE_BUILD_UID = 10001
 SITE_BUILD_LIMITS = {"memory": "2g", "cpus": "1.0", "pids": 1024, "tmp_size": "256m"}
 SITE_BUILD_TIMEOUT_SECONDS = 20 * 60
 
+
+# How a site's domains got there (site_domains.kind) -- which decides what's needed before one is served.
+class SiteDomainKind(StrEnum):
+    PURCHASED = "purchased"  # bought through us: we hold it and set its DNS
+    EXTERNAL = "external"  # the user's own: served once its ownership proof checks out
+    ADMIN = "admin"  # set by an admin by hand: trusted
+
+
+# A user's own domain proves it's theirs with a TXT record at DOMAIN_PROOF_PREFIX.<domain>. The checks ask public
+# resolvers directly, so a freshly added record isn't hidden by the server's cache.
+DOMAIN_PROOF_PREFIX = "_biveit-verify"
+DOMAIN_CHECK_NAMESERVERS = ["1.1.1.1", "8.8.8.8"]
+DOMAIN_CHECK_TIMEOUT_SECONDS = 4
+
+# A user can't start another deployment of the same project within this long of the last one (abuse guard). The
+# platform's own deployments (the launch flow, admins) skip it.
+DEPLOYMENT_COOLDOWN_SECONDS = 5 * 60
+
 # A deployment tries this many times (each attempt picks up where the last one got to), waiting
 # DEPLOYMENT_RETRY_DELAY_SECONDS * attempt in between, before rolling back to what was live.
 DEPLOYMENT_ATTEMPTS = 3
