@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.app import create_app
 from src.config import settings
+from src.modules import deployments
 from src.repositories import project_folders as project_folders_repo
 from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
@@ -362,3 +363,41 @@ def test_project_history_says_whether_the_caller_ever_made_a_project(client, mon
     assert response.status_code == 200
     assert response.json() == {"has_created_project": has_created}
     assert asked_for == [_CALLER["id"]]
+
+
+def test_the_code_downloads_as_a_zip_named_after_the_project(monkeypatch, client):
+    async def fake_find(criteria):
+        return [_project(id=1)] if criteria == {"id": 1, "user_id": _CALLER["id"]} else []
+
+    async def get_current_conversation(project_id, user_id):
+        return {"id": 9}
+
+    async def archive_workspace(project, conversation_id):
+        assert conversation_id == 9
+        return "cozy-bakery", b"PK-zip-bytes"
+
+    monkeypatch.setattr(projects_repo, "find", fake_find)
+    monkeypatch.setattr(agent_service, "get_current_conversation", get_current_conversation)
+    monkeypatch.setattr(deployments, "archive_workspace", archive_workspace)
+    response = client.get("/api/projects/1/code")
+    assert response.status_code == 200 and response.content == b"PK-zip-bytes"
+    assert response.headers["content-type"] == "application/zip"
+    assert response.headers["content-disposition"] == 'attachment; filename="cozy-bakery.zip"'
+    assert client.get("/api/projects/2/code").status_code == 404  # not the caller's
+
+
+def test_no_code_to_download_before_the_app_exists(monkeypatch, client):
+    async def fake_find(criteria):
+        return [_project(id=1)]
+
+    async def get_current_conversation(project_id, user_id):
+        return {"id": 9}
+
+    async def archive_workspace(project, conversation_id):
+        raise deployments.NothingToDownload("no app")
+
+    monkeypatch.setattr(projects_repo, "find", fake_find)
+    monkeypatch.setattr(agent_service, "get_current_conversation", get_current_conversation)
+    monkeypatch.setattr(deployments, "archive_workspace", archive_workspace)
+    response = client.get("/api/projects/1/code")
+    assert response.status_code == 409 and response.json()["detail"] == "NOTHING_TO_DOWNLOAD"

@@ -4,7 +4,10 @@
 # checked by hand (docs/plans/deployments.md).
 
 import io
+import os
+import subprocess
 import tarfile
+import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -251,6 +254,71 @@ async def test_committing_the_workspace_returns_the_commit_and_leaves_the_repos_
     argv, cwd, env = repo["ran"]
     assert cwd == "/project/9" and env["GIT_COMMITTER_NAME"] == "biveit"
     assert "git config" not in argv[-1]
+
+
+# --- downloading the code ---
+
+
+def _git(repo, *args):
+    """git in `repo`, as a throwaway identity; its output."""
+    argv = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(repo), *args]
+    return subprocess.run(argv, check=True, capture_output=True, text=True).stdout
+
+
+def test_the_code_download_is_the_apps_now_without_deps_or_envs_and_leaves_the_repo_alone(tmp_path):
+    """The real archive script, with real git, on a workspace-shaped folder (no container needed for this)."""
+    files = {
+        "backend/main.py": "print('hi')",
+        "backend/.gitignore": ".env\n.env.local*\n.venv\n",
+        "backend/.env.local": "JWT_SECRET=dev-secret",
+        "backend/.env.example": "JWT_SECRET=",
+        "backend/.venv/lib.py": "dependency",
+        "frontend/src/App.tsx": "export default 1",
+        "frontend/.gitignore": "node_modules\ndist\n",
+        "frontend/.env": "VITE_API_BASE_URL=/api",
+        "frontend/node_modules/react/index.js": "dependency",
+        "frontend/dist/index.html": "build output",
+        "artifacts/spec.md": "the spec",
+    }
+    for relative_path, content in files.items():
+        (tmp_path / relative_path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative_path).write_text(content)
+    os.symlink("/etc/passwd", tmp_path / "backend" / "leak")
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "add", "backend/main.py")
+    _git(tmp_path, "commit", "-q", "-m", "first")
+    head_before, status_before = _git(tmp_path, "rev-parse", "HEAD"), _git(tmp_path, "status", "--porcelain")
+
+    result = subprocess.run(
+        ["sh", "-c", sources._ARCHIVE_SCRIPT, "sh", "cozy-bakery"], cwd=tmp_path, capture_output=True, check=True
+    )
+    with zipfile.ZipFile(io.BytesIO(result.stdout)) as archive:
+        names = sorted(name for name in archive.namelist() if not name.endswith("/"))
+        assert names == [
+            "cozy-bakery/backend/.env.example",
+            "cozy-bakery/backend/.gitignore",
+            "cozy-bakery/backend/leak",
+            "cozy-bakery/backend/main.py",
+            "cozy-bakery/frontend/.gitignore",
+            "cozy-bakery/frontend/src/App.tsx",
+        ]
+        # A link goes in as a link (its target, as text) -- never what it points at.
+        assert archive.read("cozy-bakery/backend/leak") == b"/etc/passwd"
+    assert _git(tmp_path, "rev-parse", "HEAD") == head_before
+    assert _git(tmp_path, "status", "--porcelain") == status_before
+    assert not list((tmp_path / ".git").glob("biveit-download-*"))
+
+
+def test_the_download_folder_is_named_after_the_project_in_plain_ascii():
+    assert sources.to_code_folder_name({**_PROJECT, "name": "  Cozy Bakery & Café!  "}) == "cozy-bakery-caf"
+    assert sources.to_code_folder_name({**_PROJECT, "name": "Tiệm bánh"}) == "ti-m-b-nh"
+    assert sources.to_code_folder_name({**_PROJECT, "name": "!!!"}) == "project-42"
+
+
+async def test_there_is_nothing_to_download_before_the_app_exists(monkeypatch):
+    monkeypatch.setattr(sources.devenv, "has_app", lambda project, conversation_id: False)
+    with pytest.raises(deployments.NothingToDownload):
+        await deployments.archive_workspace({**_PROJECT, "name": "x"}, 3)
 
 
 # --- the site's container ---
