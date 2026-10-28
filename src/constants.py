@@ -72,6 +72,9 @@ class Charset(StrEnum):
 
 # The httpOnly cookie carrying the user's access token (utils/auth) -- the session, Passport-style.
 ACCESS_TOKEN_COOKIE = "access_token"
+# Its readable sidekick: says only "someone's signed in here" (no token, nothing personal), so the landing
+# site can send signed-in visitors on to the app before it draws anything (utils/auth.set_signed_in_cookie).
+SIGNED_IN_COOKIE = "biveit_signed_in"
 
 # Project search (services/projects.search_prompts): the shortest query worth running, and how much of
 # the matching prompt to show around the match, in characters before / after it.

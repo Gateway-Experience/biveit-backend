@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     # The SPA's origin. Google login redirects back here (with the session cookie set, or with
     # /login?error=<code>), and it's the default CORS origin.
     frontend_url: str = "http://localhost:5173"
+    # The Domain of the signed-in marker cookie (utils/auth.set_signed_in_cookie), so the landing site, on
+    # another host, can read it: "biveit.com" in production (the app is app.biveit.com, the landing
+    # biveit.com). Empty = this host only, which is fine locally since cookies don't care about ports.
+    signed_in_cookie_domain: str = ""
 
     # Google login (controllers/auth). The redirect URI is passed to Google EXPLICITLY and must match one
     # registered on the OAuth client -- never derived from the request, which breaks behind a proxy.
