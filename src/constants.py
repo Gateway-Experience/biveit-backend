@@ -52,6 +52,8 @@ class UserJourney(StrEnum):
 
     # The first-time intro on the projects page, for accounts that have never made a project.
     PROJECTS_INTRO = "projects_intro"
+    # The first-time welcome on the projects page: a short slideshow, then a question about the user's experience.
+    WELCOME = "welcome"
 
 
 # A journey step's name: the column's varchar limit (migrations/0009_user_journey_steps.sql).
