@@ -73,6 +73,7 @@ SESSION_TOKEN_SECRET=
 PROJECT_SECRET_SEED=          # every project's secrets derive from it: set once, back it up
 ADMIN_TOKEN=
 FRONTEND_URL=https://app.example.com
+SIGNED_IN_COOKIE_DOMAIN=example.com   # the landing's domain, so it can skip signed-in visitors straight to the app
 STORAGE_DIR=/home/ubuntu/data/storage_root
 DEV_DOMAIN=dev.example.com
 PROJECT_MONGO_URI=mongodb://biveit:<BIVEIT_MONGO_PW>@127.0.0.1:7017/?authSource=admin

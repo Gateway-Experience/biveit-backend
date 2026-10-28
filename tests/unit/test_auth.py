@@ -3,7 +3,7 @@
 
 import jwt
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from fastapi.security import HTTPAuthorizationCredentials
 
 from src.utils import auth
@@ -92,6 +92,44 @@ async def test_get_current_user_falls_back_to_the_session_cookie(monkeypatch):
     monkeypatch.setattr(auth.users, "get", fake_get)
     token = auth.mint_access_token(1, "alice", "USER")
     assert await auth.get_current_user(None, token) == user
+
+
+async def test_get_current_user_401_drops_the_signed_in_marker():
+    # A session gone bad mustn't leave the marker behind, or the landing site keeps bouncing to the app.
+    with pytest.raises(HTTPException) as ei:
+        await auth.get_current_user(_creds(None), None)
+    assert ei.value.headers["Set-Cookie"].startswith(f"{auth.SIGNED_IN_COOKIE}=")
+    assert "Max-Age=0" in ei.value.headers["Set-Cookie"]
+
+
+# --- The signed-in marker: set beside the session for real users, never for guests ---
+
+
+def _set_cookie_headers(response: Response) -> list[str]:
+    return [value.decode() for key, value in response.raw_headers if key == b"set-cookie"]
+
+
+def test_login_sets_a_readable_marker_for_the_landing_domain(monkeypatch):
+    monkeypatch.setattr(auth.settings, "signed_in_cookie_domain", "biveit.com")
+    response = Response()
+    auth.set_access_cookie(response, "token")
+    marker = next(header for header in _set_cookie_headers(response) if header.startswith(auth.SIGNED_IN_COOKIE))
+    assert "Domain=biveit.com" in marker
+    assert "HttpOnly" not in marker
+
+
+def test_guest_session_drops_the_marker():
+    response = Response()
+    auth.set_access_cookie(response, "token", is_guest=True)
+    marker = next(header for header in _set_cookie_headers(response) if header.startswith(auth.SIGNED_IN_COOKIE))
+    assert "Max-Age=0" in marker
+
+
+def test_logout_drops_both_cookies():
+    response = Response()
+    auth.clear_access_cookie(response)
+    names = [header.split("=", 1)[0] for header in _set_cookie_headers(response)]
+    assert names == [auth.ACCESS_TOKEN_COOKIE, auth.SIGNED_IN_COOKIE]
 
 
 # --- get_current_user_optional: lenient, None instead of raising ---

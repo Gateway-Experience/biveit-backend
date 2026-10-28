@@ -26,7 +26,7 @@ import pydash
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 
-from src.constants import AVATAR_MAX_BYTES, UserJourney
+from src.constants import AVATAR_MAX_BYTES, UserJourney, UserType
 from src.dto.users import (
     AddJourneyStepRequest,
     AuthenticateRequest,
@@ -41,16 +41,22 @@ from src.dto.users import (
 )
 from src.repositories import user_journey_steps as user_journey_steps_repo
 from src.services import users as user_service
-from src.utils.auth import get_current_user, set_access_cookie
+from src.utils.auth import clear_signed_in_cookie, get_current_user, set_access_cookie, set_signed_in_cookie
 from src.utils.logging import log_http_error
 
 router = APIRouter()
 
 
 @router.get("/me")
-async def get_me(user: User = Depends(get_current_user)) -> User:
+async def get_me(response: Response, user: User = Depends(get_current_user)) -> User:
     """The authenticated caller's own record, returned BARE (not wrapped in an envelope) -- the FE
-    stores the response as the user directly. No service hop: the auth dependency already loaded it."""
+    stores the response as the user directly. No service hop: the auth dependency already loaded it.
+    Also refreshes the signed-in marker (utils/auth.set_signed_in_cookie), so sessions from before it
+    existed get it on their next visit."""
+    if user["user_type"] == UserType.GUEST:
+        clear_signed_in_cookie(response)
+    else:
+        set_signed_in_cookie(response)
     return user
 
 
@@ -205,7 +211,7 @@ async def register_guest(request: Request, response: Response, body: dict | None
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
-    set_access_cookie(response, result["token"])
+    set_access_cookie(response, result["token"], is_guest=True)
     return result
 
 

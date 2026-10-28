@@ -28,7 +28,7 @@ from fastapi.security import APIKeyCookie, HTTPAuthorizationCredentials, HTTPBea
 from jwt.warnings import InsecureKeyLengthWarning
 
 from src.config import settings
-from src.constants import ACCESS_TOKEN_COOKIE, UserRole
+from src.constants import ACCESS_TOKEN_COOKIE, SIGNED_IN_COOKIE, UserRole
 from src.dto.users import User
 from src.repositories import users
 from src.utils.common import utc_now
@@ -46,7 +46,6 @@ warnings.filterwarnings("ignore", category=InsecureKeyLengthWarning)
 _bearer = HTTPBearer(auto_error=False)
 _session_cookie = APIKeyCookie(name=ACCESS_TOKEN_COOKIE, auto_error=False)
 
-_UNAUTHORIZED = HTTPException(status_code=401, detail="UNAUTHORIZED", headers={"WWW-Authenticate": "Bearer"})
 _FORBIDDEN = HTTPException(status_code=403, detail="FORBIDDEN")
 
 
@@ -100,7 +99,13 @@ async def get_current_user(
     logged-in caller."""
     user = await _resolve_user(creds, cookie_token)
     if user is None:
-        raise _UNAUTHORIZED
+        # Also drops the signed-in marker: a session that's gone bad (deleted user, rotated secret) would
+        # otherwise keep bouncing the landing site to the app, and the app to Log in.
+        raise HTTPException(
+            status_code=401,
+            detail="UNAUTHORIZED",
+            headers={"WWW-Authenticate": "Bearer", "Set-Cookie": _build_clear_signed_in_header()},
+        )
     return user
 
 
@@ -122,7 +127,9 @@ async def get_current_user_optional(
 # API host. Secure everywhere but local, where the dev server is plain http.
 
 
-def set_access_cookie(response: Response, token: str) -> None:
+def set_access_cookie(response: Response, token: str, *, is_guest: bool = False) -> None:
+    """The session cookie, plus the signed-in marker for a real (non-guest) user. `is_guest`: a guest has a
+    session too, but the landing page is still theirs, so no marker (and any old one goes)."""
     response.set_cookie(
         ACCESS_TOKEN_COOKIE,
         token,
@@ -131,11 +138,55 @@ def set_access_cookie(response: Response, token: str) -> None:
         secure=settings.env != "local",
         samesite="lax",
     )
+    if is_guest:
+        clear_signed_in_cookie(response)
+    else:
+        set_signed_in_cookie(response)
 
 
 def clear_access_cookie(response: Response) -> None:
     # Must mirror set_access_cookie's attributes, or the browser treats it as a different cookie.
     response.delete_cookie(ACCESS_TOKEN_COOKIE, httponly=True, secure=settings.env != "local", samesite="lax")
+    clear_signed_in_cookie(response)
+
+
+# --- The signed-in marker -------------------------------------------------------------------------
+# Intentions: the landing site (biveit.com) is for visitors who aren't signed in. It used to find out by
+# calling GET /me, which meant drawing the whole page first and then redirecting a second later. This
+# cookie lets it decide before drawing anything: readable by JS (it's only a "1", no token), and set for
+# the parent domain (settings.signed_in_cookie_domain) so the landing host can see it. It's a hint, not
+# auth: the session cookie stays the proof. Set by every login and refreshed by GET /me (so sessions from
+# before it existed pick it up); dropped on logout and on any 401 (see get_current_user).
+# References: biveit-landing's layouts/Base.astro.
+
+
+def set_signed_in_cookie(response: Response) -> None:
+    response.set_cookie(
+        SIGNED_IN_COOKIE,
+        "1",
+        max_age=settings.jwt_expiry_seconds,
+        domain=settings.signed_in_cookie_domain or None,
+        secure=settings.env != "local",
+        samesite="lax",
+    )
+
+
+def clear_signed_in_cookie(response: Response) -> None:
+    # Same Domain as set_signed_in_cookie, or the browser treats it as a different cookie.
+    response.delete_cookie(
+        SIGNED_IN_COOKIE,
+        domain=settings.signed_in_cookie_domain or None,
+        secure=settings.env != "local",
+        samesite="lax",
+    )
+
+
+def _build_clear_signed_in_header() -> str:
+    """[Pure-ish] The Set-Cookie header value that drops the marker, for responses we don't build ourselves
+    (a raised HTTPException)."""
+    scratch_response = Response()
+    clear_signed_in_cookie(scratch_response)
+    return scratch_response.headers["set-cookie"]
 
 
 async def require_admin(user: User = Depends(get_current_user)) -> User:
