@@ -32,8 +32,9 @@ from src.utils.processes import CommandFailed
 # Chromium build matches (see data/devenv_image/Dockerfile). playwright-core: no browser download of its own.
 _PLAYWRIGHT_PATH = f"{RUNNER_INSTALL_PATH}/extensions/node_modules/playwright-core"
 
-# Opens the site at desktop size (16:10, the card's shape), waits for it to settle, and prints the
-# screenshot as base64 JPEG on stdout, between markers -- our command runner reads text (stdout and stderr
+# Opens the site at desktop size (16:10, the card's shape) but draws it at 3/8 scale: a 480x300 picture, a bit
+# over the card's width so it stays fairly sharp on retina screens, at a small fraction of a full-size one's bytes. Then it waits for
+# the site to settle, and prints the screenshot as base64 JPEG on stdout, between markers -- our command runner reads text (stdout and stderr
 # mixed, so a browser warning can land around it), and this way nothing is written in the container. A site that doesn't answer, or answers with a server error, exits non-zero: no picture
 # is better than a picture of an error page. --no-sandbox: same reason as the browser tool's (the
 # container drops the privileges Chromium's sandbox needs).
@@ -42,7 +43,7 @@ const { chromium } = require(process.argv[1]);
 (async () => {
   const browser = await chromium.launch({ args: ['--no-sandbox'] });
   try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 0.375 });
     const response = await page.goto(process.argv[2], { waitUntil: 'load', timeout: 20000 });
     if (!response || response.status() >= 500) {
       throw new Error(`the site answered ${response && response.status()}`);
