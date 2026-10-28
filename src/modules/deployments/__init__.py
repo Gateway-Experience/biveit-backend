@@ -5,10 +5,11 @@
 #
 # Each deployment is a git commit of the workspace; retries pick up where the last attempt got to, and a
 # deployment that never comes up rolls back to what was live. services/deployments.py has the full story,
-# services/__init__.py what each file owns. Server setup it needs (sudo for certbot, the ACME catch-all):
+# services/__init__.py what each file owns (repositories/ holds its own table, site_domains). Server setup it needs (sudo for certbot, the ACME catch-all):
 # docs/plans/deployments.md.
 # Callers import THIS package (`from src.modules import deployments`), not the files.
 
+from src.modules.deployments.repositories.site_domains import DomainTaken
 from src.modules.deployments.services.deployments import (
     DeploymentInProgress,
     NothingToDeploy,
@@ -20,6 +21,7 @@ from src.modules.deployments.services.sites import InvalidDomain, get_default_do
 
 __all__ = [
     "DeploymentInProgress",
+    "DomainTaken",
     "InvalidDomain",
     "NothingToDeploy",
     "deploy",

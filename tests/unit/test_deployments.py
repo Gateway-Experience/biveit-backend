@@ -356,17 +356,17 @@ def test_the_prod_env_has_its_own_secrets_and_database(monkeypatch):
 
 
 async def test_domains_are_normalized_and_anything_else_refused(monkeypatch):
-    updates = []
+    state = {"replaced": []}
 
-    async def update(project_id, changes):
-        updates.append((project_id, changes))
+    async def replace(project_id, domains):
+        state["replaced"] = [*state["replaced"], (project_id, domains)]
 
-    monkeypatch.setattr(sites.projects_repo, "update", update)
+    monkeypatch.setattr(sites.site_domains_repo, "replace", replace)
     assert await deployments.set_domains(_PROJECT, [" Shop.Example.com. ", "shop.example.com", "www.shop.io"]) == [
         "shop.example.com",
         "www.shop.io",
     ]
-    assert updates == [(42, {"domains": {"app_domains": ["shop.example.com", "www.shop.io"]}})]
+    assert state["replaced"] == [(42, ["shop.example.com", "www.shop.io"])]
     for bad in ["shop.example.com; include /etc/passwd", "localhost", "-x.com", "a..com", "*.example.com"]:
         with pytest.raises(deployments.InvalidDomain):
             await deployments.set_domains(_PROJECT, [bad])
@@ -389,8 +389,7 @@ def host(tmp_path, monkeypatch):
 
 
 async def test_each_domain_gets_its_certificate_then_a_server_block(host):
-    project = {**_PROJECT, "domains": {"app_domains": ["shop.example.com", "www.shop.io"]}}
-    await sites.ensure_site(project)
+    await sites.ensure_site(_PROJECT, ["shop.example.com", "www.shop.io"])
     certbot_runs = [argv for argv in host["ran"] if "certbot" in argv]
     assert [argv[argv.index("certonly") :][3] for argv in certbot_runs] == [
         "--cert-name=shop.example.com",
@@ -404,7 +403,7 @@ async def test_each_domain_gets_its_certificate_then_a_server_block(host):
 async def test_a_subdomain_of_ours_uses_the_wildcard_certificate(host, monkeypatch):
     monkeypatch.setattr(settings, "prod_domain", "sites.biveit.app")
     domains = ["p42hash.sites.biveit.app", "deep.p42hash.sites.biveit.app", "shop.example.com"]
-    await sites.ensure_site({**_PROJECT, "domains": {"app_domains": domains}})
+    await sites.ensure_site(_PROJECT, domains)
     certbot_runs = [argv for argv in host["ran"] if "certbot" in argv]
     # The wildcard reaches one label down only, so the deeper one needs its own.
     assert [argv[argv.index("certonly") :][3] for argv in certbot_runs] == [
@@ -419,6 +418,6 @@ async def test_a_subdomain_of_ours_uses_the_wildcard_certificate(host, monkeypat
 
 async def test_without_domains_there_is_no_site(host, tmp_path):
     (tmp_path / "biveit-site-42.conf").write_text("old")
-    await sites.ensure_site(_PROJECT)
+    await sites.ensure_site(_PROJECT, [])
     assert ["sudo", "-n", "rm", "-f", str(tmp_path / "biveit-site-42.conf")] in host["ran"]
     assert not [argv for argv in host["ran"] if "certbot" in argv]

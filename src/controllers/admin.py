@@ -11,7 +11,8 @@
 #   GET  /admin/projects/{id}/deployments  {status, history, default_domain} (modules/deployments)
 #   POST /admin/projects/{id}/deployments  {domains}: set the site's domains -- none given = the default one,
 #                                     <hash>.<PROD_DOMAIN> -- then deploy, as its owner would; 202 {run_id, commit}.
-#                                     409 NOTHING_TO_DEPLOY / DEPLOYMENT_IN_PROGRESS, 400 INVALID_DOMAIN / NO_DOMAIN
+#                                     409 NOTHING_TO_DEPLOY / DEPLOYMENT_IN_PROGRESS / DOMAIN_TAKEN, 400
+#                                     INVALID_DOMAIN / NO_DOMAIN
 # The same sections scripts/manage.py's `status` prints.
 
 import asyncio
@@ -108,10 +109,11 @@ async def deploy_project(project_id: int, body: SetDomainsRequest, request: Requ
     try:
         await deployments.set_domains(project, domains)
         conversation = await agent_service.get_current_conversation(project_id, project["user_id"])
-        # Read again: the deployment works off the project as it's passed, new domains included.
-        return await deployments.deploy(await _get_project(project_id), conversation["id"])
+        return await deployments.deploy(project, conversation["id"])
     except deployments.InvalidDomain as error:
         raise HTTPException(status_code=400, detail="INVALID_DOMAIN") from error
+    except deployments.DomainTaken as error:
+        raise HTTPException(status_code=409, detail="DOMAIN_TAKEN") from error
     except deployments.NothingToDeploy as error:
         raise HTTPException(status_code=409, detail="NOTHING_TO_DEPLOY") from error
     except deployments.DeploymentInProgress as error:

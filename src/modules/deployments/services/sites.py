@@ -1,6 +1,7 @@
 # Intentions: a project's site on its domains -- the host's nginx in front of the site's container. The domains
-# are all listed in projects.domains.app_domains (the user's own and subdomains of ours alike, DNS already
-# pointing at us); one nginx file per project (utils/nginx) holds a server block per domain.
+# are the project's rows in site_domains (the user's own and subdomains of ours alike, DNS already pointing at
+# us; a domain is only ever one project's); one nginx file per project (utils/nginx) holds a server block per
+# domain.
 #
 # A domain right under settings.prod_domain uses our wildcard certificate, which already exists. Every other
 # one gets its own Let's Encrypt certificate from certbot's webroot challenge: the first one is answered by the
@@ -15,8 +16,8 @@ import pydash
 from src.config import settings
 from src.dto.projects import Project
 from src.modules.deployments.constants import SITE_NGINX_TEMPLATE
+from src.modules.deployments.repositories import site_domains as site_domains_repo
 from src.modules.deployments.services import containers
-from src.repositories import projects as projects_repo
 from src.utils import nginx, templates
 from src.utils.processes import run_command
 
@@ -29,8 +30,9 @@ class InvalidDomain(ValueError):
     """Not a host name we'd serve a site on."""
 
 
-def get_domains(project: Project) -> list[str]:
-    return pydash.get(project, "domains.app_domains") or []
+async def get_domains(project: Project) -> list[str]:
+    """The domains the project's site is served on, oldest first."""
+    return [row["domain"] for row in await site_domains_repo.find({"project_id": project["id"]})]
 
 
 def get_default_domain(project: Project) -> str | None:
@@ -40,29 +42,28 @@ def get_default_domain(project: Project) -> str | None:
     return f"{project['hash']}.{settings.prod_domain}" if settings.prod_domain else None
 
 
-def get_site_urls(project: Project) -> list[str]:
-    return [f"https://{domain}" for domain in get_domains(project)]
+def to_site_urls(domains: list[str]) -> list[str]:
+    """[Pure]"""
+    return [f"https://{domain}" for domain in domains]
 
 
 async def set_domains(project: Project, domains: list[str]) -> list[str]:
     """Record the domains the project's site is served on (trimmed, lower-cased, deduped) and return them.
-    They take effect at the next deployment. Raises InvalidDomain."""
+    They take effect at the next deployment. Raises InvalidDomain, or DomainTaken when one is another
+    project's (then nothing changes)."""
     normalized = pydash.uniq([domain.strip().lower().rstrip(".") for domain in domains])
     invalid = [domain for domain in normalized if not _DOMAIN_PATTERN.match(domain)]
     if invalid:
         raise InvalidDomain(f"not a domain: {', '.join(invalid)}")
-    await projects_repo.update(
-        project["id"], {"domains": {**(project.get("domains") or {}), "app_domains": normalized}}
-    )
+    await site_domains_repo.replace(project["id"], normalized)
     return normalized
 
 
-async def ensure_site(project: Project) -> None:
-    """Make sure every one of the project's domains has its certificate and routes to its container -- or,
-    with no domains, that there's no nginx site at all. Idempotent: certbot keeps a certificate that isn't
-    due for renewal, and nginx is only reloaded when the file changes."""
+async def ensure_site(project: Project, domains: list[str]) -> None:
+    """Make sure every one of `domains` (the project's, see get_domains) has its certificate and routes to its
+    container -- or, with none, that there's no nginx site at all. Idempotent: certbot keeps a certificate that
+    isn't due for renewal, and nginx is only reloaded when the file changes."""
     site_path = os.path.join(settings.nginx_sites_dir, f"biveit-site-{project['id']}.conf")
-    domains = get_domains(project)
     if not domains:
         await nginx.remove_site(site_path)
         return

@@ -82,13 +82,14 @@ async def get_deployment_status(project: Project, conversation_id: int) -> dict:
     has_app = devenv.has_app(project, conversation_id)
     has_changes = await sources.has_changes_since(project, conversation_id, pydash.get(live, "commit"))
     deployments = await list_deployments(project)
+    domains = await sites.get_domains(project)
     return {
         "live": live,
         "deploying": deploying,
         "has_undeployed_changes": has_changes,
         "can_deploy": has_app and not deploying and has_changes is not False,
-        "domains": sites.get_domains(project),
-        "urls": sites.get_site_urls(project),
+        "domains": domains,
+        "urls": sites.to_site_urls(domains),
         "last_deployment": pydash.head(deployments),
     }
 
@@ -141,9 +142,11 @@ async def ensure_release(project: Project, conversation_id: int, commit: str) ->
             project["id"], image_tag, await sources.archive_commit(project, conversation_id, commit)
         )
     await environment.ensure_database_access(project)
-    site_env = environment.render_site_env(project, sites.get_site_urls(project))
+    # Read once, so the site's CORS origins and its nginx file agree within an attempt.
+    domains = await sites.get_domains(project)
+    site_env = environment.render_site_env(project, sites.to_site_urls(domains))
     await containers.ensure_site_container(project, image_tag, commit, site_env)
-    await sites.ensure_site(project)
+    await sites.ensure_site(project, domains)
 
 
 async def _roll_out(

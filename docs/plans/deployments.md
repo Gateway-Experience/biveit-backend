@@ -31,9 +31,10 @@ setup it needs, and how to check it by hand.
   `--restart=unless-stopped`, no capabilities.
 - **Prod is apart from dev**: its own Mongo user and secrets (`project:<id>:prod:<name>`), rendered from the
   boilerplate's `backend/.env.prod.tmpl` and passed to the container by name -- never written to the workspace.
-- **Domains**: `projects.domains.app_domains`, set with `PUT /projects/{id}/domains`, applied at the next
-  deployment. All listed, ours too: a subdomain right under `PROD_DOMAIN` uses our wildcard certificate (set up
-  once, like the dev one); any other domain gets its own from certbot.
+- **Domains**: the `site_domains` table (a domain is one project's, platform-wide), set with
+  `PUT /projects/{id}/domains`, applied at the next deployment. All listed, ours too: a subdomain right under
+  `PROD_DOMAIN` uses our wildcard certificate (set up once, like the dev one); any other domain gets its own from
+  certbot.
 
 ## API
 

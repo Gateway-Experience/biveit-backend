@@ -129,3 +129,13 @@ def test_deploying_without_any_domain_to_use_is_refused(deploying, monkeypatch):
     response = _client_as(_ADMIN).post("/api/admin/projects/16/deployments", json={"domains": []})
     assert response.status_code == 400 and response.json()["detail"] == "NO_DOMAIN"
     assert deploying["deployed"] == []
+
+
+def test_a_domain_another_project_has_is_refused(deploying, monkeypatch):
+    async def set_domains(project, domains):
+        raise admin.deployments.DomainTaken(domains)
+
+    monkeypatch.setattr(admin.deployments, "set_domains", set_domains)
+    response = _client_as(_ADMIN).post("/api/admin/projects/16/deployments", json={"domains": ["shop.example.com"]})
+    assert response.status_code == 409 and response.json()["detail"] == "DOMAIN_TAKEN"
+    assert deploying["deployed"] == []

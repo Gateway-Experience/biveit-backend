@@ -24,8 +24,6 @@ class Project(TypedDict):
     pinned_at: Any  # datetime | None -- when the user pinned it to the top of their sidebar
     # The folder it sits directly in, or None (the root). Always a live folder: deleting one clears this.
     folder_id: int | None
-    # Where its production site is served: {"app_domains": [...]} (modules/deployments).
-    domains: dict[str, Any]
     meta: dict[str, Any]
     created_at: Any  # datetime
     updated_at: Any  # datetime -- "last edited"; the list is sorted by it

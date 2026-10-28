@@ -6,7 +6,7 @@
 #                                                   anything new to deploy
 #   PUT  /projects/{id}/domains             (auth)  {domains}: where the site is served, from the next deployment
 # Errors: 404 PROJECT_NOT_FOUND (not the caller's), 409 NOTHING_TO_DEPLOY (no app yet), 409
-# DEPLOYMENT_IN_PROGRESS, 400 INVALID_DOMAIN.
+# DEPLOYMENT_IN_PROGRESS, 400 INVALID_DOMAIN, 409 DOMAIN_TAKEN (another project's).
 # TODO: deploying isn't gated on anything yet (payment, plan) -- it must be before the FE offers it.
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -82,6 +82,8 @@ async def set_domains(
         raise
     except deployments.InvalidDomain as error:
         raise HTTPException(status_code=400, detail="INVALID_DOMAIN") from error
+    except deployments.DomainTaken as error:
+        raise HTTPException(status_code=409, detail="DOMAIN_TAKEN") from error
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
