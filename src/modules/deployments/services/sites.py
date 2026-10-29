@@ -111,6 +111,12 @@ async def check_external_domain(project: Project, domain: str) -> dict:
     }
 
 
+async def is_pointed_at_server(domain: str) -> bool:
+    """Whether public DNS answers `domain`'s A record with the server's address -- what Let's Encrypt needs before
+    it can issue a certificate. [I/O: reads]"""
+    return settings.server_public_ip in await _resolve(domain, "A")
+
+
 def get_domain_proof_token(project: Project, domain: str) -> str:
     """[Pure-ish] The token a user's TXT record must hold to prove `domain` is theirs for this project."""
     return devenv.derive_secret(f"project:{project['id']}:site-domain:{domain}", 32).lower()

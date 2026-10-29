@@ -12,6 +12,7 @@ import pydash as _
 
 from src.modules.domains.constants import DEFAULT_REGISTRAR, MIN_TERM_CACHE_SECONDS, REGISTRAR_BY_TLD, SEARCH_TLDS
 from src.modules.domains.services import namecom
+from src.modules.domains.services.registrars import RegistrarError
 from src.utils import cache
 
 # Every registrar client we have, by the name domains and the routing table refer to them with.
@@ -100,7 +101,8 @@ async def register_domain(domain_name: str, years: int, registrant: dict, idempo
     be echoed back exactly. The user fills every contact role, so none of them fall back to our account's
     defaults. Pass the same `idempotency_key` (e.g. our order id) on a retry and the registrar replays the first
     result instead of buying twice. Returns which registrar holds it now -- store that, it's where every later
-    call for this domain goes. Raises DomainUnavailable. [I/O]"""
+    call for this domain goes. Raises DomainUnavailable -- also when the registry turns it down at purchase time
+    (a reserved name the availability check still calls available). [I/O]"""
     registrar_name = _route_registrar(domain_name)
     registrar = _REGISTRARS[registrar_name]
     check = _.head(await registrar.check_availability([domain_name])) or {}
@@ -109,13 +111,21 @@ async def register_domain(domain_name: str, years: int, registrant: dict, idempo
     purchase_price = (
         (await registrar.get_pricing(domain_name, years))["purchasePrice"] if check.get("premium") else None
     )
-    created = await registrar.create_domain(
-        domain_name,
-        years,
-        {role: registrant for role in ["registrant", "admin", "tech", "billing"]},
-        purchase_price,
-        idempotency_key,
-    )
+    try:
+        created = await registrar.create_domain(
+            domain_name,
+            years,
+            {role: registrant for role in ["registrant", "admin", "tech", "billing"]},
+            purchase_price,
+            idempotency_key,
+        )
+    except RegistrarError as error:
+        # Intentions: the registry said no to this name (Name.com words it "Domain registration rejected by
+        # registry") -- as unbuyable as a taken one. Other 400s (a bad contact field) are our problem, not the
+        # domain's, so they stay errors.
+        if error.status == 400 and "rejected by registry" in error.message.lower():
+            raise DomainUnavailable(domain_name) from error
+        raise
     return {
         "domain": created["domain"]["domainName"],
         "expires_at": created["domain"].get("expireDate"),

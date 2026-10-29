@@ -26,6 +26,7 @@ from src.modules.deployments.services.sites import (
     get_default_domain,
     get_served_domains,
     get_site_domains,
+    is_pointed_at_server,
     normalize_domain,
     set_domains,
 )
@@ -47,6 +48,7 @@ __all__ = [
     "get_deployment_status",
     "get_served_domains",
     "get_site_domains",
+    "is_pointed_at_server",
     "list_deployments",
     "normalize_domain",
     "set_domains",

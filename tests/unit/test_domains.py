@@ -131,6 +131,23 @@ async def test_registering_an_aftermarket_domain_is_refused(monkeypatch):
         await domains.register_domain("foo.com", 1, {"firstName": "An"}, "order-1")
 
 
+@pytest.mark.parametrize(
+    ("message", "unavailable"),
+    [("Domain registration rejected by registry", True), ("Invalid phone number", False)],
+)
+async def test_a_name_the_registry_turns_down_counts_as_unavailable(monkeypatch, message, unavailable):
+    async def fake_check_availability(domain_names):
+        return [{"domainName": "test2.app", "purchasable": True, "purchaseType": "registration"}]
+
+    async def fake_create_domain(domain_name, years, contacts, purchase_price, idempotency_key):
+        raise domains.RegistrarError("namecom", 400, message)
+
+    monkeypatch.setattr(namecom, "check_availability", fake_check_availability)
+    monkeypatch.setattr(namecom, "create_domain", fake_create_domain)
+    with pytest.raises(domains.DomainUnavailable if unavailable else domains.RegistrarError):
+        await domains.register_domain("test2.app", 1, {"firstName": "An"}, "order-1")
+
+
 def _client_as(user):
     app = create_app()
     app.dependency_overrides[get_current_user] = lambda: user

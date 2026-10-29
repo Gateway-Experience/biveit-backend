@@ -5,23 +5,26 @@
 #   2. the user's own domain from the launch is attached, and made the active one -- right away if there's none
 #      yet, else once its DNS checks out (a site already served somewhere stays there until then)
 #   3. the site is deployed if it isn't serving its active domain yet (and that domain may be served: a user's own
-#      one only once its DNS records check out)
+#      one only once its DNS records check out, one we just bought once public DNS points it at us or
+#      PURCHASED_DOMAIN_SETTLE_SECONDS after it's attached, whichever comes first)
 # Re-run on every payment webhook, every launch-status poll, and every LAUNCH_SWEEP_SECONDS for every project
 # with a running plan (fulfil_running_plans) -- a domain whose DNS shows up hours later goes live with nobody
 # watching. Only with hosting (a plan running).
 #
-# A domain that can't be registered after all (taken between checkout and payment) gets its subscription cancelled
+# A domain that can't be registered after all (taken between checkout and payment, or turned down by the
+# registry) gets its subscription cancelled
 # and its payment refunded (a free-first-year one charged nothing), and the failure recorded: the plan stays, the
 # user picks another domain. Steps that talk to the registrar only run until the domain is attached, so polling
 # doesn't hammer it.
 # References: checkouts.py (the intent this reads), status.py (where it's shown).
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pydash
 
 from src.config import settings
+from src.constants import PURCHASED_DOMAIN_SETTLE_SECONDS
 from src.dto.projects import Project
 from src.modules import deployments, domains, payments
 from src.modules.domains import DomainUnavailable, LiveSpendRefused, RegistrarError
@@ -100,7 +103,8 @@ async def _ensure_purchased_domain(project: Project, subscription: dict) -> None
       2. register it at the registrar, with the registrant from the launch that bought it
       3. its A record -> our server
       4. attach it
-    If it can't be registered (someone took it between checkout and payment), the user gets their money back for
+    If it can't be registered (someone took it between checkout and payment, or the registry turned it down), the
+    user gets their money back for
     the domain only: the subscription is cancelled, its payment refunded, and the failure recorded -- the status
     then asks for another domain, and the launch's access (access.py) no longer counts this subscription, so it
     never comes back here. The plan stays."""
@@ -179,9 +183,17 @@ async def _ensure_own_domain(project: Project, domain: str) -> None:
 async def _ensure_deployed(project: Project) -> None:
     """Step 3: the site gets deployed on its active domain, once that domain may be served. Deploys at most once
     per activation: a deployment that's running, done or failed since then means there's nothing to start (a
-    failure isn't retried by itself -- it shows, and the user redeploys)."""
+    failure isn't retried by itself -- it shows, and the user redeploys).
+
+    A domain we just bought waits until public DNS points it at us -- Let's Encrypt can't issue its certificate
+    before that -- but only up to PURCHASED_DOMAIN_SETTLE_SECONDS after it's attached. Past that it deploys anyway,
+    and the deployment's own retries are the last chance before it shows as failed."""
     active = pydash.find(await deployments.get_site_domains(project), lambda row: row["activated_at"] is not None)
     if active is None:
+        return
+    settled_at = active["created_at"] + timedelta(seconds=PURCHASED_DOMAIN_SETTLE_SECONDS)
+    is_settling = active["kind"] == deployments.SiteDomainKind.PURCHASED and datetime.now(UTC) < settled_at
+    if is_settling and not await deployments.is_pointed_at_server(active["domain"]):
         return
     # Intentions: the domain a site serves is read when a deployment rolls out, so one started before the domain
     # became active doesn't serve it -- only a later one counts.

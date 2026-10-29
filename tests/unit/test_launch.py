@@ -446,7 +446,7 @@ def fulfilment_world(monkeypatch):
         "access": {"can_host": True, "domain_subscription": subscription, "plan_subscription": {"custom_data": {"launch_id": "l1"}}},
         "attached": [], "registered": [], "records": [], "refunded": [], "cancelled": [], "failures": [], "deployed": [],
         "registrar_has": set(), "unavailable": False, "dns_ready": True, "deployments": [], "live": [],
-        "intent_domain": {"kind": "buy", "name": "cozy.com"}, "now": _NOW,
+        "intent_domain": {"kind": "buy", "name": "cozy.com"}, "now": _NOW, "points_at_us": False,
     }  # fmt: skip
 
     async def get_project_access(project_id):
@@ -511,6 +511,9 @@ def fulfilment_world(monkeypatch):
     async def check_external_domain(project, domain):
         return {"domain": domain, "blocked": None, "records": [], "verified": state["dns_ready"]}
 
+    async def is_pointed_at_server(domain):
+        return state["points_at_us"]
+
     async def get_served_domains(project):
         return [
             row["domain"]
@@ -555,6 +558,7 @@ def fulfilment_world(monkeypatch):
         (fulfilment.deployments, "attach_domain", attach_domain),
         (fulfilment.deployments, "check_external_domain", check_external_domain),
         (fulfilment.deployments, "get_served_domains", get_served_domains),
+        (fulfilment.deployments, "is_pointed_at_server", is_pointed_at_server),
         (fulfilment.deployments, "list_deployments", list_deployments),
         (fulfilment.deployments, "deploy", deploy),
         (fulfilment.agent_service, "get_current_conversation", get_current_conversation),
@@ -564,6 +568,7 @@ def fulfilment_world(monkeypatch):
 
 
 async def test_a_paid_domain_is_registered_pointed_at_us_attached_and_deployed(fulfilment_world):
+    # Attached at _NOW, long past: settled in public DNS by the time it's deployed.
     await fulfilment.fulfil(42)
     assert fulfilment_world["registered"] == [("cozy.com", 1, "VN", "subscription-sub-1")]
     assert fulfilment_world["records"] == [{"host": "", "type": "A", "answer": "57.0.0.1", "ttl": 300}]
@@ -572,6 +577,27 @@ async def test_a_paid_domain_is_registered_pointed_at_us_attached_and_deployed(f
     # Run again (every status poll does): the registrar isn't asked again.
     await fulfilment.fulfil(42)
     assert len(fulfilment_world["registered"]) == 1 and fulfilment_world["deployed"] == [False]
+
+
+async def test_a_domain_just_bought_deploys_once_public_dns_has_it(fulfilment_world):
+    fulfilment_world["now"] = datetime.now(UTC)
+    await fulfilment.fulfil(42)
+    assert fulfilment_world["attached"][0]["activated_at"] and fulfilment_world["deployed"] == []
+    fulfilment_world["points_at_us"] = True
+    await fulfilment.fulfil(42)
+    assert fulfilment_world["deployed"] == [False]
+
+
+async def test_a_domain_just_bought_deploys_anyway_after_a_few_minutes(fulfilment_world):
+    fulfilment_world["now"] = datetime.now(UTC)
+    await fulfilment.fulfil(42)
+    assert fulfilment_world["deployed"] == []
+    fulfilment_world["attached"] = [
+        {**row, "created_at": row["created_at"] - timedelta(minutes=5, seconds=1)}
+        for row in fulfilment_world["attached"]
+    ]
+    await fulfilment.fulfil(42)
+    assert fulfilment_world["deployed"] == [False]
 
 
 async def test_a_domain_gone_by_payment_is_refunded_and_the_plan_stays(fulfilment_world):

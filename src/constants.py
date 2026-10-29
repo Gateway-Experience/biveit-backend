@@ -261,6 +261,10 @@ DEVENV_IDLE_SWEEP_SECONDS = 5 * 60
 # Launches that are still on their way (a user's own domain waiting for its DNS, mostly) are moved along by reading
 # their status -- and, so they get there with nobody watching, every LAUNCH_SWEEP_SECONDS (services/launch).
 LAUNCH_SWEEP_SECONDS = 5 * 60
+# A domain we just bought takes a few minutes to show up in public DNS, and Let's Encrypt can't issue its
+# certificate before then -- so its first deployment waits until public DNS points it at us, or this long after
+# it's attached, whichever comes first.
+PURCHASED_DOMAIN_SETTLE_SECONDS = 5 * 60
 DEVENV_CONTAINER_LIMITS = {"memory": "3g", "cpus": "1.0", "pids": 2048, "nofile": 65536, "tmp_size": "256m"}
 
 
