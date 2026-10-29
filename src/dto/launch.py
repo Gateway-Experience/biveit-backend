@@ -1,9 +1,10 @@
 # Launch typing (services/launch, controllers/launch): the request CONTRACTS (Pydantic) validating untrusted HTTP
 # bodies of the launch flow -- choosing a plan and a domain, then paying. See docs/plans/launch-flow.md.
 
+import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, StringConstraints, model_validator
+from pydantic import BaseModel, BeforeValidator, StringConstraints, model_validator
 
 _Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
@@ -26,8 +27,13 @@ class Registrant(BaseModel):
     email: Annotated[
         str, StringConstraints(strip_whitespace=True, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     ]
-    # E.164, as the registrar wants it: +<country code>.<number>, e.g. +84.901234567
-    phone: Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\+\d{1,3}\.\d{4,14}$")]
+    # E.164, as the registrar wants it: + then the country code and number, digits only (+84901234567). Typed with
+    # spaces, dots, dashes or brackets is fine -- they're dropped before the check (Name.com's own pattern).
+    phone: Annotated[
+        str,
+        BeforeValidator(lambda value: re.sub(r"[\s.\-()]", "", value) if isinstance(value, str) else value),
+        StringConstraints(pattern=r"^\+[1-9]\d{7,14}$"),
+    ]
 
 
 class DomainChoice(BaseModel):

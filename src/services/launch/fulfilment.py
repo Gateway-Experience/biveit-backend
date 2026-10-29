@@ -16,6 +16,7 @@
 # doesn't hammer it.
 # References: checkouts.py (the intent this reads), status.py (where it's shown).
 
+import re
 from datetime import UTC, datetime
 
 import pydash
@@ -211,7 +212,8 @@ def _to_registrar_contact(registrant: dict) -> dict:
             "zip": registrant["zip"],
             "country": registrant["country"],
             "email": registrant["email"],
-            "phone": registrant["phone"],
+            # Launches recorded before the phone was stored as plain E.164 have it as +84.901234567.
+            "phone": re.sub(r"[^\d+]", "", registrant["phone"]),
         },
         pydash.is_none,
     )

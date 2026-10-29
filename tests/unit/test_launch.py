@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.config import settings
-from src.dto.launch import LaunchCheckoutRequest
+from src.dto.launch import LaunchCheckoutRequest, Registrant
 from src.modules import deployments
 from src.modules.deployments.services import sites
 from src.modules.domains import DomainUnavailable, RegistrarError
@@ -338,6 +338,24 @@ async def test_an_own_domain_on_a_running_plan_only_goes_active_when_it_can_be_s
     result = await checkouts.start_checkout(_PROJECT, _USER, _request(domain={"kind": "own", "name": "mine.com"}))
     assert result["checkouts"] == []
     assert attaches["calls"] == [("mine.com", "external", activates)]
+
+
+@pytest.mark.parametrize(
+    ("typed", "stored"),
+    [("+84.901234567", "+84901234567"), ("+84 90 123 4567", "+84901234567"), ("+1 (415) 555-0100", "+14155550100")],
+)
+def test_the_registrants_phone_is_kept_as_plain_e164(typed, stored):
+    assert Registrant(**{**_REGISTRANT, "phone": typed}).phone == stored
+
+
+@pytest.mark.parametrize("typed", ["0901234567", "+0901234567", "+84", "+84 abc 1234"])
+def test_a_phone_that_isnt_e164_is_refused(typed):
+    with pytest.raises(ValueError):
+        Registrant(**{**_REGISTRANT, "phone": typed})
+
+
+def test_the_registrar_gets_the_phone_without_the_dot_older_launches_stored():
+    assert fulfilment._to_registrar_contact({**_REGISTRANT, "phone": "+84.901234567"})["phone"] == "+84901234567"
 
 
 def test_buying_a_domain_needs_its_registrant():
