@@ -13,7 +13,7 @@ from src.modules import deployments
 from src.modules.deployments.services import sites
 from src.modules.domains import DomainUnavailable, RegistrarError
 from src.services.launch import access as launch_access
-from src.services.launch import checkouts, fulfilment, intents, status
+from src.services.launch import checkouts, fulfilment, intents, offers, status
 
 _NOW = datetime(2026, 10, 28, 12, tzinfo=UTC)
 _PROJECT = {"id": 42, "hash": "p42", "user_id": 7, "name": "Cozy Bakery", "build_approved_at": _NOW}
@@ -145,6 +145,20 @@ def launch_world(monkeypatch):
     monkeypatch.setattr(checkouts.intents, "get_intent", get_intent)
     monkeypatch.setattr(checkouts.intents, "get_domain_failures", get_domain_failures)
     return state
+
+
+async def test_a_quote_is_the_registrars_answer_with_our_price(monkeypatch):
+    async def check_domains(query, tlds):
+        return [{"domain": query, "available": True, "premium": False, "price_usd": 12, "renewal_price_usd": 14}]
+
+    async def get_min_years(domain_name):
+        return 1
+
+    # monkeypatch refuses names the module doesn't have -- so this also checks the domains module exports them.
+    monkeypatch.setattr(offers.domains, "check_domains", check_domains)
+    monkeypatch.setattr(offers.domains, "get_min_years", get_min_years)
+    quote = await offers.quote_domain("cozy.com")
+    assert (quote["domain"], quote["available"], quote["sold"], quote["price_per_year"]) == ("cozy.com", True, True, 15)
 
 
 def _request(**fields):
