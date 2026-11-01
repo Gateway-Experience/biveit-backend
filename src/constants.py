@@ -258,14 +258,22 @@ DEVENV_INTERNAL_FRONTEND_PORT = 5173
 # checked every DEVENV_IDLE_SWEEP_SECONDS. The next open (or message) starts it again.
 DEVENV_IDLE_STOP_SECONDS = 2 * 60 * 60
 DEVENV_IDLE_SWEEP_SECONDS = 5 * 60
-# Launches that are still on their way (a user's own domain waiting for its DNS, mostly) are moved along by reading
-# their status -- and, so they get there with nobody watching, every LAUNCH_SWEEP_SECONDS (services/launch).
+# Purchases still on their way to a live site (a bought domain waiting for public DNS, mostly) are moved along by
+# reading their status -- and, so they get there with nobody watching, every LAUNCH_SWEEP_SECONDS (services/launch).
 LAUNCH_SWEEP_SECONDS = 5 * 60
-# A domain we just bought takes a few minutes to show up in public DNS, and Let's Encrypt can't issue its
-# certificate before then -- so its first deployment waits until public DNS points it at us, or this long after
-# it's attached, whichever comes first.
-PURCHASED_DOMAIN_SETTLE_SECONDS = 5 * 60
+# A domain we just bought takes a while to show up in public DNS, and Let's Encrypt can't issue its certificate
+# before then -- so setting it up waits until public DNS points it at us, for up to this long after it's attached
+# (counted from site_domains, so it survives restarts). Past that, it's attempted anyway (and will most likely fail,
+# showing it).
+PURCHASED_DOMAIN_DNS_WAIT_SECONDS = 2 * 24 * 60 * 60
 DEVENV_CONTAINER_LIMITS = {"memory": "3g", "cpus": "1.0", "pids": 2048, "nofile": 65536, "tmp_size": "256m"}
+
+
+class DomainEvent(StrEnum):
+    """events.type of what happened to a domain we bought for a user (services/launch/domain_events.py)."""
+
+    REGISTERED = "domain.registered"
+    FAILED = "domain.failed"  # couldn't be registered after all; its subscription cancelled and refunded
 
 
 class ProjectStage(StrEnum):

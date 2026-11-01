@@ -6,12 +6,21 @@
 #                                                         around the project's name
 #   POST /projects/{id}/launch/domains/check      (auth)  {domain}: can the user's own domain be used, and are its
 #                                                         DNS records in place
-#   POST /projects/{id}/launch/checkout           (auth)  {plan?, domain?, registrant?, launch_id?} ->
-#                                                         {launch_id, checkouts: [{product, url}]}, to pay in order
-#   POST /projects/{id}/launch/domains/activate   (auth)  {domain}: switch the site to another of its domains
+#   POST /projects/{id}/launch/domains            (auth)  {domain}: add the user's own domain (no plan needed) ->
+#                                                         the same answer as /check
+#   POST /projects/{id}/launch/checkout           (auth)  {plan} or {domain, registrant} (after a plan) ->
+#                                                         {product, url}: one thing to pay for
+#   POST /projects/{id}/launch/plan/upgrade       (auth)  the running monthly plan -> yearly (no checkout page)
+#   POST /projects/{id}/launch/domains/activate   (auth)  {domain}: switch the site to another of its domains (set up
+#                                                         in the background; the current one serves until then) ->
+#                                                         {domain, operation_id (the switch, to poll; null: none)}
+#   GET  /projects/{id}/launch/domains/switches/{operation_id}  (auth)  how that switch went: deployments.
+#                                                         get_domain_switch's shape. 404 if it isn't this project's
 # Errors: 404 PROJECT_NOT_FOUND (not the caller's); the launch's own refusals as {code} with their status (409
 # ALREADY_SUBSCRIBED, PRICE_CHANGED (+ price_per_year), DOMAIN_TAKEN..., see services/launch/checkouts.py); 502
 # REGISTRAR_ERROR when the registrar can't be asked.
+
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -83,6 +92,21 @@ async def check_domain(
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
 
 
+@router.post("/projects/{project_id}/launch/domains", response_model=None)
+async def add_own_domain(
+    project_id: int, body: DomainCheckRequest, request: Request, user: User = Depends(get_current_user)
+) -> dict | JSONResponse:
+    try:
+        return await status.add_own_domain(await _get_owned_project(project_id, user), body.domain)
+    except HTTPException:
+        raise
+    except checkouts.LaunchRefused as refusal:
+        return _to_refusal(refusal)
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
 @router.post("/projects/{project_id}/launch/checkout", response_model=None)
 async def start_checkout(
     project_id: int, body: LaunchCheckoutRequest, request: Request, user: User = Depends(get_current_user)
@@ -101,13 +125,29 @@ async def start_checkout(
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
 
 
+@router.post("/projects/{project_id}/launch/plan/upgrade", response_model=None)
+async def upgrade_plan(
+    project_id: int, request: Request, user: User = Depends(get_current_user)
+) -> dict | JSONResponse:
+    try:
+        await checkouts.upgrade_plan(await _get_owned_project(project_id, user))
+        return {"plan": "yearly"}
+    except HTTPException:
+        raise
+    except checkouts.LaunchRefused as refusal:
+        return _to_refusal(refusal)
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
 @router.post("/projects/{project_id}/launch/domains/activate", response_model=None)
 async def activate_domain(
     project_id: int, body: ActivateDomainRequest, request: Request, user: User = Depends(get_current_user)
 ) -> dict | JSONResponse:
     try:
-        await status.activate_domain(await _get_owned_project(project_id, user), body.domain)
-        return {"domain": body.domain}
+        operation_id = await status.activate_domain(await _get_owned_project(project_id, user), body.domain)
+        return {"domain": body.domain, "operation_id": str(operation_id) if operation_id else None}
     except HTTPException:
         raise
     except checkouts.LaunchRefused as refusal:
@@ -117,3 +157,19 @@ async def activate_domain(
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.get("/projects/{project_id}/launch/domains/switches/{operation_id}")
+async def get_domain_switch(
+    project_id: int, operation_id: UUID, request: Request, user: User = Depends(get_current_user)
+) -> dict:
+    try:
+        switch = await deployments.get_domain_switch(await _get_owned_project(project_id, user), operation_id)
+    except HTTPException:
+        raise
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+    if switch is None:
+        raise HTTPException(status_code=404, detail="SWITCH_NOT_FOUND")
+    return switch

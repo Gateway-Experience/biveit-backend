@@ -30,9 +30,9 @@ def client() -> redis.Redis:
 
 
 # ci:trivial
-async def set_if_absent(key: str, ttl_seconds: int) -> bool:
-    """SET key 1 NX EX ttl -> True if newly set, False if the key already existed. Generic op."""
-    return bool(await client().set(key, 1, nx=True, ex=ttl_seconds))
+async def set_if_absent(key: str, ttl_seconds: int, value: str = "1") -> bool:
+    """SET key value NX EX ttl -> True if newly set, False if the key already existed. Generic op."""
+    return bool(await client().set(key, value, nx=True, ex=ttl_seconds))
 
 
 # ci:trivial

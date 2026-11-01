@@ -13,7 +13,7 @@ from src.modules import domains, payments
 async def search_offers(project: Project, query: str) -> list[dict]:
     """What the domain step lists: the exact name across our TLDs, then the registrar's ideas -- or, for an empty
     query, its ideas around the project's name. [{domain, available, sold, price_per_year,
-    free_first_year_eligible}], sellable ones first (the order otherwise kept). [I/O]"""
+    discountable}], sellable ones first (the order otherwise kept). [I/O]"""
     found = await domains.search_domains(query.strip() or project["name"])
     offers = [_to_offer(quote) for quote in [*found["exact"], *found["suggestions"]]]
     return pydash.sort_by(offers, lambda offer: not offer["sold"])

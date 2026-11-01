@@ -37,43 +37,38 @@ class Registrant(BaseModel):
 
 
 class DomainChoice(BaseModel):
-    """The domain part of a launch: buy one through us (`price_per_year` = the price the user was shown, so a change
-    since is caught), or use the user's own."""
+    """A domain to buy through us. `price_per_year`: the price the user was shown, so a change since is caught."""
 
     model_config = {"extra": "forbid"}
 
-    kind: Literal["buy", "own"]
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=253)]
     price_per_year: int | None = None
 
 
 class LaunchCheckoutRequest(BaseModel):
-    """POST /projects/{id}/launch/checkout body. A first launch: a `plan`, and for monthly / yearly a `domain` too.
-    Later, with a plan already running: only a `domain` (buying one, or switching to the user's own), with the
-    `launch_id` of the launch it finishes when there is one (a domain checkout that was abandoned, or failed)."""
+    """POST /projects/{id}/launch/checkout body: ONE thing to pay for -- a `plan` (or the one-time purchase), or,
+    with a plan running, a `domain` to buy (with its `registrant`). The provider has no cart, so buying both is two
+    checkouts, the plan first."""
 
     model_config = {"extra": "forbid"}
 
     plan: Literal["monthly", "yearly", "one_time"] | None = None
     domain: DomainChoice | None = None
-    # Required when buying a domain.
     registrant: Registrant | None = None
-    launch_id: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")] | None = None
 
     @model_validator(mode="after")
     def _check_parts(self) -> "LaunchCheckoutRequest":
         """The shape rules; what's allowed for THIS project is the service's to check."""
-        if self.plan is None and self.domain is None:
-            raise ValueError("a plan, a domain, or both")
-        if self.plan == "one_time" and self.domain is not None:
-            raise ValueError("the one-time purchase comes without a domain")
-        if self.domain and self.domain.kind == "buy" and self.registrant is None:
+        if (self.plan is None) == (self.domain is None):
+            raise ValueError("a plan or a domain, one at a time")
+        if self.domain is not None and self.registrant is None:
             raise ValueError("buying a domain needs its registrant")
         return self
 
 
 class DomainCheckRequest(BaseModel):
-    """POST /projects/{id}/launch/domains/check body: the user's own domain, as typed."""
+    """POST /projects/{id}/launch/domains/check and POST /projects/{id}/launch/domains bodies: the user's own
+    domain, as typed."""
 
     model_config = {"extra": "forbid"}
 

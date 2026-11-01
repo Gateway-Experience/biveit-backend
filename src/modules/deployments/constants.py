@@ -51,6 +51,9 @@ DEPLOYMENT_ATTEMPTS = 3
 DEPLOYMENT_RETRY_DELAY_SECONDS = 15
 # Safety net for a backend that dies mid-deployment. Must outlast every attempt plus a rollback.
 DEPLOYMENT_LOCK_TTL_SECONDS = 3 * 60 * 60
+# A domain switch (a long-running operation, see activate_domain) that hasn't finished this long after it started
+# never will: the backend died mid-way. Must outlast its tries and their pauses, with room to spare.
+DOMAIN_SWITCH_DEADLINE_SECONDS = 15 * 60
 # How many of a project's site images stay on the host (newest first, plus the live one) -- what a
 # rollback can go back to without a rebuild.
 DEPLOYMENT_KEPT_IMAGES = 3

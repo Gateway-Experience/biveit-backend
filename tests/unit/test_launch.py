@@ -1,4 +1,4 @@
-# Launch flow tests (services/launch + the domain side of modules/deployments): which stage a launch is in, what a
+# Launch flow tests (services/launch + the domain side of modules/deployments): which stage a project is in, what a
 # checkout may be (and when a domain is free for a year), checking a user's own domain, and fulfilment after a
 # payment -- registering a bought domain, or refunding it when it's gone. Payments, the registrar, DNS and the
 # tables are faked.
@@ -13,7 +13,7 @@ from src.modules import deployments
 from src.modules.deployments.services import sites
 from src.modules.domains import DomainUnavailable, RegistrarError
 from src.services.launch import access as launch_access
-from src.services.launch import checkouts, fulfilment, intents, offers, status
+from src.services.launch import checkouts, domain_events, fulfilment, offers, status
 
 _NOW = datetime(2026, 10, 28, 12, tzinfo=UTC)
 _PROJECT = {"id": 42, "hash": "p42", "user_id": 7, "name": "Cozy Bakery", "build_approved_at": _NOW}
@@ -29,82 +29,69 @@ _REGISTRANT = {
 
 def _status(**overrides):
     base = {
-        "access": {"can_download": True, "can_host": True},
+        "access": {"can_download": True, "can_host": True, "has_had_plan": True},
+        "plan": {"plan": "monthly"},
         "one_time": None,
-        "launch": None,
+        "registration_failure": None,
         "domain_subscription": None,
         "site_domains": [],
         "domain": None,
+        "setting_up": None,
+        "setup_failure": None,
         "deployment": {"deploying": False, "last_deployment": None},
     }
     return {**base, **overrides}
 
 
 _ACTIVE = {"domain": "cozy.com", "kind": "purchased", "activated_at": _NOW, "servable": True, "check": None}
+_ATTACHED = [{"domain": "cozy.com", "kind": "external", "servable": False, "active": False}]
 
 
 @pytest.mark.parametrize(
     ("overrides", "stage"),
     [
-        ({"access": {"can_download": False, "can_host": False}}, "not_paid"),
-        ({"access": {"can_download": True, "can_host": False}, "one_time": {"paid_at": _NOW}}, "code_only"),
-        ({"access": {"can_download": True, "can_host": False}}, "ended"),
-        ({"launch": {"domain": {"kind": "buy", "name": "cozy.com"}, "domain_failure": None}}, "finish_domain"),
-        ({"launch": {"domain": {"kind": "buy"}, "domain_failure": {"domain": "cozy.com"}}}, "choose_domain"),
-        ({"domain_subscription": {"domain": "cozy.com"}}, "registering_domain"),
+        ({"plan": None, "access": {"can_download": False, "has_had_plan": False}}, "not_paid"),
+        ({"plan": None, "access": {"can_download": True, "has_had_plan": False}, "one_time": {"paid_at": _NOW}}, "code_only"),
+        ({"plan": None, "access": {"can_download": True, "has_had_plan": True}}, "ended"),
+        # In a grace period hosting carries on, but the plan's over: it's ended, and asks for a new plan.
+        ({"plan": None, "access": {"can_download": True, "can_host": True, "has_had_plan": True}}, "ended"),
         ({}, "choose_domain"),
-        (
-            {"domain": {**_ACTIVE, "kind": "external", "servable": False}, "site_domains": [{"domain": "cozy.com"}]},
-            "waiting_dns",
-        ),
-        ({"domain": _ACTIVE, "site_domains": [{"domain": "cozy.com"}]}, "deploying"),
-        (
-            {
-                "domain": _ACTIVE,
-                "deployment": {
-                    "deploying": False,
-                    "last_deployment": {"started_at": _NOW - timedelta(days=1), "outcome": "succeeded"},
-                },
-            },
-            "deploying",  # the last one predates the domain: one's about to start
-        ),
-        (
-            {
-                "domain": _ACTIVE,
-                "deployment": {"deploying": False, "last_deployment": {"started_at": _NOW, "outcome": "succeeded"}},
-            },
-            "live",
-        ),
-        (
-            {
-                "domain": _ACTIVE,
-                "deployment": {"deploying": False, "last_deployment": {"started_at": _NOW, "outcome": "rolled_back"}},
-            },
-            "failed",
-        ),
-        (
-            {
-                "domain": _ACTIVE,
-                "deployment": {"deploying": True, "last_deployment": {"started_at": _NOW, "outcome": "running"}},
-            },
-            "deploying",
-        ),
+        ({"registration_failure": {"domain": "cozy.com"}}, "choose_domain"),
+        ({"domain_subscription": {"domain": "cozy.com"}}, "registering_domain"),
+        ({"site_domains": _ATTACHED}, "waiting_dns"),
+        ({"site_domains": _ATTACHED, "setting_up": "cozy.com"}, "deploying"),
+        ({"site_domains": _ATTACHED, "setup_failure": {"domain": "cozy.com"}}, "failed"),
+        ({"domain": _ACTIVE}, "live"),
+        # Being switched away from: still live on the active one while the other is set up.
+        ({"domain": _ACTIVE, "setting_up": "new.com", "deployment": {"deploying": True}}, "live"),
+        ({"domain": _ACTIVE, "deployment": {"deploying": True}}, "deploying"),
+        ({"domain": {**_ACTIVE, "kind": "external", "servable": False}}, "not_servable"),
     ],
-)
-def test_the_stage_says_where_the_launch_is(overrides, stage):
+)  # fmt: skip
+def test_the_stage_says_where_a_project_is(overrides, stage):
     assert status.to_stage(_status(**overrides)) == stage
 
 
 # --- checkouts ---
 
 
+_PLAN_STARTED = _NOW - timedelta(days=1)
+
+
 @pytest.fixture
 def launch_world(monkeypatch):
-    """Payments, the registrar quote, the domain check and the intents log faked; records what was asked for."""
+    """Payments (its checkouts kept in memory, like their events) and the registrar quote faked; records what was
+    asked for."""
     state = {
-        "access": {"can_download": False, "plan": None, "domain_subscription": None},
-        "intents": {},
-        "checkouts": [],
+        "access": {
+            "can_download": False,
+            "has_had_plan": False,
+            "plan_subscription": None,
+            "domain_subscription": None,
+        },
+        "checkouts": {},  # id -> what payments would record in its payment.checkout_created event
+        "domain_subscriptions": [],
+        "failures": [],
     }
 
     async def get_project_access(project_id):
@@ -113,38 +100,69 @@ def launch_world(monkeypatch):
     async def quote_domain(name):
         return state.get(
             "quote",
-            {"domain": name, "available": True, "sold": True, "price_per_year": 15, "free_first_year_eligible": True},
+            {"domain": name, "available": True, "sold": True, "price_per_year": 15, "discountable": True},
         )
 
-    async def check_external_domain(project, domain):
-        return {"domain": domain, "blocked": state.get("blocked"), "records": [], "verified": False}
-
-    async def record_intent(launch_id, user, project, intent):
-        state["intents"] = {**state["intents"], launch_id: intent}
-
-    async def get_intent(launch_id):
-        return state["intents"].get(launch_id)
-
     async def get_domain_failures(project_id):
-        return state.get("failures", [])
+        return state["failures"]
 
-    async def create_plan_checkout(user, project, plan, extra):
-        state["checkouts"] = [*state["checkouts"], ("plan", plan)]
-        return f"https://pay/{plan}"
+    async def find_subscriptions(criteria):
+        return state["domain_subscriptions"]
 
-    async def create_domain_checkout(user, project, domain, price, free_first_year, extra):
-        state["checkouts"] = [*state["checkouts"], ("domain", domain, price, free_first_year)]
-        return f"https://pay/{domain}"
+    def record_checkout(checkout):
+        checkout_id = len(state["checkouts"]) + 1
+        state["checkouts"] = {**state["checkouts"], checkout_id: {"checkout_id": checkout_id, **checkout}}
+        return {"checkout_id": checkout_id, "url": f"https://pay/{checkout_id}"}
 
-    monkeypatch.setattr(checkouts.payments, "get_project_access", get_project_access)
-    monkeypatch.setattr(checkouts.payments, "create_plan_checkout", create_plan_checkout)
-    monkeypatch.setattr(checkouts.payments, "create_domain_checkout", create_domain_checkout)
+    async def create_plan_checkout(user, project, plan):
+        return record_checkout({"product": "plan", "plan": plan})
+
+    async def create_domain_checkout(user, project, domain, price, discounted, details):
+        return record_checkout(
+            {
+                "product": "domain",
+                "domain": domain,
+                "price_per_year": price,
+                "discounted": discounted,
+                **details,
+            }
+        )
+
+    for name, fake in [
+        ("get_project_access", get_project_access),
+        ("create_plan_checkout", create_plan_checkout),
+        ("create_domain_checkout", create_domain_checkout),
+        ("find_subscriptions", find_subscriptions),
+    ]:
+        monkeypatch.setattr(checkouts.payments, name, fake)
     monkeypatch.setattr(checkouts.offers, "quote_domain", quote_domain)
-    monkeypatch.setattr(checkouts.deployments, "check_external_domain", check_external_domain)
-    monkeypatch.setattr(checkouts.intents, "record_intent", record_intent)
-    monkeypatch.setattr(checkouts.intents, "get_intent", get_intent)
-    monkeypatch.setattr(checkouts.intents, "get_domain_failures", get_domain_failures)
+    monkeypatch.setattr(domain_events, "get_domain_failures", get_domain_failures)
     return state
+
+
+def _on_the_plan(world, plan="yearly"):
+    """[Pure] The world's access once a plan is running."""
+    return {
+        **world["access"],
+        "can_download": True,
+        "can_host": True,
+        "has_had_plan": True,
+        "plan_subscription": {
+            "plan": plan,
+            "status": "active",
+            "created_at": _PLAN_STARTED,
+            "provider_ref": "plan-1",
+            "custom_data": {"checkout_id": "41"},
+        },
+    }
+
+
+def _bought(world):
+    """[Pure] What the checkouts were for, in order: (product, plan or domain, free first year)."""
+    return [
+        (checkout["product"], checkout.get("plan") or checkout.get("domain"), checkout.get("discounted"))
+        for checkout in world["checkouts"].values()
+    ]
 
 
 async def test_a_quote_is_the_registrars_answer_with_our_price(monkeypatch):
@@ -165,139 +183,133 @@ def _request(**fields):
     return LaunchCheckoutRequest(**fields)
 
 
-async def test_yearly_with_a_bought_domain_is_two_checkouts_the_domain_free(launch_world):
-    result = await checkouts.start_checkout(
-        _PROJECT,
-        _USER,
-        _request(
-            plan="yearly", domain={"kind": "buy", "name": "Cozy.com", "price_per_year": 15}, registrant=_REGISTRANT
-        ),
-    )
-    assert [checkout["product"] for checkout in result["checkouts"]] == ["plan", "domain"]
-    assert launch_world["checkouts"] == [("plan", "yearly"), ("domain", "cozy.com", 15, True)]
-    intent = launch_world["intents"][result["launch_id"]]
-    assert intent["registrant"]["country"] == "VN" and intent["domain"]["free_first_year"]
+def _domain_request(name, **domain_fields):
+    return _request(domain={"name": name, **domain_fields}, registrant=_REGISTRANT)
 
 
-async def test_monthly_pays_for_its_domain_and_a_later_domain_pays_too(launch_world):
-    await checkouts.start_checkout(
-        _PROJECT, _USER, _request(plan="monthly", domain={"kind": "buy", "name": "cozy.com"}, registrant=_REGISTRANT)
-    )
-    assert launch_world["checkouts"][-1] == ("domain", "cozy.com", 15, False)
-    launch_world["access"] = {**launch_world["access"], "plan": "yearly", "can_download": True}
-    await checkouts.start_checkout(
-        _PROJECT, _USER, _request(domain={"kind": "buy", "name": "later.com"}, registrant=_REGISTRANT)
-    )
-    assert launch_world["checkouts"][-1] == ("domain", "later.com", 15, False)  # not in the yearly plan's launch
+async def test_a_plan_checkout_is_just_the_plan(launch_world):
+    result = await checkouts.start_checkout(_PROJECT, _USER, _request(plan="yearly"))
+    assert result == {"product": "plan", "url": "https://pay/1"}
+    assert launch_world["checkouts"][1] == {"checkout_id": 1, "product": "plan", "plan": "yearly"}
 
 
-async def test_finishing_a_yearly_launch_keeps_the_free_year(launch_world):
-    first = await checkouts.start_checkout(
-        _PROJECT, _USER, _request(plan="yearly", domain={"kind": "buy", "name": "cozy.com"}, registrant=_REGISTRANT)
-    )
-    launch_world["access"] = {**launch_world["access"], "plan": "yearly", "can_download": True}
-    await checkouts.start_checkout(
-        _PROJECT,
-        _USER,
-        _request(domain={"kind": "buy", "name": "other.com"}, registrant=_REGISTRANT, launch_id=first["launch_id"]),
-    )
-    assert launch_world["checkouts"][-1] == ("domain", "other.com", 15, True)
-    assert [checkout[0] for checkout in launch_world["checkouts"]].count("plan") == 1
+async def test_the_yearly_plans_first_domain_is_free_and_holds_its_registrant(launch_world):
+    launch_world["access"] = _on_the_plan(launch_world)
+    result = await checkouts.start_checkout(_PROJECT, _USER, _domain_request("Cozy.com", price_per_year=15))
+    assert result == {"product": "domain", "url": "https://pay/1"}
+    assert _bought(launch_world) == [("domain", "cozy.com", True)]
+    assert launch_world["checkouts"][1]["registrant"]["country"] == "VN"
+    # The discount explains itself: what it is, and the paid yearly plan that earned it.
+    assert launch_world["checkouts"][1]["discount"] == {
+        "terms": "first_year_free",
+        "plan_checkout_id": 41,
+        "plan_subscription_ref": "plan-1",
+    }
 
 
-async def test_after_a_bought_domain_fails_another_can_be_bought_keeping_the_free_year(launch_world):
-    first = await checkouts.start_checkout(
-        _PROJECT, _USER, _request(plan="yearly", domain={"kind": "buy", "name": "a.com"}, registrant=_REGISTRANT)
-    )
-    # a.com was paid for, then couldn't be registered: its subscription is cancelled (but still "running" until
+async def test_a_domain_on_the_monthly_plan_pays_full_price(launch_world):
+    launch_world["access"] = _on_the_plan(launch_world, "monthly")
+    await checkouts.start_checkout(_PROJECT, _USER, _domain_request("cozy.com"))
+    assert _bought(launch_world) == [("domain", "cozy.com", False)]
+    assert launch_world["checkouts"][1]["discount"] is None
+
+
+async def test_after_a_bought_domain_fails_another_keeps_the_free_year_until_one_stands(launch_world):
+    # a.com was bought free, then couldn't be registered: its subscription is cancelled (but still "running" until
     # its period ends) and the failure recorded.
-    launch_world["access"] = {
-        "can_download": True, "can_host": True, "plan": "yearly",
-        "plan_subscription": {"custom_data": {"launch_id": first["launch_id"]}},
-        "domain_subscription": {"provider_ref": "sub-a", "status": "cancelled", "product_data": {"domain": "a.com"}},
-    }  # fmt: skip
-    launch_world["failures"] = [{"subscription_ref": "sub-a", "launch_id": first["launch_id"], "domain": "a.com"}]
-    await checkouts.start_checkout(
-        _PROJECT,
-        _USER,
-        _request(domain={"kind": "buy", "name": "b.com"}, registrant=_REGISTRANT, launch_id=first["launch_id"]),
-    )
-    assert launch_world["checkouts"][-1] == ("domain", "b.com", 15, True)
+    sub_a = {"provider_ref": "sub-a", "status": "cancelled", "trial_ends_at": _NOW, "product_data": {"domain": "a.com"}}
+    launch_world["access"] = {**_on_the_plan(launch_world), "domain_subscription": sub_a}
+    launch_world["domain_subscriptions"] = [sub_a]
+    launch_world["failures"] = [{"subscription_ref": "sub-a", "domain": "a.com"}]
+    await checkouts.start_checkout(_PROJECT, _USER, _domain_request("b.com"))
+    assert _bought(launch_world)[-1] == ("domain", "b.com", True)
+    # b.com was bought free and stands (then, say, cancelled): the discount is used up.
+    sub_b = {"provider_ref": "sub-b", "status": "ended", "trial_ends_at": _NOW, "product_data": {"domain": "b.com"}}
+    launch_world["domain_subscriptions"] = [sub_a, sub_b]
+    launch_world["access"] = {**launch_world["access"], "domain_subscription": None}
+    await checkouts.start_checkout(_PROJECT, _USER, _domain_request("c.com"))
+    assert _bought(launch_world)[-1] == ("domain", "c.com", False)
 
 
-async def test_the_launchs_access_drops_a_domain_subscription_that_failed(monkeypatch):
+async def test_the_discount_is_once_per_project_even_on_a_later_yearly_plan(launch_world):
+    # A domain bought free under an earlier yearly plan: a new yearly plan doesn't bring another.
+    earlier = {"provider_ref": "sub-old", "status": "ended", "trial_ends_at": _PLAN_STARTED - timedelta(days=30)}
+    launch_world["domain_subscriptions"] = [earlier]
+    launch_world["access"] = _on_the_plan(launch_world)
+    await checkouts.start_checkout(_PROJECT, _USER, _domain_request("cozy.com"))
+    assert _bought(launch_world) == [("domain", "cozy.com", False)]
+
+
+async def test_a_domain_paid_in_full_doesnt_use_up_the_discount(launch_world):
+    on_monthly = {"provider_ref": "sub-old", "status": "ended", "trial_ends_at": None}
+    launch_world["domain_subscriptions"] = [on_monthly]
+    launch_world["access"] = _on_the_plan(launch_world)
+    await checkouts.start_checkout(_PROJECT, _USER, _domain_request("cozy.com"))
+    assert _bought(launch_world) == [("domain", "cozy.com", True)]
+
+
+async def test_a_domain_can_be_bought_after_the_plan_ended(launch_world):
+    launch_world["access"] = {**launch_world["access"], "can_download": True, "has_had_plan": True}
+    await checkouts.start_checkout(_PROJECT, _USER, _domain_request("cozy.com"))
+    assert _bought(launch_world) == [("domain", "cozy.com", False)]
+
+
+async def test_the_launch_access_drops_a_failed_domain(monkeypatch):
     subscription = {"provider_ref": "sub-a", "status": "cancelled"}
 
     async def get_project_access(project_id):
         return {"can_host": True, "domain_subscription": subscription}
 
     async def get_domain_failures(project_id):
-        return [{"subscription_ref": "sub-a", "launch_id": "l1", "domain": "a.com"}] if project_id == 42 else []
+        return [{"subscription_ref": "sub-a", "domain": "a.com"}] if project_id == 42 else []
 
     monkeypatch.setattr(launch_access.payments, "get_project_access", get_project_access)
-    monkeypatch.setattr(launch_access.intents, "get_domain_failures", get_domain_failures)
+    monkeypatch.setattr(launch_access.domain_events, "get_domain_failures", get_domain_failures)
     failed = await launch_access.get_launch_access(42)
     assert failed["domain_subscription"] is None and failed["domain_failures"][0]["domain"] == "a.com"
     assert (await launch_access.get_launch_access(7))["domain_subscription"] == subscription
 
 
 def test_a_failed_domain_with_the_plan_running_asks_for_another_domain():
-    launch = {"domain": {"kind": "buy", "name": "a.com"}, "domain_failure": {"domain": "a.com"}}
-    assert status.to_stage(_status(launch=launch, domain_subscription=None)) == "choose_domain"
+    stage = status.to_stage(_status(registration_failure={"domain": "a.com"}, domain_subscription=None))
+    assert stage == "choose_domain"
 
 
 @pytest.mark.parametrize(
     ("access", "fields", "code"),
     [
-        ({"plan": "monthly"}, {"plan": "yearly", "domain": {"kind": "own", "name": "cozy.com"}}, "ALREADY_SUBSCRIBED"),
+        ({"plan_subscription": {"plan": "monthly"}}, {"plan": "yearly"}, "ALREADY_SUBSCRIBED"),
         ({"can_download": True}, {"plan": "one_time"}, "ALREADY_PURCHASED"),
-        ({}, {"plan": "monthly"}, "DOMAIN_REQUIRED"),
-        ({}, {"domain": {"kind": "own", "name": "cozy.com"}}, "PLAN_REQUIRED"),
+        ({}, {"domain": {"name": "cozy.com"}, "registrant": _REGISTRANT}, "PLAN_REQUIRED"),
         (
-            {"plan": "yearly", "domain_subscription": {"domain": "a.com"}},
-            {"domain": {"kind": "buy", "name": "b.com"}},
+            {"has_had_plan": True, "domain_subscription": {"domain": "a.com"}},
+            {"domain": {"name": "b.com"}, "registrant": _REGISTRANT},
             "DOMAIN_ALREADY_BOUGHT",
         ),
     ],
 )
 async def test_what_isnt_allowed_now_is_refused(launch_world, access, fields, code):
     launch_world["access"] = {**launch_world["access"], **access}
-    registrant = {"registrant": _REGISTRANT} if fields.get("domain", {}).get("kind") == "buy" else {}
     with pytest.raises(checkouts.LaunchRefused) as refused:
-        await checkouts.start_checkout(_PROJECT, _USER, _request(**fields, **registrant))
-    assert refused.value.code == code and launch_world["checkouts"] == []
+        await checkouts.start_checkout(_PROJECT, _USER, _request(**fields))
+    assert refused.value.code == code and launch_world["checkouts"] == {}
 
 
 async def test_a_domain_that_changed_since_the_dialog_is_refused(launch_world):
+    launch_world["access"] = _on_the_plan(launch_world)
     launch_world["quote"] = {
         "domain": "cozy.com",
         "available": True,
         "sold": True,
         "price_per_year": 20,
-        "free_first_year_eligible": True,
+        "discountable": True,
     }
     with pytest.raises(checkouts.LaunchRefused) as refused:
-        await checkouts.start_checkout(
-            _PROJECT,
-            _USER,
-            _request(
-                plan="yearly", domain={"kind": "buy", "name": "cozy.com", "price_per_year": 15}, registrant=_REGISTRANT
-            ),
-        )
+        await checkouts.start_checkout(_PROJECT, _USER, _domain_request("cozy.com", price_per_year=15))
     assert refused.value.code == "PRICE_CHANGED" and refused.value.details == {"price_per_year": 20}
     launch_world["quote"] = {"domain": "cozy.com", "available": False, "sold": False, "price_per_year": None}
     with pytest.raises(checkouts.LaunchRefused, match="DOMAIN_UNAVAILABLE"):
-        await checkouts.start_checkout(
-            _PROJECT, _USER, _request(plan="yearly", domain={"kind": "buy", "name": "cozy.com"}, registrant=_REGISTRANT)
-        )
-
-
-async def test_a_users_own_domain_another_project_has_is_refused(launch_world):
-    launch_world["blocked"] = "taken"
-    with pytest.raises(checkouts.LaunchRefused, match="DOMAIN_TAKEN"):
-        await checkouts.start_checkout(
-            _PROJECT, _USER, _request(plan="monthly", domain={"kind": "own", "name": "cozy.com"})
-        )
+        await checkouts.start_checkout(_PROJECT, _USER, _domain_request("cozy.com"))
 
 
 async def test_an_unapproved_site_cant_launch(launch_world):
@@ -305,39 +317,52 @@ async def test_an_unapproved_site_cant_launch(launch_world):
         await checkouts.start_checkout({**_PROJECT, "build_approved_at": None}, _USER, _request(plan="one_time"))
 
 
-@pytest.mark.parametrize(
-    ("attached", "verified", "activates"),
-    [
-        ([], False, True),  # nothing served yet: it's the site's domain from now on
-        ([{"domain": "live.com", "activated_at": _NOW}], False, False),  # a live site stays where it is
-        ([{"domain": "live.com", "activated_at": _NOW}], True, True),  # ready to serve: switch now
-    ],
-)
-async def test_an_own_domain_on_a_running_plan_only_goes_active_when_it_can_be_served(
-    launch_world, monkeypatch, attached, verified, activates
-):
-    launch_world["access"] = {**launch_world["access"], "can_download": True, "plan": "monthly", "can_host": True}
-    attaches = {"calls": []}
+@pytest.fixture
+def own_domain_world(monkeypatch):
+    """What adding a user's own domain touches, faked: the domain check and attaching."""
+    state = {"blocked": None, "attaches": []}
 
     async def check_external_domain(project, domain):
-        return {"domain": domain, "blocked": None, "records": [], "verified": verified}
+        return {"domain": domain.lower(), "blocked": state["blocked"], "records": [], "verified": False}
 
-    async def get_site_domains(project):
-        return attached
-
-    async def attach_domain(project, domain, kind, activate):
-        attaches["calls"] = [*attaches["calls"], (domain, kind, activate)]
+    async def attach_domain(project, domain, kind):
+        state["attaches"] = [*state["attaches"], (domain, kind)]
 
     async def fulfil(project_id):
-        return None
+        pass
 
-    monkeypatch.setattr(checkouts.deployments, "check_external_domain", check_external_domain)
-    monkeypatch.setattr(checkouts.deployments, "get_site_domains", get_site_domains)
-    monkeypatch.setattr(checkouts.deployments, "attach_domain", attach_domain)
-    monkeypatch.setattr(checkouts.fulfilment, "fulfil", fulfil)
-    result = await checkouts.start_checkout(_PROJECT, _USER, _request(domain={"kind": "own", "name": "mine.com"}))
-    assert result["checkouts"] == []
-    assert attaches["calls"] == [("mine.com", "external", activates)]
+    monkeypatch.setattr(status.deployments, "check_external_domain", check_external_domain)
+    monkeypatch.setattr(status.deployments, "attach_domain", attach_domain)
+    monkeypatch.setattr(status.fulfilment, "fulfil", fulfil)
+    return state
+
+
+async def test_adding_an_own_domain_attaches_it_no_plan_needed(own_domain_world):
+    check = await status.add_own_domain(_PROJECT, "Mine.com")
+    assert check["domain"] == "mine.com"
+    assert own_domain_world["attaches"] == [("mine.com", "external")]
+
+
+async def test_a_users_own_domain_another_project_has_is_refused(own_domain_world):
+    own_domain_world["blocked"] = "taken"
+    with pytest.raises(checkouts.LaunchRefused, match="DOMAIN_TAKEN"):
+        await status.add_own_domain(_PROJECT, "cozy.com")
+    assert own_domain_world["attaches"] == []
+
+
+async def test_attaching_a_domain_never_makes_it_active(monkeypatch):
+    calls = {"attached": [], "activated": []}
+
+    async def attach(project_id, domain, kind):
+        calls["attached"] = [*calls["attached"], domain]
+
+    async def activate(project_id, domain):
+        calls["activated"] = [*calls["activated"], domain]
+
+    monkeypatch.setattr(sites.site_domains_repo, "attach", attach)
+    monkeypatch.setattr(sites.site_domains_repo, "activate", activate)
+    await deployments.attach_domain(_PROJECT, "First.com", deployments.SiteDomainKind.EXTERNAL)
+    assert calls == {"attached": ["first.com"], "activated": []}
 
 
 @pytest.mark.parametrize(
@@ -358,9 +383,11 @@ def test_the_registrar_gets_the_phone_without_the_dot_older_launches_stored():
     assert fulfilment._to_registrar_contact({**_REGISTRANT, "phone": "+84.901234567"})["phone"] == "+84901234567"
 
 
-def test_buying_a_domain_needs_its_registrant():
+def test_a_checkout_is_one_thing_and_a_domain_needs_its_registrant():
     with pytest.raises(ValueError, match="registrant"):
-        _request(plan="yearly", domain={"kind": "buy", "name": "cozy.com"})
+        _request(domain={"name": "cozy.com"})
+    with pytest.raises(ValueError, match="one at a time"):
+        _request(plan="yearly", domain={"name": "cozy.com"}, registrant=_REGISTRANT)
 
 
 # --- a user's own domain ---
@@ -440,13 +467,17 @@ async def test_some_domains_can_never_be_brought(dns, domain, blocked):
 
 @pytest.fixture
 def fulfilment_world(monkeypatch):
-    """Everything fulfilment touches, faked: payments, the registrar, attached domains, deployments."""
-    subscription = {"product_data": {"domain": "cozy.com"}, "provider_ref": "sub-1", "custom_data": {"launch_id": "l1"}}
+    """Everything fulfilment touches, faked: payments, the registrar, attached domains, setting a domain up."""
+    subscription = {
+        "product_data": {"domain": "cozy.com"},
+        "provider_ref": "sub-1",
+        "custom_data": {"checkout_id": "2"},
+    }
     state = {
-        "access": {"can_host": True, "domain_subscription": subscription, "plan_subscription": {"custom_data": {"launch_id": "l1"}}},
-        "attached": [], "registered": [], "records": [], "refunded": [], "cancelled": [], "failures": [], "deployed": [],
-        "registrar_has": set(), "unavailable": False, "dns_ready": True, "deployments": [], "live": [],
-        "intent_domain": {"kind": "buy", "name": "cozy.com"}, "now": _NOW, "points_at_us": False,
+        "access": {"can_host": True, "domain_subscription": subscription},
+        "attached": [], "registered": [], "records": [], "refunded": [], "cancelled": [], "failures": [],
+        "registrar_has": set(), "unavailable": False, "servable": {}, "now": _NOW, "points_at_us": False,
+        "registrations": [], "set_up": [], "activation": {"domain": None, "failure": None},
     }  # fmt: skip
 
     async def get_project_access(project_id):
@@ -461,21 +492,28 @@ def fulfilment_world(monkeypatch):
     async def delete(key):
         pass
 
-    async def get_intent(launch_id):
-        return {
-            "plan": "yearly",
-            "domain": state["intent_domain"],
+    async def get_checkout(checkout_id):
+        # The domain's checkout: who it's registered to.
+        domain_checkout = {
+            "checkout_id": 2,
+            "product": "domain",
+            "domain": "cozy.com",
             "registrant": {**_REGISTRANT, "country": "VN"},
         }
+        return domain_checkout if checkout_id == "2" else None
 
     async def get_domain_failures(project_id):
         return state["failures"]
 
-    async def record_domain_failure(launch_id, project_id, subscription_ref, domain, reason):
-        state["failures"] = [
-            *state["failures"],
-            {"subscription_ref": subscription_ref, "domain": domain, "reason": reason},
+    async def record_domain_registered(project_id, checkout_id, subscription_ref, registration, registrant):
+        state["registrations"] = [
+            *state["registrations"],
+            (checkout_id, subscription_ref, registration, registrant["country"]),
         ]
+
+    async def record_domain_failure(project_id, checkout_id, subscription_ref, domain, reason):
+        failure = {"checkout_id": checkout_id, "subscription_ref": subscription_ref, "domain": domain, "reason": reason}
+        state["failures"] = [*state["failures"], failure]
 
     async def get_domain(domain):
         if domain not in state["registrar_has"]:
@@ -486,6 +524,7 @@ def fulfilment_world(monkeypatch):
         if state["unavailable"]:
             raise DomainUnavailable(domain)
         state["registered"] = [*state["registered"], (domain, years, registrant["country"], key)]
+        return {"domain": domain, "registrar": "namecom", "registrar_order_id": 7, "paid_usd": 9.99}
 
     async def list_records(domain):
         return state["records"]
@@ -496,42 +535,32 @@ def fulfilment_world(monkeypatch):
     async def get_site_domains(project):
         return state["attached"]
 
-    async def attach_domain(project, domain, kind, activate):
-        # Like the real one: kept if it's there; activating it clears the others.
-        known = next((row for row in state["attached"] if row["domain"] == domain), None)
-        attached = state["attached"] if known else [
-            *state["attached"],
-            {"domain": domain, "kind": kind, "activated_at": None, "created_at": state["now"]},
-        ]  # fmt: skip
-        state["attached"] = [
-            {**row, "activated_at": (state["now"] if row["domain"] == domain else None)} if activate else row
-            for row in attached
-        ]
+    async def attach_domain(project, domain, kind):
+        # Like the real one: kept if it's there, never made active.
+        if not any(row["domain"] == domain for row in state["attached"]):
+            state["attached"] = [
+                *state["attached"],
+                {"domain": domain, "kind": kind, "activated_at": None, "created_at": state["now"]},
+            ]
 
-    async def check_external_domain(project, domain):
-        return {"domain": domain, "blocked": None, "records": [], "verified": state["dns_ready"]}
+    async def is_servable(project, site_domain):
+        return state["servable"].get(site_domain["domain"], site_domain["kind"] != "external")
 
     async def is_pointed_at_server(domain):
         return state["points_at_us"]
 
-    async def get_served_domains(project):
-        return [
-            row["domain"]
-            for row in state["attached"]
-            if row["activated_at"] and (row["kind"] != "external" or state["dns_ready"])
-        ]
-
-    async def list_deployments(project):
-        return state["deployments"]
+    async def get_activation(project):
+        return state["activation"]
 
     async def get_current_conversation(project_id, user_id):
         return {"id": 9}
 
-    async def deploy(project, conversation_id, enforce_cooldown=True):
-        # Like the real one, done at once: it serves what may be served now.
-        state["deployed"] = [*state["deployed"], enforce_cooldown]
-        state["deployments"] = [{"started_at": state["now"], "outcome": "succeeded"}, *state["deployments"]]
-        state["live"] = await get_served_domains(project)
+    async def activate_domain(project, conversation_id, domain):
+        # Like the real one, done at once: set up, then active.
+        state["set_up"] = [*state["set_up"], domain]
+        state["attached"] = [
+            {**row, "activated_at": state["now"] if row["domain"] == domain else None} for row in state["attached"]
+        ]
 
     async def cancel_subscription(ref):
         state["cancelled"] = [*state["cancelled"], ref]
@@ -547,65 +576,73 @@ def fulfilment_world(monkeypatch):
         (fulfilment.projects_repo, "find", find_projects),
         (fulfilment.redis, "set_if_absent", set_if_absent),
         (fulfilment.redis, "delete", delete),
-        (intents, "get_intent", get_intent),
-        (intents, "get_domain_failures", get_domain_failures),
-        (intents, "record_domain_failure", record_domain_failure),
+        (fulfilment.payments, "get_checkout", get_checkout),
+        (domain_events, "get_domain_failures", get_domain_failures),
+        (domain_events, "record_domain_registered", record_domain_registered),
+        (domain_events, "record_domain_failure", record_domain_failure),
         (fulfilment.domains, "get_domain", get_domain),
         (fulfilment.domains, "register_domain", register_domain),
         (fulfilment.domains, "list_records", list_records),
         (fulfilment.domains, "create_record", create_record),
         (fulfilment.deployments, "get_site_domains", get_site_domains),
         (fulfilment.deployments, "attach_domain", attach_domain),
-        (fulfilment.deployments, "check_external_domain", check_external_domain),
-        (fulfilment.deployments, "get_served_domains", get_served_domains),
+        (fulfilment.deployments, "is_servable", is_servable),
         (fulfilment.deployments, "is_pointed_at_server", is_pointed_at_server),
-        (fulfilment.deployments, "list_deployments", list_deployments),
-        (fulfilment.deployments, "deploy", deploy),
+        (fulfilment.deployments, "get_activation", get_activation),
+        (fulfilment.deployments, "activate_domain", activate_domain),
         (fulfilment.agent_service, "get_current_conversation", get_current_conversation),
     ]:
         monkeypatch.setattr(target, name, fake)
     return state
 
 
-async def test_a_paid_domain_is_registered_pointed_at_us_attached_and_deployed(fulfilment_world):
-    # Attached at _NOW, long past: settled in public DNS by the time it's deployed.
+def _active(world):
+    return [row["domain"] for row in world["attached"] if row["activated_at"]]
+
+
+async def test_a_paid_domain_is_registered_pointed_at_us_attached_and_set_up(fulfilment_world):
+    # Attached at _NOW, long past: settled in public DNS by the time it's set up.
     await fulfilment.fulfil(42)
     assert fulfilment_world["registered"] == [("cozy.com", 1, "VN", "subscription-sub-1")]
+    # Recorded against the checkout that bought it, with who it's registered to.
+    assert fulfilment_world["registrations"] == [
+        (2, "sub-1", {"domain": "cozy.com", "registrar": "namecom", "registrar_order_id": 7, "paid_usd": 9.99}, "VN")
+    ]
     assert fulfilment_world["records"] == [{"host": "", "type": "A", "answer": "57.0.0.1", "ttl": 300}]
-    assert fulfilment_world["attached"][0]["domain"] == "cozy.com" and fulfilment_world["attached"][0]["activated_at"]
-    assert fulfilment_world["deployed"] == [False]  # the platform's own deploy: no cooldown
-    # Run again (every status poll does): the registrar isn't asked again.
+    assert fulfilment_world["set_up"] == ["cozy.com"] and _active(fulfilment_world) == ["cozy.com"]
+    # Run again (every status poll does): the registrar isn't asked again, nothing's set up again.
     await fulfilment.fulfil(42)
-    assert len(fulfilment_world["registered"]) == 1 and fulfilment_world["deployed"] == [False]
+    assert len(fulfilment_world["registered"]) == 1 and fulfilment_world["set_up"] == ["cozy.com"]
 
 
-async def test_a_domain_just_bought_deploys_once_public_dns_has_it(fulfilment_world):
+async def test_a_domain_just_bought_is_set_up_once_public_dns_has_it(fulfilment_world):
     fulfilment_world["now"] = datetime.now(UTC)
     await fulfilment.fulfil(42)
-    assert fulfilment_world["attached"][0]["activated_at"] and fulfilment_world["deployed"] == []
+    assert fulfilment_world["attached"][0]["domain"] == "cozy.com" and fulfilment_world["set_up"] == []
     fulfilment_world["points_at_us"] = True
     await fulfilment.fulfil(42)
-    assert fulfilment_world["deployed"] == [False]
+    assert fulfilment_world["set_up"] == ["cozy.com"]
 
 
-async def test_a_domain_just_bought_deploys_anyway_after_a_few_minutes(fulfilment_world):
+async def test_a_domain_just_bought_is_attempted_anyway_after_two_days(fulfilment_world):
     fulfilment_world["now"] = datetime.now(UTC)
     await fulfilment.fulfil(42)
-    assert fulfilment_world["deployed"] == []
+    assert fulfilment_world["set_up"] == []
     fulfilment_world["attached"] = [
-        {**row, "created_at": row["created_at"] - timedelta(minutes=5, seconds=1)}
-        for row in fulfilment_world["attached"]
+        {**row, "created_at": row["created_at"] - timedelta(days=2, seconds=1)} for row in fulfilment_world["attached"]
     ]
     await fulfilment.fulfil(42)
-    assert fulfilment_world["deployed"] == [False]
+    assert fulfilment_world["set_up"] == ["cozy.com"]
 
 
 async def test_a_domain_gone_by_payment_is_refunded_and_the_plan_stays(fulfilment_world):
     fulfilment_world["unavailable"] = True
     await fulfilment.fulfil(42)
     assert fulfilment_world["cancelled"] == ["sub-1"] and fulfilment_world["refunded"] == ["sub-1"]
-    assert fulfilment_world["failures"][0]["reason"] == "unavailable"
-    assert fulfilment_world["attached"] == [] and fulfilment_world["deployed"] == []
+    assert fulfilment_world["failures"] == [
+        {"checkout_id": 2, "subscription_ref": "sub-1", "domain": "cozy.com", "reason": "unavailable"}
+    ]
+    assert fulfilment_world["attached"] == [] and fulfilment_world["set_up"] == []
     await fulfilment.fulfil(42)  # not retried
     assert fulfilment_world["cancelled"] == ["sub-1"]
 
@@ -613,50 +650,73 @@ async def test_a_domain_gone_by_payment_is_refunded_and_the_plan_stays(fulfilmen
 async def test_nothing_happens_without_hosting(fulfilment_world):
     fulfilment_world["access"] = {**fulfilment_world["access"], "can_host": False}
     await fulfilment.fulfil(42)
-    assert fulfilment_world["registered"] == [] and fulfilment_world["deployed"] == []
+    assert fulfilment_world["registered"] == [] and fulfilment_world["set_up"] == []
 
 
-async def test_a_launchs_own_domain_takes_over_from_an_older_one_once_its_dns_is_there(fulfilment_world):
-    world = fulfilment_world
-    world["access"] = {**world["access"], "domain_subscription": None}
-    world["intent_domain"] = {"kind": "own", "name": "mine.com"}
-    world["attached"] = [
-        {"domain": "old.com", "kind": "admin", "activated_at": _NOW - timedelta(days=1), "created_at": _NOW - timedelta(days=1)},
-    ]  # fmt: skip
-    world["dns_ready"] = False
+def _own_domains(world, *rows):
+    """[Pure] The world with no domain bought, and the user's own domains attached: (domain, minutes ago, active)."""
+    return {
+        **world,
+        "access": {**world["access"], "domain_subscription": None},
+        "attached": [
+            {
+                "domain": domain,
+                "kind": "external",
+                "activated_at": _NOW if active else None,
+                "created_at": _NOW - timedelta(minutes=minutes_ago),
+            }
+            for domain, minutes_ago, active in rows
+        ],
+    }
+
+
+async def test_with_no_active_domain_the_newest_one_is_attempted_records_ready_or_not(fulfilment_world):
+    # A user's own domain gets its one attempt right after checkout; without its records, that attempt fails at once
+    # (deployments' side) and the user retries.
+    fulfilment_world.update(_own_domains(fulfilment_world, ("older.com", 20, False), ("newest.com", 5, False)))
+    fulfilment_world["servable"] = {"older.com": True, "newest.com": False}
     await fulfilment.fulfil(42)
-    assert [(row["domain"], bool(row["activated_at"])) for row in world["attached"]] == [
-        ("old.com", True),
-        ("mine.com", False),
-    ]
-    assert world["live"] == ["old.com"]  # still served where it works
-    world["dns_ready"], world["now"] = True, _NOW + timedelta(hours=1)
+    assert fulfilment_world["set_up"] == ["newest.com"]
+
+
+async def test_an_active_domain_is_never_switched_away_from_even_when_it_stops_being_servable(fulfilment_world):
+    fulfilment_world.update(_own_domains(fulfilment_world, ("live.com", 20, True), ("spare.com", 5, False)))
+    fulfilment_world["servable"] = {"live.com": False, "spare.com": True}
     await fulfilment.fulfil(42)
-    assert [(row["domain"], bool(row["activated_at"])) for row in world["attached"]] == [
-        ("old.com", False),
-        ("mine.com", True),
-    ]
-    assert world["live"] == ["mine.com"]
+    assert fulfilment_world["set_up"] == [] and _active(fulfilment_world) == ["live.com"]
 
 
-async def test_a_launchs_own_domain_doesnt_undo_a_later_switch(fulfilment_world):
-    world = fulfilment_world
-    world["access"] = {**world["access"], "domain_subscription": None}
-    world["intent_domain"] = {"kind": "own", "name": "mine.com"}
-    world["attached"] = [
-        {"domain": "mine.com", "kind": "external", "activated_at": None, "created_at": _NOW - timedelta(days=2)},
-        {"domain": "other.com", "kind": "external", "activated_at": _NOW - timedelta(days=1), "created_at": _NOW - timedelta(days=1)},
-    ]  # fmt: skip
+async def test_a_failed_attempt_is_never_retried_from_here(fulfilment_world):
+    fulfilment_world.update(_own_domains(fulfilment_world, ("mine.com", 5, False)))
+    failure = {"domain": "mine.com", "cause": "dns", "error": "records not found", "at": _NOW}
+    fulfilment_world["activation"] = {"domain": None, "failure": failure}
     await fulfilment.fulfil(42)
-    assert [row["domain"] for row in world["attached"] if row["activated_at"]] == ["other.com"]
+    assert fulfilment_world["set_up"] == []
 
 
-async def test_the_sweep_fulfils_each_project_with_a_running_plan_once(monkeypatch):
+async def test_a_domain_attached_again_after_its_failure_gets_a_new_attempt(fulfilment_world):
+    fulfilment_world.update(_own_domains(fulfilment_world, ("mine.com", 5, False)))
+    failure = {"domain": "mine.com", "cause": "dns", "error": "records not found", "at": _NOW - timedelta(hours=1)}
+    fulfilment_world["activation"] = {"domain": None, "failure": failure}
+    await fulfilment.fulfil(42)
+    assert fulfilment_world["set_up"] == ["mine.com"]
+
+
+async def test_nothing_starts_while_a_domain_is_being_set_up(fulfilment_world):
+    fulfilment_world.update(_own_domains(fulfilment_world, ("mine.com", 5, False)))
+    fulfilment_world["activation"] = {"domain": "mine.com", "failure": None}
+    await fulfilment.fulfil(42)
+    assert fulfilment_world["set_up"] == []
+
+
+async def test_the_sweep_fulfils_each_hosted_project_once(monkeypatch):
     plans = [
-        {"target_type": "PROJECT", "target_id": 1, "status": "active", "ends_at": None},
-        {"target_type": "PROJECT", "target_id": 1, "status": "expired", "ends_at": _NOW},
-        {"target_type": "PROJECT", "target_id": 2, "status": "cancelled", "ends_at": datetime.now(UTC) + timedelta(days=3)},
-        {"target_type": "PROJECT", "target_id": 3, "status": "expired", "ends_at": _NOW - timedelta(days=30)},
+        {"target_type": "PROJECT", "target_id": 1, "billing": "recurring", "status": "active", "ends_at": None},
+        {"target_type": "PROJECT", "target_id": 1, "billing": "recurring", "status": "ended", "ends_at": _NOW},
+        {"target_type": "PROJECT", "target_id": 2, "billing": "recurring", "status": "cancelled", "ends_at": datetime.now(UTC) + timedelta(days=3)},
+        {"target_type": "PROJECT", "target_id": 3, "billing": "recurring", "status": "ended", "ends_at": _NOW - timedelta(days=30)},
+        # In its grace period: still hosted, so still swept.
+        {"target_type": "PROJECT", "target_id": 4, "billing": "recurring", "status": "ended", "ends_at": datetime.now(UTC) - timedelta(days=2)},
     ]  # fmt: skip
     swept = {"ids": []}
 
@@ -668,8 +728,8 @@ async def test_the_sweep_fulfils_each_project_with_a_running_plan_once(monkeypat
 
     monkeypatch.setattr(fulfilment.payments, "find_subscriptions", find_subscriptions)
     monkeypatch.setattr(fulfilment, "fulfil", fulfil)
-    await fulfilment.fulfil_running_plans()
-    assert swept["ids"] == [1, 2]
+    await fulfilment.fulfil_hosted_projects()
+    assert swept["ids"] == [1, 2, 4]
 
 
 async def test_a_mock_payment_never_buys_a_real_domain(fulfilment_world, monkeypatch):
@@ -678,4 +738,99 @@ async def test_a_mock_payment_never_buys_a_real_domain(fulfilment_world, monkeyp
     monkeypatch.setattr(fulfilment, "log_error", lambda *args, **kwargs: None)
     await fulfilment.fulfil(42)
     assert fulfilment_world["registered"] == [] and fulfilment_world["refunded"] == []
-    assert fulfilment_world["attached"] == [] and fulfilment_world["deployed"] == []
+    assert fulfilment_world["attached"] == [] and fulfilment_world["set_up"] == []
+
+
+# --- after launch: upgrading, switching ---
+
+
+@pytest.fixture
+def plan_world(monkeypatch):
+    """The launch access and the plan change faked; records the plan changes and the webhooks fed through."""
+    state = {"plan_subscription": None, "changes": [], "webhooks": []}
+
+    async def get_launch_access(project_id):
+        return {"plan_subscription": state["plan_subscription"]}
+
+    async def change_plan(subscription_ref, plan):
+        state["changes"] = [*state["changes"], (subscription_ref, plan)]
+        return [(b"body", "signature")]
+
+    async def handle_payment_webhook(raw_body, signature):
+        state["webhooks"] = [*state["webhooks"], raw_body]
+
+    monkeypatch.setattr(checkouts.launch_access, "get_launch_access", get_launch_access)
+    monkeypatch.setattr(checkouts.payments, "change_plan", change_plan)
+    monkeypatch.setattr(checkouts.fulfilment, "handle_payment_webhook", handle_payment_webhook)
+    return state
+
+
+async def test_upgrading_moves_the_running_monthly_plan_to_yearly(plan_world):
+    plan_world["plan_subscription"] = {"plan": "monthly", "status": "active", "provider_ref": "plan-1"}
+    await checkouts.upgrade_plan(_PROJECT)
+    assert plan_world["changes"] == [("plan-1", "yearly")] and plan_world["webhooks"] == [b"body"]
+
+
+@pytest.mark.parametrize(
+    "plan_subscription",
+    [None, {"plan": "yearly", "status": "active"}, {"plan": "monthly", "status": "cancelled"}],
+)
+async def test_only_a_running_monthly_plan_can_be_upgraded(plan_world, plan_subscription):
+    plan_world["plan_subscription"] = plan_subscription and {**plan_subscription, "provider_ref": "plan-1"}
+    with pytest.raises(checkouts.LaunchRefused, match="NOT_UPGRADABLE"):
+        await checkouts.upgrade_plan(_PROJECT)
+    assert plan_world["changes"] == []
+
+
+@pytest.fixture
+def switch_world(monkeypatch):
+    """A running plan, the attached domains (`servable` by name), and setting one up faked."""
+    state = {"plan_subscription": {"plan": "monthly"}, "attached": [], "servable": {}, "set_up": [], "busy": False}
+
+    async def get_launch_access(project_id):
+        return {"plan_subscription": state["plan_subscription"]}
+
+    async def get_site_domains(project):
+        return state["attached"]
+
+    async def is_servable(project, site_domain):
+        return state["servable"].get(site_domain["domain"], True)
+
+    async def get_current_conversation(project_id, user_id):
+        return {"id": 9}
+
+    async def activate_domain(project, conversation_id, domain):
+        if state["busy"]:
+            raise deployments.DeploymentInProgress("busy")
+        state["set_up"] = [*state["set_up"], domain]
+
+    monkeypatch.setattr(status.launch_access, "get_launch_access", get_launch_access)
+    monkeypatch.setattr(status.deployments, "get_site_domains", get_site_domains)
+    monkeypatch.setattr(status.deployments, "is_servable", is_servable)
+    monkeypatch.setattr(status.deployments, "activate_domain", activate_domain)
+    monkeypatch.setattr(status.agent_service, "get_current_conversation", get_current_conversation)
+    return state
+
+
+async def test_switching_sets_the_domain_up(switch_world):
+    switch_world["attached"] = [
+        {"domain": "old.com", "kind": "external", "activated_at": _NOW},
+        {"domain": "new.com", "kind": "external", "activated_at": None},
+    ]
+    await status.activate_domain(_PROJECT, "New.com")
+    assert switch_world["set_up"] == ["new.com"]
+
+
+@pytest.mark.parametrize(
+    ("changes", "code"),
+    [
+        ({"plan_subscription": None}, "PLAN_REQUIRED"),
+        ({"servable": {"new.com": False}}, "DOMAIN_NOT_VERIFIED"),
+        ({"busy": True}, "BUSY"),
+    ],
+)
+async def test_what_a_switch_needs(switch_world, changes, code):
+    switch_world.update({"attached": [{"domain": "new.com", "kind": "external", "activated_at": None}], **changes})
+    with pytest.raises(checkouts.LaunchRefused, match=code):
+        await status.activate_domain(_PROJECT, "new.com")
+    assert switch_world["set_up"] == []

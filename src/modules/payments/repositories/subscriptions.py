@@ -1,5 +1,5 @@
-# Intentions: data access for `subscriptions` -- our copy of each subscription at the payment provider (plans and
-# domains). Schema: migrations/0011_subscriptions.sql.
+# Intentions: data access for `subscriptions` -- our copy of each purchase at the payment provider (plans and domains,
+# recurring; the one-time purchase, lifetime). Schema: migrations/0011_subscriptions.sql.
 
 from typing import Any
 
@@ -8,13 +8,15 @@ import pydash
 from src.utils import postgres
 
 _COLUMNS = """
-    id, provider, provider_ref, user_id, target_type, target_id, product, plan, product_data, status, renews_at,
-    ends_at, trial_ends_at, custom_data, snapshot, created_at, updated_at
+    id, provider, provider_object, provider_ref, billing, user_id, target_type, target_id, product, plan,
+    product_data, status, renews_at, ends_at, trial_ends_at, custom_data, snapshot, created_at, updated_at
 """
 _WRITABLE_COLUMNS = [
-    "provider", "provider_ref", "user_id", "target_type", "target_id", "product", "plan", "product_data", "status",
-    "renews_at", "ends_at", "trial_ends_at", "custom_data", "snapshot",
+    "provider", "provider_object", "provider_ref", "billing", "user_id", "target_type", "target_id", "product", "plan",
+    "product_data", "status", "renews_at", "ends_at", "trial_ends_at", "custom_data", "snapshot", "created_at",
 ]  # fmt: skip
+# What a row is -- whose, for what, which object at the provider -- never changes once it's there.
+_FIXED_COLUMNS = {"provider", "provider_object", "provider_ref", "billing", "user_id", "target_type", "target_id"}
 
 
 async def find(criteria: dict[str, Any]) -> list[dict]:
@@ -27,12 +29,10 @@ async def find(criteria: dict[str, Any]) -> list[dict]:
 
 async def upsert(row: dict[str, Any]) -> dict:
     """Insert the subscription, or overwrite ours with what the provider says now (keyed by provider +
-    provider_ref). custom_data is kept from the first time it came (later webhooks may not repeat it), and so are
-    user_id / target_type / target_id."""
+    provider_object + provider_ref). custom_data is kept from the first time it came (later webhooks may not repeat
+    it), and so is what the row is (_FIXED_COLUMNS)."""
     values = pydash.pick(row, *_WRITABLE_COLUMNS)
-    refreshed = [
-        column for column in values if column not in {"provider", "provider_ref", "user_id", "target_type", "target_id"}
-    ]
+    refreshed = [column for column in values if column not in _FIXED_COLUMNS]
     assignments = ", ".join(
         f"{column} = "
         + (
@@ -44,7 +44,7 @@ async def upsert(row: dict[str, Any]) -> dict:
     )
     sql = f"""
         INSERT INTO subscriptions {postgres.to_insert_clause(values)}
-        ON CONFLICT (provider, provider_ref) DO UPDATE SET {assignments}, updated_at = now()
+        ON CONFLICT (provider, provider_object, provider_ref) DO UPDATE SET {assignments}, updated_at = now()
         RETURNING {_COLUMNS}
     """
     upserted = await postgres.fetchrow(sql, values)

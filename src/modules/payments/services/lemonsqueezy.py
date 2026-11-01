@@ -19,10 +19,33 @@ from typing import Any
 import pydash
 
 from src.config import settings
+from src.modules.payments.constants import ProviderObject, SubscriptionStatus
 from src.modules.payments.services import mock_lemonsqueezy
 from src.utils import http
 
 _API_URL = "https://api.lemonsqueezy.com/v1"
+
+# Their statuses in ours (constants.SubscriptionStatus), per object. A paused subscription collects nothing, so for
+# us it's over; a partly refunded order still paid for the purchase.
+_STATUS_BY_OBJECT = {
+    ProviderObject.SUBSCRIPTION: {
+        "on_trial": SubscriptionStatus.TRIALING,
+        "active": SubscriptionStatus.ACTIVE,
+        "past_due": SubscriptionStatus.PAST_DUE,
+        "cancelled": SubscriptionStatus.CANCELLED,
+        "paused": SubscriptionStatus.ENDED,
+        "unpaid": SubscriptionStatus.ENDED,
+        "expired": SubscriptionStatus.ENDED,
+    },
+    ProviderObject.ORDER: {
+        "pending": SubscriptionStatus.PENDING,
+        "paid": SubscriptionStatus.ACTIVE,
+        "partial_refund": SubscriptionStatus.ACTIVE,
+        "refunded": SubscriptionStatus.REFUNDED,
+        "failed": SubscriptionStatus.ENDED,
+        "fraudulent": SubscriptionStatus.ENDED,
+    },
+}
 
 
 class ProviderError(Exception):
@@ -73,6 +96,23 @@ async def cancel_subscription(subscription_ref: str) -> None:
     await _call_api("DELETE", f"subscriptions/{subscription_ref}")
 
 
+async def change_variant(subscription_ref: str, variant_id: str) -> list[tuple[bytes, str]]:
+    """Move a subscription to another variant (a plan change), charging the difference now, prorated. The provider
+    sends its webhooks itself; the stand-in hands back the ones it would send ((raw body, signature) pairs) for the
+    caller to feed through -- like pay_mock_checkout. [I/O]"""
+    if settings.payments_mock:
+        return await mock_lemonsqueezy.change_variant(subscription_ref, variant_id)
+    body = {
+        "data": {
+            "type": "subscriptions",
+            "id": subscription_ref,
+            "attributes": {"variant_id": int(variant_id), "invoice_immediately": True},
+        }
+    }
+    await _call_api("PATCH", f"subscriptions/{subscription_ref}", body)
+    return []
+
+
 async def refund_latest_payment(subscription_ref: str) -> None:
     """Refund the subscription's most recent payment in full (a trial has none: nothing happens). [I/O]"""
     if settings.payments_mock:
@@ -85,6 +125,15 @@ async def refund_latest_payment(subscription_ref: str) -> None:
     if paid:
         latest = max(paid, key=lambda invoice: pydash.get(invoice, "attributes.created_at"))
         await _call_api("POST", f"subscription-invoices/{latest['id']}/refund")
+
+
+def to_status(provider_object: ProviderObject, provider_status: str) -> SubscriptionStatus:
+    """[Pure] Their status of a subscription / order, in ours. Raises ValueError for one we don't know -- better a
+    webhook that fails (and gets retried once this knows it) than a purchase quietly read wrong."""
+    status = _STATUS_BY_OBJECT[provider_object].get(provider_status)
+    if status is None:
+        raise ValueError(f"unknown lemonsqueezy {provider_object} status: {provider_status}")
+    return status
 
 
 def is_signature_valid(raw_body: bytes, signature: str) -> bool:

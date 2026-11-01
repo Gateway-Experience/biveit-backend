@@ -105,11 +105,11 @@ async def register_domain(domain_name: str, years: int, registrant: dict, idempo
     (a reserved name the availability check still calls available). [I/O]"""
     registrar_name = _route_registrar(domain_name)
     registrar = _REGISTRARS[registrar_name]
-    check = _.head(await registrar.check_availability([domain_name])) or {}
-    if not _to_offer({"domainName": domain_name, **check})["available"]:
+    availability = _.head(await registrar.check_availability([domain_name])) or {}
+    if not _to_offer({"domainName": domain_name, **availability})["available"]:
         raise DomainUnavailable(domain_name)
     purchase_price = (
-        (await registrar.get_pricing(domain_name, years))["purchasePrice"] if check.get("premium") else None
+        (await registrar.get_pricing(domain_name, years))["purchasePrice"] if availability.get("premium") else None
     )
     try:
         created = await registrar.create_domain(

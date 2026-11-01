@@ -1,6 +1,6 @@
 # Intentions: the payment provider's side of payments (modules/payments), and its stand-in.
 #   POST /payments/webhook                    the provider's webhooks (Lemon Squeezy): signed (X-Signature), no
-#                                             login. 401 on a bad signature; 200 once taken in (the launch it's
+#                                             login. 401 on a bad signature; 200 once taken in (the project it's
 #                                             about is then fulfilled -- services/launch/fulfilment)
 #   GET  /payments/mock-checkout/{id}         (auth)  a stand-in checkout, for the FE's fake checkout page
 #   POST /payments/mock-checkout/{id}/pay     (auth)  "pay" it: the stand-in's webhooks go through the real path
@@ -45,13 +45,13 @@ async def _get_own_mock_checkout(checkout_id: str, user: User) -> dict:
 
 @router.get("/payments/mock-checkout/{checkout_id}")
 async def get_mock_checkout(checkout_id: str, request: Request, user: User = Depends(get_current_user)) -> dict:
-    """{id, email, item: {product, plan | price_per_year, free_first_year}, price_usd (due today), project_id}."""
+    """{id, email, item: {product, plan | price_per_year, discounted}, price_usd (due today), project_id}."""
     try:
         checkout = await _get_own_mock_checkout(checkout_id, user)
         item = checkout["item"] or {}
         due_today = (
             0
-            if item.get("free_first_year")
+            if item.get("discounted")
             else item.get("price_per_year") or payments.PLANS.get(item.get("plan"), {}).get("price_usd")
         )
         return {

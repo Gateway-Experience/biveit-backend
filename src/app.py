@@ -110,14 +110,14 @@ async def _sweep_idle_projects() -> None:
 
 
 async def _sweep_launches() -> None:
-    """Every LAUNCH_SWEEP_SECONDS, move along the launches nobody is watching (fulfilment.fulfil_running_plans) --
+    """Every LAUNCH_SWEEP_SECONDS, move along the projects nobody is watching (fulfilment.fulfil_hosted_projects) --
     a user's own domain going live once its DNS is there. Like the idle sweep: one worker per round, a failed
     round logged and tried again next time."""
     while True:
         await asyncio.sleep(LAUNCH_SWEEP_SECONDS)
         try:
             if await redis.set_if_absent("launch:sweep", LAUNCH_SWEEP_SECONDS - 10):
-                await fulfilment.fulfil_running_plans()
+                await fulfilment.fulfil_hosted_projects()
         except Exception as error:
             log_error(error, "the launch sweep failed; the next round tries again")
 

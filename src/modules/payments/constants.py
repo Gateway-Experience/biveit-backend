@@ -9,7 +9,7 @@ PROVIDER = "lemonsqueezy"
 
 
 class Product(StrEnum):
-    """What a purchase is for (subscriptions.product / orders.product)."""
+    """What a purchase is for (subscriptions.product)."""
 
     PLAN = "plan"  # hosting + the agent, monthly or yearly
     DOMAIN = "domain"  # one domain bought through us, yearly
@@ -17,9 +17,43 @@ class Product(StrEnum):
 
 
 class TargetType(StrEnum):
-    """What a purchase was bought for (subscriptions / orders .target_type, with target_id)."""
+    """What a purchase was bought for (subscriptions.target_type, with target_id)."""
 
     PROJECT = "PROJECT"
+
+
+class Billing(StrEnum):
+    """How a purchase is paid for (subscriptions.billing)."""
+
+    RECURRING = "recurring"  # renews every period until cancelled: plans, domains
+    LIFETIME = "lifetime"  # paid once, never renews: the one-time purchase
+
+
+class SubscriptionStatus(StrEnum):
+    """Where a purchase stands (subscriptions.status) -- OURS, whatever the provider: each provider client maps its own
+    statuses onto these (e.g. lemonsqueezy.to_status); its raw object, own status included, stays in the snapshot."""
+
+    TRIALING = "trialing"  # in a free period, nothing charged yet (a domain's free first year)
+    ACTIVE = "active"  # paid and current; a lifetime purchase once paid
+    PAST_DUE = "past_due"  # a renewal payment failed and the provider is still retrying it
+    CANCELLED = "cancelled"  # won't renew; still runs until its ends_at
+    PENDING = "pending"  # not paid yet (an order still being processed)
+    ENDED = "ended"  # over: ran out after a cancel, retries gave up, paused, or the payment failed
+    REFUNDED = "refunded"  # the money went back
+
+
+class PaymentEvent(StrEnum):
+    """events.type of what the payments module records."""
+
+    CHECKOUT_CREATED = "payment.checkout_created"  # a checkout we opened at the provider; its id is the checkout_id
+    WEBHOOK = "payment.webhook"  # a provider webhook, raw
+
+
+class ProviderObject(StrEnum):
+    """Which kind of provider object a purchase is (subscriptions.provider_object) -- separate id spaces there."""
+
+    SUBSCRIPTION = "subscription"
+    ORDER = "order"
 
 
 class Plan(StrEnum):
@@ -38,21 +72,33 @@ PLANS = {
 
 # What we charge for a domain, per year: the cheapest point at or above what the registrar charges us for a year
 # (the higher of its registration and renewal price). Above the last one, premium, or a TLD that needs more than
-# a year up front: not sold. `free_first_year`: free for its first year when bought with the yearly plan -- that's
-# the trial variant (no charge today, then the normal yearly price).
+# a year up front: not sold. `discountable`: can get the domain discount (with the yearly plan). Today that discount
+# is the first year free, sold as `discounted_variant_id` -- a trial variant: no charge today, then the normal yearly
+# price. How it's applied may change with the real payment provider (a discount code, say).
+# What the domain discount is, as a domain checkout records it (its `discount.terms`). One kind for now.
+DOMAIN_DISCOUNT_TERMS = "first_year_free"
+
 DOMAIN_PRICE_POINTS = [
-    {"price_usd": 10, "max_registrar_usd": 10, "free_first_year": True, "variant_id": "mock-domain-10", "trial_variant_id": "mock-domain-10-free"},
-    {"price_usd": 15, "max_registrar_usd": 15, "free_first_year": True, "variant_id": "mock-domain-15", "trial_variant_id": "mock-domain-15-free"},
-    {"price_usd": 20, "max_registrar_usd": 20, "free_first_year": True, "variant_id": "mock-domain-20", "trial_variant_id": "mock-domain-20-free"},
-    {"price_usd": 30, "max_registrar_usd": 30, "free_first_year": False, "variant_id": "mock-domain-30", "trial_variant_id": None},
-    {"price_usd": 40, "max_registrar_usd": 40, "free_first_year": False, "variant_id": "mock-domain-40", "trial_variant_id": None},
+    {"price_usd": 10, "max_registrar_usd": 10, "discountable": True, "variant_id": "mock-domain-10", "discounted_variant_id": "mock-domain-10-free"},
+    {"price_usd": 15, "max_registrar_usd": 15, "discountable": True, "variant_id": "mock-domain-15", "discounted_variant_id": "mock-domain-15-free"},
+    {"price_usd": 20, "max_registrar_usd": 20, "discountable": True, "variant_id": "mock-domain-20", "discounted_variant_id": "mock-domain-20-free"},
+    {"price_usd": 30, "max_registrar_usd": 30, "discountable": False, "variant_id": "mock-domain-30", "discounted_variant_id": None},
+    {"price_usd": 40, "max_registrar_usd": 40, "discountable": False, "variant_id": "mock-domain-40", "discounted_variant_id": None},
 ]  # fmt: skip
 
-# After a plan ends (cancelled and run out, or its payments failed for good), the site stays up this long.
-HOSTING_GRACE_DAYS = 7
+# After a plan ends (cancelled and run out, or its payments failed for good), it's in its grace period this long
+# (access.is_in_grace) -- what's still allowed then is each entitlement's call; today, hosting and the agent.
+# Heads up: a failed renewal already gets the provider's own retry window first (past_due, ~2 weeks on Lemon
+# Squeezy, configurable on Stripe / Paddle), with everything still working -- so after a failed payment it's that
+# PLUS this. Worth revisiting (shorter, or grace only after a cancel runs out) once something actually takes sites
+# down after it.
+GRACE_DAYS = 7
 
-# The provider's subscription statuses that mean it's running. A cancelled one keeps running until its ends_at.
-RUNNING_STATUSES = {"on_trial", "active", "past_due"}
+# The statuses that mean a purchase is running; a cancelled one also runs, until its ends_at. past_due counts: the
+# provider is still retrying the payment, so the user isn't cut off mid-retry.
+RUNNING_STATUSES = {SubscriptionStatus.TRIALING, SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE}
+# The statuses of a plan that was in effect and has stopped -- the only ones that get GRACE_DAYS after.
+GRACE_STATUSES = {SubscriptionStatus.ENDED, SubscriptionStatus.CANCELLED}
 
 # How long a checkout link stays valid.
 CHECKOUT_TTL_SECONDS = 2 * 60 * 60

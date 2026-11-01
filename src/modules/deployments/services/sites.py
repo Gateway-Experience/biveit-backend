@@ -1,7 +1,12 @@
-# Intentions: a project's site on its domains -- the host's nginx in front of the site's container. The domains
-# attached to a project are its rows in site_domains (a domain is only ever one project's); the site is served on
-# the ACTIVE one, if it may be: one we bought or an admin set, or the user's own once its ownership proof checks
-# out (check_external_domain). One nginx file per project (utils/nginx) holds a server block per served domain.
+# Intentions: a project's site on its domains -- the host's nginx in front of the site's container. The terms
+# (docs/launchflow.txt, "Domains"):
+#   attached  a project's rows in site_domains, in any state (a domain is only ever one project's)
+#   servable  we can make it point at us on command: one we bought (we own it) or an admin set, always; the user's
+#             own only while its records check out right now (check_external_domain) -- we can't change those
+#   active    the one domain we've fully set up for the site (certificate, container env, nginx) and serve. Set
+#             only after that setup succeeds (deployments.activate_domain), and never undone by itself: it stays
+#             active, and served, even if it stops being servable
+# One nginx file per project (utils/nginx), so setting up another domain simply overwrites the last one's.
 #
 # Proving ownership of a user's own domain takes two DNS records: an A record pointing at the server (traffic,
 # and the certificate) and a TXT record at _biveit-verify.<domain> holding a token derived from the project and
@@ -46,33 +51,48 @@ class InvalidDomain(ValueError):
     """Not a host name we'd serve a site on."""
 
 
+class DomainNotReady(Exception):
+    """A user's own domain whose records don't check out: setting it up would only fail (and cost a certificate
+    attempt), so it isn't tried."""
+
+
+class SiteSetupFailed(Exception):
+    """A domain's certificate or nginx step failed -- the domain's side of a release, as opposed to the site's own
+    (the build, the container)."""
+
+
 async def get_site_domains(project: Project) -> list[dict]:
     """The domains attached to the project, oldest first: [{domain, kind, activated_at (None = not active),
     created_at}]."""
     return await site_domains_repo.find({"project_id": project["id"]})
 
 
-async def get_served_domains(project: Project) -> list[str]:
-    """What the site should be served on right now: its active domain, if it may be (see the top of this file),
-    else nothing."""
+async def get_active_domain(project: Project) -> str | None:
+    """The domain the site is set up for and served on (see the top of this file), None before it has one."""
     active = pydash.find(await get_site_domains(project), lambda row: row["activated_at"] is not None)
-    if active is None:
-        return []
-    if (
-        active["kind"] == SiteDomainKind.EXTERNAL
-        and not (await check_external_domain(project, active["domain"]))["verified"]
-    ):
-        return []
-    return [active["domain"]]
+    return active["domain"] if active else None
 
 
-async def attach_domain(project: Project, domain: str, kind: SiteDomainKind, activate: bool) -> None:
-    """Attach a domain to the project (kept if it's already there), and make it the active one if `activate`. It's
-    served from the next deployment. Raises InvalidDomain, DomainTaken."""
-    normalized = normalize_domain(domain)
-    await site_domains_repo.attach(project["id"], normalized, kind)
-    if activate:
-        await site_domains_repo.activate(project["id"], normalized)
+async def is_servable(project: Project, site_domain: dict) -> bool:
+    """Whether an attached domain (a site_domains row) is servable (see the top of this file). Only the user's own
+    takes a look: a DNS lookup. [I/O: reads]"""
+    # TODO: check if we need to check plan expiration here as well.
+    if site_domain["kind"] != SiteDomainKind.EXTERNAL:
+        return True
+    return (await check_external_domain(project, site_domain["domain"]))["verified"]
+
+
+async def check_domain_ready(project: Project, domain: str) -> None:
+    """Before setting a domain up: a user's own one must have its records in place. Raises DomainNotReady."""
+    site_domain = pydash.find(await get_site_domains(project), {"domain": domain})
+    if site_domain and not await is_servable(project, site_domain):
+        raise DomainNotReady(f"{domain}'s DNS records aren't found")
+
+
+async def attach_domain(project: Project, domain: str, kind: SiteDomainKind) -> None:
+    """Attach a domain to the project (kept if it's already there). Attaching never makes it active: that's setting
+    it up (deployments.activate_domain). Raises InvalidDomain, DomainTaken."""
+    await site_domains_repo.attach(project["id"], normalize_domain(domain), kind)
 
 
 async def check_external_domain(project: Project, domain: str) -> dict:
@@ -156,13 +176,21 @@ async def set_domains(project: Project, domains: list[str]) -> list[str]:
 
 
 async def ensure_site(project: Project, domains: list[str]) -> None:
-    """Make sure every one of `domains` (what it's served on, see get_served_domains) has its certificate and routes to its
-    container -- or, with none, that there's no nginx site at all. Idempotent: certbot keeps a certificate that
-    isn't due for renewal, and nginx is only reloaded when the file changes."""
+    """Make sure every one of `domains` (the active one, if any) has its certificate and routes to its container --
+    or, with none, that there's no nginx site at all. Idempotent: certbot keeps a certificate that isn't due for
+    renewal, and nginx is only reloaded when the file changes. Raises SiteSetupFailed."""
     site_path = os.path.join(settings.nginx_sites_dir, f"biveit-site-{project['id']}.conf")
     if not domains:
         await nginx.remove_site(site_path)
         return
+    try:
+        await _ensure_site_files(project, domains, site_path)
+    except Exception as error:
+        raise SiteSetupFailed(f"{', '.join(domains)}: {type(error).__name__}: {error}") from error
+
+
+async def _ensure_site_files(project: Project, domains: list[str], site_path: str) -> None:
+    """ensure_site's work: the certificates, then the nginx file."""
     # One at a time: certbot holds a lock while it runs.
     for domain in domains:
         if not _is_under_wildcard(domain):

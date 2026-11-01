@@ -1,0 +1,129 @@
+Domains:
+========
+
+Terms:
+- attached: any domain whose site_domains row points to the project, in any state.
+- servable: we can make it point at us on command.
+  - bought: we still own it (not expired/suspended). It may point elsewhere: we point it back (then wait a few minutes for public DNS before the cert).
+  - admin-set: always (1st version we don't have admin-set domains though).
+  - BYO: it must point at us right now (A -> us, TXT proof, no AAAA), since we can't change its records. Checked live, can flip anytime.
+- setup (ours, per project): cert + container env (the site's URL/CORS) + nginx. DNS isn't part of it: DNS is what makes a domain servable.
+- active: the domain we've fully set up for the project and serve. At most 1 per project. Set only AFTER setup succeeds, so activating = setting it up.
+- live: active & servable. Ideal: 1 live domain (+ other servable ones to switch to).
+  - Active but not servable is possible (DNS broke, expired): it stays active.
+Rules:
+- We only choose a domain automatically when there's no active one and hosting needs one: the most recently attached domain. Then ONE automatic attempt to set it up (a release: 3 tries, then it stops):
+  - BYO: attempted right after checkout, records ready or not (checking them before is only guidance). Missing records -> it fails fast (no build, no cert attempt, no tries), the user fixes the DNS and hits retry.
+  - bought: we wait for public DNS to point at us (up to 2 days from when it's attached, survives restarts), then attempt.
+  - Only "waiting for a bought domain's DNS" is retried by the sweep/polls. A failed attempt never is: the user retries.
+- We never switch away from an active domain automatically. If it stops being servable:
+  - BYO: the user fixes the records or switches. We keep re-checking and show a warning; setup stays, nothing to redo when it's back.
+  - bought: on us (renew at the registrar / alert us), not the user. Or the user has to extend the domain subscription.
+- Nothing is torn down while active: its nginx block stays even when not servable.
+- A switch (user's choice) sets the new domain up while the old one keeps serving; only on success does the new one become active. Failure -> old stays active, error shown, user retries.
+- A switch tears nothing down: nginx (one file per project) and the container (recreated from the same image, new env) are overwritten. DNS and certs are left alone (an old cert is reused if switched back within 90 days; failed renewals are just noise, a reaper can clean up later).
+- Code deploys and domain setup share one "ensure the active domain" step; a domain switch isn't a deployment.
+
+Flow:
+========
+
+Each time to checkout is clicked (after review), a checkout created event is created
+Every payment is associated with a subscription record for now (1-time purchase is a forever subscription)
+- Domain buying is also associated with a domain subscription.
+All timezone for checking is UTC.
+Dont have to worry about an expired domain (because domain are good for 1 year at least)
+Being in a grace period means not being in a subscriptions (the services just a happen to keep working for a while longer, consider it a glitch in the system)
+Domain can only be bought if there is a recurring plan having been purchased in the past (for the project).
+Domain discount can only be applied once for the project's lifetime.
+- The domain that failed to register doesn't use it up though.
+- User can get the discount then cancel the yearly plan afterwards, but they cant get the refund by themselves. So we're not afraid of the case where they buy plan + domain (free) from us, then get the plan refund to get the domain for free.
+all BYO domains are shown whether found/verified or not on the deploy tab or smt.
+
+Note: *) on the same level means options or scenarios (only 1 is chosen or active at a time)
+
+Just done building (or no checkout succeeding yet, there could be some checkout records but no subscription records/actual payments). Either from the popup or a component in the deployment area.
+- Show three options: 1 time, monthly, yearly
+  *) Choose 1 time: review -> checkout
+    *) succeed: webhook + create a subscription.
+    *) failure: error notice at the review/checkout screen
+  *) Choose monthly:
+    *) No domain screen. Theoretically there could be existing domains already, but for now we're not letting them choose an existing domain. They can switch later if they have multiple.
+      - Straight to review screen -> checkout.
+        *) succeed: webhook + create a subscription.
+          - Deploy
+        *) failure: error notice at the review/checkout screen
+    *) Domain screen (if there is no active or servable domain. Yeah even if there's a non-servable active domain, we'll let them deal with it separately)
+      *) Buy tab: choose a domain to buy (remember there's no expired domain yet in at least 1 year). Can go back to chat.
+        - Owner info screen (would be saved to the checkout create event that houses the domain purchase)
+        - Straight to review screen -> checkout
+          *) succeed: webhook + create a subscription
+            - Get the domain from registrar
+              *) Succeed -> create domain registered event (with owner info) -> setup domain & deploy
+              *) Fail -> keep the bought plan. Refund domain purchase. Redirect back to somewhere + show error. This is rare though. User can be instructed to try the domain screen again (domain.failed recorded).
+          *) failure: error notice at the review/checkout screen
+      *) BYO tab: type a domain. Showing the status of whether records are properly added (but dont block users)
+        - Straight to review screen -> checkout
+          *) succeed: webhook + create a subscription.
+            - Deploy, once (fails fast if the records still aren't there; the user fixes them and retries)
+          *) failure: error notice at the review/checkout screen
+  *) Choose yearly:
+    *) No domain screen (same as monthly)
+      - Straight to review screen -> checkout
+        *) succeed: webhook + create a subscription.
+          - Deploy
+        *) failure: error notice at the review/checkout screen
+    *) Domain screen (if there's no active or servable domain)
+      *) Buy tab: choose a domain to buy (remember there's no expired domain yet in at least 1 year). Can go back to chat.
+        - Owner info screen (would be saved to the checkout create event that houses the domain purchase)
+        - Has the discount. FE shows it; the BE decides it when the domain checkout is created.
+        - Straight to review screen -> checkout
+          - Plan first. The domain's checkout is only created (link returned) once the plan is paid, so the domain can't be bought first. The FE holds the domain choice (+ owner info) until then: closing the dialog in between loses it, and the status asks for a domain again (the discount still applies, since it depends on the paid yearly plan). If a future gateway takes both in one payment, the domain is linked to that plan's checkout instead.
+          *) succeed: webhook + create a subscription
+            - Get the domain from registrar
+              *) Succeed -> create domain registered event (with owner info) -> deploy
+              *) Fail -> keep the bought plan. Refund. Redirect back to somewhere + show error. This is rare though. User can be instructed to try the domain screen again.
+          *) failure: error notice at the review/checkout screen
+      *) BYO tab: type a domain. Showing the status of whether records are properly added (but dont block users)
+        - Straight to review screen -> checkout
+          *) succeed: webhook + create a subscription.
+            - Deploy, once (fails fast if the records still aren't there; the user fixes them and retries)
+          *) failure: error notice at the review/checkout screen
+
+Any recurring plan expired (currently not on any recurring plan), but has paid before either on a recurring plan or bought 1 time: same as above, minus the one-time plan option (maybe the UI a bit different but flow is the same)
+
+On monthly:
+- There is an option to upgrade to yearly. Clicking:
+  - Straight to review screen -> checkout
+    *) succeed: webhook + update the subscription (or cancel one and create new, idk which is better. Go with update first).
+    *) failure: error notice at the review/checkout screen
+
+On monthly and yearly:
+- If there are no servable domains, show an option to choose/buy domain (same as the domain screen above, no discount). We can also get here from checkout plan + domain and getting the domain from the registrar fails.
+
+Data model:
+========
+
+1 `subscriptions` table: for recurring plan and one-time and domain. Created after payment succeeds. Renewal updates the same record.
+1 `site_domains` table: mostly for managing domain. No info about transactions. Created after user add BYO domain, or when buying from registrar succeeds.
+
+Events:
+checkout created: create every time a checkout page is created. Subscriptions point to these -> some checkout turns into subscriptions, some dont.
+- checkout event for plan and domain are separate (actually later these could be the same. Plan for both approaches)
+- checkout event for domain with discount should point back to the corresponding plan checkout event (the spec should be complete: how much is discounted etc.). Actually the domain checkout and the plan checkout should point to each other (or only domain checkout to plan checkout), if they are made at the same time (and therfre handled by the same function, which is convenient. If it's not convenient, can skip the association).
+  - Maybe use transaction for this if necessary? E.g. create the plan checkout event first, then embed that event's id into the domain checkout event
+- This might mean the successful checkout event(s) is what ties everything together.
+domain registered: should point back to the corresponding checkout event
+domain failed: should point back to the corresponding checkout event
+payment webhook events
+deployment.* (started / attempt_failed / succeeded / rolled_back / failed): a deployment's log. A first release on a domain says which (started.domain); a failure says its cause (dns / certificate / release).
+
+Long-running operations (own table: long_running_op_events -- id, operation_id, created_at, value): a request answered right away with an operation id, carried on in the background, the caller polling the id. The module only records; each operation folds its own events. Informational only: nothing decides from them.
+- domain switch: {kind: domain_switch, project_id, domain, commit} then {outcome: succeeded} or {outcome: failed, error, cause}. No outcome within 15 min -> interrupted.
+
+These we deliberately left for later, so they're not gaps in this work:
+========
+- deployments moving onto long_running_ops;
+- the real payment gateway, and with it the discount mechanism;
+- taking sites down after grace;
+- renewing domains at the registrar;
+- the certificate reaper.

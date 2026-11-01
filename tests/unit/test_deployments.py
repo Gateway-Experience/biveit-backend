@@ -7,6 +7,7 @@ import io
 import os
 import subprocess
 import tarfile
+import uuid
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -35,22 +36,78 @@ def _settings(tmp_path, monkeypatch):
 # --- the retry / rollback flow ---
 
 
+_LONG_AGO = datetime(2026, 1, 1, tzinfo=UTC)
+
+
 @pytest.fixture
 def log(monkeypatch):
-    """Records the deployment log (events), and the lock, without Postgres or Redis; no waiting between
-    attempts. `state["fail"]` maps a commit to how many of its ensure_release calls fail (-1 = all)."""
-    state = {"events": [], "released": [], "fail": {}, "lock_held": False}
+    """Records the deployment log (events), the lock, domain setups and the active domain, without Postgres or
+    Redis; no waiting between attempts. `state["fail"]` maps a commit (or a domain) to how many of its
+    ensure_release calls fail (-1 = all)."""
+    state = {
+        "events": [], "released": [], "fail": {}, "lock_held": False, "active": "old.com", "on": [], "redis": {},
+        "not_ready": set(), "error": RuntimeError, "operations": {},
+    }  # fmt: skip
 
     async def insert(event):
-        state["events"] = [*state["events"], event]
+        state["events"] = [*state["events"], {**event, "created_at": datetime.now(UTC)}]
         return event
 
-    async def ensure_release(project, conversation_id, commit):
+    async def find(criteria):
+        return [event for event in state["events"] if all(event.get(key) == value for key, value in criteria.items())]
+
+    async def check_domain_ready(project, domain):
+        if domain in state["not_ready"]:
+            raise deployment_service.sites.DomainNotReady(f"{domain}'s DNS records aren't found")
+
+    async def ensure_release(project, conversation_id, commit, domain):
         state["released"] = [*state["released"], commit]
-        remaining = state["fail"].get(commit, 0)
-        if remaining:
-            state["fail"] = {**state["fail"], commit: remaining - 1}
-            raise RuntimeError(f"{commit} broke")
+        state["on"] = [*state["on"], domain]
+        broken = commit if state["fail"].get(commit) else domain if state["fail"].get(domain) else None
+        if broken:
+            state["fail"] = {**state["fail"], broken: state["fail"][broken] - 1}
+            raise state["error"](f"{broken} broke")
+
+    async def get_active_domain(project):
+        return state["active"]
+
+    async def get_site_domains(project):
+        # The active domain became active long ago, unless something's activated it during the test.
+        return (
+            [{"domain": state["active"], "activated_at": state.get("active_since", _LONG_AGO)}]
+            if state["active"]
+            else []
+        )
+
+    async def activate(project_id, domain):
+        state["active"], state["active_since"] = domain, datetime.now(UTC)
+
+    async def set_value(key, value, ttl):
+        state["redis"] = {**state["redis"], key: value}
+
+    async def get_value(key):
+        return state["redis"].get(key)
+
+    async def flag_exists(key):
+        return key in state["redis"]
+
+    async def start_operation(value):
+        operation_id = uuid.uuid4()
+        state["operations"] = {
+            **state["operations"],
+            operation_id: [{"id": 1, "created_at": datetime.now(UTC), "value": value}],
+        }
+        return operation_id
+
+    async def record_operation(operation_id, value):
+        events = state["operations"][operation_id]
+        state["operations"] = {
+            **state["operations"],
+            operation_id: [*events, {"id": len(events) + 1, "created_at": datetime.now(UTC), "value": value}],
+        }
+
+    async def get_operation_events(operation_id):
+        return state["operations"].get(operation_id, [])
 
     async def no_sleep(seconds):
         pass
@@ -59,13 +116,26 @@ def log(monkeypatch):
         pass
 
     async def delete(key):
-        state["lock_held"] = False
+        state["redis"] = {name: value for name, value in state["redis"].items() if name != key}
+        if key == deployment_service._get_lock_key(42):
+            state["lock_held"] = False
 
     monkeypatch.setattr(deployment_service.events_repo, "insert", insert)
+    monkeypatch.setattr(deployment_service.long_running_ops, "start", start_operation)
+    monkeypatch.setattr(deployment_service.long_running_ops, "record", record_operation)
+    monkeypatch.setattr(deployment_service.long_running_ops, "get_events", get_operation_events)
+    monkeypatch.setattr(deployment_service.events_repo, "find", find)
+    monkeypatch.setattr(deployment_service.sites, "check_domain_ready", check_domain_ready)
+    monkeypatch.setattr(deployment_service.redis, "flag_exists", flag_exists)
     monkeypatch.setattr(deployment_service, "ensure_release", ensure_release)
     monkeypatch.setattr(deployment_service.asyncio, "sleep", no_sleep)
     monkeypatch.setattr(deployment_service.images, "prune_images", nothing)
     monkeypatch.setattr(deployment_service.redis, "delete", delete)
+    monkeypatch.setattr(deployment_service.redis, "set_value", set_value)
+    monkeypatch.setattr(deployment_service.redis, "get_value", get_value)
+    monkeypatch.setattr(deployment_service.sites, "get_active_domain", get_active_domain)
+    monkeypatch.setattr(deployment_service.sites, "get_site_domains", get_site_domains)
+    monkeypatch.setattr(deployment_service.site_domains_repo, "activate", activate)
     monkeypatch.setattr(deployment_service, "log_error", lambda *args, **kwargs: None)
     return state
 
@@ -76,7 +146,7 @@ def _types(state):
 
 async def test_a_deployment_retries_through_transient_failures(log):
     log["fail"] = {"new": 2}
-    await deployment_service._roll_out(_PROJECT, 9, "run1", "new", "old")
+    await deployment_service._roll_out(_PROJECT, 9, "run1", "new", "old", None)
     assert log["released"] == ["new", "new", "new"]
     assert _types(log) == [
         (DeploymentEvent.ATTEMPT_FAILED, "new"),
@@ -88,7 +158,7 @@ async def test_a_deployment_retries_through_transient_failures(log):
 
 async def test_a_deployment_that_never_comes_up_rolls_back_to_what_was_live(log):
     log["fail"] = {"new": -1}
-    await deployment_service._roll_out(_PROJECT, 9, "run1", "new", "old")
+    await deployment_service._roll_out(_PROJECT, 9, "run1", "new", "old", None)
     assert log["released"] == ["new"] * DEPLOYMENT_ATTEMPTS + ["old"]
     assert _types(log)[-1] == (DeploymentEvent.ROLLED_BACK, "old")
     assert "new broke" in log["events"][-1]["value"]["error"]
@@ -97,7 +167,7 @@ async def test_a_deployment_that_never_comes_up_rolls_back_to_what_was_live(log)
 
 async def test_a_first_deployment_that_fails_has_nothing_to_roll_back_to(log):
     log["fail"] = {"new": -1}
-    await deployment_service._roll_out(_PROJECT, 9, "run1", "new", None)
+    await deployment_service._roll_out(_PROJECT, 9, "run1", "new", None, None)
     assert log["released"] == ["new"] * DEPLOYMENT_ATTEMPTS
     assert _types(log)[-1] == (DeploymentEvent.FAILED, "new")
 
@@ -105,9 +175,117 @@ async def test_a_first_deployment_that_fails_has_nothing_to_roll_back_to(log):
 async def test_a_failed_rollback_is_logged_as_failed_and_the_lock_still_goes(log):
     log["fail"] = {"new": -1, "old": -1}
     log["lock_held"] = True
-    await deployment_service._roll_out(_PROJECT, 9, "run1", "new", "old")
+    await deployment_service._roll_out(_PROJECT, 9, "run1", "new", "old", None)
     assert _types(log)[-1] == (DeploymentEvent.FAILED, "old")
     assert log["lock_held"] is False
+
+
+async def test_a_code_deployment_serves_the_active_domain(log):
+    await deployment_service._roll_out(_PROJECT, 9, "run1", "new", "old", None)
+    assert log["on"] == ["old.com"] and log["active"] == "old.com"
+
+
+async def _first_release(log, domain):
+    """A first release on `domain`, as deploy would start it (its STARTED event) and roll it out."""
+    await deployment_service._record(DeploymentEvent.STARTED, _PROJECT, "run1", "new", {"domain": domain})
+    await deployment_service._roll_out(_PROJECT, 9, "run1", "new", None, domain)
+
+
+async def test_the_first_release_on_a_domain_makes_it_active_once_its_up(log):
+    log["active"] = None
+    await _first_release(log, "shop.com")
+    assert log["on"] == ["shop.com"] and log["active"] == "shop.com"
+
+
+async def test_a_first_release_that_fails_leaves_no_active_domain_and_says_why(log):
+    log["active"], log["fail"] = None, {"shop.com": -1}
+    await _first_release(log, "shop.com")
+    assert log["active"] is None and log["on"] == ["shop.com"] * DEPLOYMENT_ATTEMPTS
+    failure = (await deployment_service.get_activation(_PROJECT))["failure"]
+    assert (failure["domain"], failure["cause"]) == ("shop.com", "release") and "shop.com broke" in failure["error"]
+
+
+async def test_a_first_release_on_a_domain_without_its_records_fails_at_once(log):
+    log["active"], log["not_ready"] = None, {"mine.com"}
+    await _first_release(log, "mine.com")
+    # No build, no certificate attempt, no tries.
+    assert log["released"] == [] and log["active"] is None
+    assert (await deployment_service.get_activation(_PROJECT))["failure"]["cause"] == "dns"
+
+
+async def test_a_certificate_failure_says_so(log):
+    log["active"], log["fail"], log["error"] = None, {"shop.com": -1}, deployment_service.sites.SiteSetupFailed
+    await _first_release(log, "shop.com")
+    assert (await deployment_service.get_activation(_PROJECT))["failure"]["cause"] == "certificate"
+
+
+async def test_the_domain_being_set_up_is_the_locks_value(log):
+    log["redis"] = {deployment_service._get_lock_key(42): "shop.com"}
+    assert (await deployment_service.get_activation(_PROJECT))["domain"] == "shop.com"
+    log["redis"] = {deployment_service._get_lock_key(42): ""}  # a code deployment
+    assert (await deployment_service.get_activation(_PROJECT))["domain"] is None
+
+
+async def _switch(log, domain):
+    """A switch to `domain` on the live site ("live1"), as activate_domain would start it (its operation, the lock)
+    and run it. Returns how it went (get_domain_switch)."""
+    operation_id = await deployment_service.long_running_ops.start(
+        {"kind": "domain_switch", "project_id": 42, "domain": domain, "commit": "live1"}
+    )
+    log["lock_held"] = True
+    await deployment_service._switch_domain(_PROJECT, 9, "live1", domain, operation_id)
+    return await deployments.get_domain_switch(_PROJECT, operation_id)
+
+
+async def test_switching_domains_sets_the_new_one_up_then_makes_it_active_no_deployment(log):
+    log["fail"] = {"new.com": 2}  # two tries fail, the third works
+    switch = await _switch(log, "new.com")
+    assert log["on"] == ["new.com"] * 3 and set(log["released"]) == {"live1"}
+    assert log["active"] == "new.com" and log["events"] == [] and log["lock_held"] is False
+    assert (switch["domain"], switch["state"], switch["error"]) == ("new.com", "succeeded", None)
+
+
+async def test_a_failed_switch_keeps_the_old_domain_active_and_puts_its_setup_back(log):
+    log["fail"] = {"new.com": -1}
+    switch = await _switch(log, "new.com")
+    assert log["active"] == "old.com" and log["on"] == ["new.com"] * DEPLOYMENT_ATTEMPTS + ["old.com"]
+    assert (switch["state"], switch["cause"]) == ("failed", "release") and "new.com broke" in switch["error"]
+    # Told through its operation only: no deployment, and nothing the status or fulfilment decides from.
+    assert log["events"] == [] and log["lock_held"] is False
+    assert (await deployment_service.get_activation(_PROJECT))["failure"] is None
+
+
+async def test_a_switch_to_a_domain_without_its_records_fails_at_once(log):
+    log["not_ready"] = {"new.com"}
+    switch = await _switch(log, "new.com")
+    assert log["on"] == ["old.com"]  # only the old one's setup, put back
+    assert (switch["state"], switch["cause"]) == ("failed", "dns")
+
+
+def _switch_events(project_id=42, outcome=None, started_at=_LONG_AGO):
+    started = {
+        "id": 1,
+        "created_at": started_at,
+        "value": {"kind": "domain_switch", "project_id": project_id, "domain": "new.com"},
+    }
+    return [started, *([{"id": 2, "created_at": started_at, "value": outcome}] if outcome else [])]
+
+
+def test_a_switch_without_an_outcome_is_running_until_its_deadline_then_interrupted():
+    operation_id, now = uuid.uuid4(), datetime.now(UTC)
+    running = deployment_service._fold_domain_switch(_PROJECT, operation_id, _switch_events(started_at=now), now)
+    assert running["state"] == "running"
+    late = now + timedelta(minutes=16)
+    assert (
+        deployment_service._fold_domain_switch(_PROJECT, operation_id, _switch_events(started_at=now), late)["state"]
+        == "interrupted"
+    )
+
+
+def test_another_projects_operation_isnt_a_switch_of_this_one():
+    operation_id, now = uuid.uuid4(), datetime.now(UTC)
+    assert deployment_service._fold_domain_switch(_PROJECT, operation_id, _switch_events(project_id=7), now) is None
+    assert deployment_service._fold_domain_switch(_PROJECT, operation_id, [], now) is None
 
 
 @pytest.fixture
@@ -118,10 +296,11 @@ def deploy_world(monkeypatch, log):
     async def nothing(*args):
         pass
 
-    async def set_if_absent(key, ttl):
+    async def set_if_absent(key, ttl, value="1"):
         if log["lock_held"]:
             return False
         log["lock_held"] = True
+        log["redis"] = {**log["redis"], key: value}
         return True
 
     async def commit_workspace(project, conversation_id):
@@ -150,7 +329,7 @@ async def test_deploy_pins_a_commit_and_hands_the_rest_to_the_background(deploy_
     result = await deployments.deploy(_PROJECT, 9)
     assert result["commit"] == "c0ffee" and log["spawned"]
     assert _types(log) == [(DeploymentEvent.STARTED, "c0ffee")]
-    assert log["events"][0]["value"] == {"previous_commit": "old"}
+    assert log["events"][0]["value"] == {"previous_commit": "old", "domain": None}
     with pytest.raises(deployments.DeploymentInProgress):
         await deployments.deploy(_PROJECT, 9)
 

@@ -54,7 +54,7 @@ async def pay(checkout_id: str) -> list[tuple[bytes, str]]:
         })  # fmt: skip
         await _save("orders", order["id"], order)
         return [_to_webhook("order_created", "orders", order, checkout["custom_data"])]
-    is_trial = bool(item and item.get("free_first_year"))
+    is_trial = bool(item and item.get("discounted"))
     interval_days = 30 if item and item.get("plan") == Plan.MONTHLY else 365
     subscription = _to_object(uuid.uuid4().hex, {
         "status": "on_trial" if is_trial else "active", "variant_id": checkout["variant_id"],
@@ -84,6 +84,21 @@ async def cancel_subscription(subscription_id: str) -> None:
         subscription_id,
         _to_object(subscription_id, {**attributes, "status": "cancelled", "ends_at": ends_at}),
     )
+
+
+async def change_variant(subscription_id: str, variant_id: str) -> list[tuple[bytes, str]]:
+    """The subscription on its new variant, renewing a period from now (yearly / monthly, from the plan), and the
+    subscription_updated webhook the real thing would send."""
+    subscription = await get_object("subscriptions", subscription_id)
+    item = catalog.describe_variant(variant_id) or {}
+    interval_days = 30 if item.get("plan") == Plan.MONTHLY else 365
+    renews_at = (datetime.now(UTC) + timedelta(days=interval_days)).isoformat()
+    changed = _to_object(
+        subscription_id, {**subscription["attributes"], "variant_id": variant_id, "renews_at": renews_at}
+    )
+    await _save("subscriptions", subscription_id, changed)
+    # No custom data on it: the real thing repeats it, but our row already has it (and keeps the first it got).
+    return [_to_webhook("subscription_updated", "subscriptions", changed, {})]
 
 
 async def refund_latest_payment(subscription_id: str) -> None:

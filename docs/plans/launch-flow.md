@@ -1,5 +1,8 @@
 # Launch flow (business design)
 
+> docs/launchflow.txt is the current flow, with the domain terms and rules (attached / servable / active), and wins
+> where the two disagree -- e.g. switching domains tears nothing down, the domain discount is once per project.
+
 Status: business flow agreed (2026-10-28); first version built (2026-10-28) -- modules/payments (Lemon Squeezy,
 mocked with PAYMENTS_MOCK until the store exists), services/launch (checkout, fulfilment, status), controllers/launch +
 payments, and the FE's launch dialog / Launch tab. Prices and limits are placeholders to fine-tune. Not built yet: the
@@ -12,7 +15,7 @@ subscription renews.
 | | Price | Gets |
 |---|---|---|
 | Monthly plan | $19/mo | hosting on our platform, AI edits on the site (fair use), code download |
-| Yearly plan | $159/yr (30% off) | the same + a free first year on a cheap domain bought with it |
+| Yearly plan | $159/yr (30% off) | the same + a free first year on a cheap domain bought while it runs |
 | Just the code | $19 once | code download forever, AI edits for 30 days from payment, no hosting |
 | Domain | $10-$40/yr, one yearly subscription per domain | registration + renewal through our registrar |
 
@@ -25,7 +28,8 @@ subscription renews.
 ## Access (derived from payments, never stored)
 
 - Download the code: the user has EVER paid for the project (one-time, any plan period, even if cancelled since).
-- AI edits: plan active, or within 30 days of a one-time payment. Otherwise the project is read-only (+ download).
+- AI edits: plan active (or within the grace period after it ends), or within 30 days of a one-time payment.
+  Otherwise the project is read-only (+ download).
 - Hosting: plan active (or within the grace period after it ends).
 - Domains are only sold with an active plan (we only sell domains for sites we host).
 
@@ -52,8 +56,13 @@ subscription renews.
 - Bring your own: the user adds two records -- `A @ -> our IP` (traffic + certificate) and
   `TXT _biveit-verify -> <token>` (ownership proof, so nobody can attach someone else's domain that points at us).
   Checked live; not required before paying, required before going live.
-- Free first year: only when the yearly plan and the domain are bought in the SAME launch. A domain bought later
-  (separately) pays full price. A replacement for a domain that failed to register keeps the free year.
+- Free first year: the first domain bought while a yearly plan runs (a domain that failed to register doesn't
+  count). Decided from what's paid, never from what a checkout meant to buy: the domain checkout is only created
+  once the yearly plan is paid, so a free domain can't be had without it.
+- Plans and domains are separate purchases. A plan needs no domain (it waits for one: "choose a domain"); the
+  dialog just asks for both, in one go, for convenience. Adding the user's own domain needs no plan at all (it's
+  served once a plan hosts the site and its records check out).
+- The first domain attached to a site becomes its active one; after that, the user switches.
 - No free `<slug>.biveitapp.com` address for now -- a hosted site always needs a custom domain. (To reconsider soon
   after launch: it would cover "paid but no domain yet".)
 
@@ -71,7 +80,7 @@ subscription renews.
 - Just the code -> review. A plan -> domain step.
 - One-time buyers coming back see only the two plans ("You own the code. Put it online and keep editing.").
 
-### 3. Domain (plans only; required for now)
+### 3. Domain (plans only; asked for, not required)
 - Buy a domain (default tab):
   - empty search box: one-off AI suggestions (from the project's name/spec; only available, sellable names)
   - typing: search results instead; names we don't sell show "buy it at a registrar, then use Use my own"
@@ -87,9 +96,9 @@ subscription renews.
   DNS records again for a brought domain, a Terms checkbox (fair use + responsibility).
 - On "Continue to payment" everything is re-checked: still available? same price? -> otherwise back to the domain
   step ("someone just took it") or "price changed, confirm".
-- Payment: the plan checkout, then (if buying a domain) a second checkout for it -- "Step 2 of 2: your domain
-  ($0 today)". Lemon Squeezy has no cart.
-- Domain checkout abandoned: plan is active; the Launch tab says "finish your domain to go live" (resumable).
+- Payment: the plan checkout first. A brought domain is added right away (nothing to pay). A domain to buy gets its
+  own checkout once the plan is paid -- "Step 2 of 2: your domain ($0 today)". Lemon Squeezy has no cart.
+- Domain checkout abandoned: the plan is active; the Launch tab asks for a domain (the free year still applies).
 
 ### 5. After payment
 - "Payment received" -> "going live" checklist: payment confirmed, domain registered, address set up, building
