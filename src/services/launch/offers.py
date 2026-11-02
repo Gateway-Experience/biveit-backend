@@ -10,18 +10,22 @@ from src.dto.projects import Project
 from src.modules import domains, payments
 
 
-async def search_offers(project: Project, query: str) -> list[dict]:
+async def search_offers(project: Project, query: str, sandbox: bool) -> list[dict]:
     """What the domain step lists: the exact name across our TLDs, then the registrar's ideas -- or, for an empty
     query, its ideas around the project's name. [{domain, available, sold, price_per_year,
-    discountable}], sellable ones first (the order otherwise kept). [I/O]"""
-    found = await domains.search_domains(query.strip() or project["name"])
+    discountable}], sellable ones first (the order otherwise kept). `sandbox`: ask the registrar's sandbox (the
+    user's in sandbox mode, payments.is_sandbox). [I/O]"""
+    found = await domains.search_domains(query.strip() or project["name"], sandbox)
     offers = [_to_offer(quote) for quote in [*found["exact"], *found["suggestions"]]]
     return pydash.sort_by(offers, lambda offer: not offer["sold"])
 
 
-async def quote_domain(domain_name: str) -> dict:
-    """One exact domain, priced live (the same shape as search_offers' entries). [I/O]"""
-    quote, min_years = await asyncio.gather(domains.check_domains(domain_name, []), domains.get_min_years(domain_name))
+async def quote_domain(domain_name: str, sandbox: bool) -> dict:
+    """One exact domain, priced live (the same shape as search_offers' entries), at the registrar or its sandbox.
+    [I/O]"""
+    quote, min_years = await asyncio.gather(
+        domains.check_domains(domain_name, [], sandbox=sandbox), domains.get_min_years(domain_name, sandbox)
+    )
     return _to_offer({**pydash.head(quote), "min_years": min_years})
 
 

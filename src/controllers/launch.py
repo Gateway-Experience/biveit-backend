@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse
 from src.dto.launch import ActivateDomainRequest, DomainCheckRequest, LaunchCheckoutRequest
 from src.dto.projects import Project
 from src.dto.users import User
-from src.modules import deployments, domains
+from src.modules import deployments, domains, payments
 from src.repositories import projects as projects_repo
 from src.services.launch import checkouts, offers, status
 from src.utils.auth import get_current_user
@@ -66,7 +66,7 @@ async def search_domains(
 ) -> list[dict]:
     """Returned BARE (a plain array)."""
     try:
-        return await offers.search_offers(await _get_owned_project(project_id, user), q)
+        return await offers.search_offers(await _get_owned_project(project_id, user), q, payments.is_sandbox(user))
     except HTTPException:
         raise
     except domains.InvalidDomainQuery:

@@ -27,7 +27,7 @@ from src.dto.projects import Project
 from src.dto.users import User
 from src.modules import deployments, payments
 from src.services.launch import access as launch_access
-from src.services.launch import fulfilment, offers
+from src.services.launch import offers
 
 
 class LaunchRefused(Exception):
@@ -50,7 +50,7 @@ async def start_checkout(project: Project, user: User, request: LaunchCheckoutRe
         _check_plan_choice(request, access)
         plan_checkout = await payments.create_plan_checkout(user, project, payments.Plan(request.plan))
         return {"product": "plan", "url": plan_checkout["url"]}
-    domain = await _check_domain_choice(project, request, access)
+    domain = await _check_domain_choice(project, request, access, payments.is_sandbox(user))
     domain_checkout = await payments.create_domain_checkout(
         user,
         project,
@@ -70,7 +70,7 @@ def _check_plan_choice(request: LaunchCheckoutRequest, access: dict) -> None:
         raise LaunchRefused("ALREADY_SUBSCRIBED")
 
 
-async def _check_domain_choice(project: Project, request: LaunchCheckoutRequest, access: dict) -> dict:
+async def _check_domain_choice(project: Project, request: LaunchCheckoutRequest, access: dict, sandbox: bool) -> dict:
     """The domain to buy, checked live: {name, price_per_year, discount: {terms, plan_checkout_id,
     plan_subscription_ref} | None -- the yearly plan that earns it}. Raises LaunchRefused."""
     if not access["has_had_plan"]:
@@ -81,7 +81,7 @@ async def _check_domain_choice(project: Project, request: LaunchCheckoutRequest,
         name = deployments.normalize_domain(pydash.get(request, "domain.name"))
     except deployments.InvalidDomain as error:
         raise LaunchRefused("DOMAIN_INVALID", 400) from error
-    offer = await offers.quote_domain(name)
+    offer = await offers.quote_domain(name, sandbox)
     if not offer["available"]:
         raise LaunchRefused("DOMAIN_UNAVAILABLE")
     if not offer["sold"]:
@@ -115,9 +115,14 @@ async def has_domain_discount(project: Project, access: dict) -> bool:
 async def upgrade_plan(project: Project) -> None:
     """Move the running monthly plan to yearly: the same subscription, the provider charging the difference
     (payments.change_plan); its webhook updates the row. Raises LaunchRefused (NOT_UPGRADABLE: no running monthly
-    plan, or it's been cancelled -- it only runs out its period)."""
+    plan, or it's been cancelled -- it only runs out its period -- or the provider turned the change down, e.g. the
+    payment failed)."""
     plan = (await launch_access.get_launch_access(project["id"]))["plan_subscription"]
     if not plan or plan["plan"] != payments.Plan.MONTHLY or plan["status"] == payments.SubscriptionStatus.CANCELLED:
         raise LaunchRefused("NOT_UPGRADABLE")
-    for raw_body, signature in await payments.change_plan(plan["provider_ref"], payments.Plan.YEARLY):
-        await fulfilment.handle_payment_webhook(raw_body, signature)
+    try:
+        await payments.change_plan(plan, payments.Plan.YEARLY)
+    except payments.ProviderError as error:
+        if not 400 <= error.status < 500:
+            raise
+        raise LaunchRefused("NOT_UPGRADABLE") from error

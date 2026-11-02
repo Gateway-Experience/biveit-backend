@@ -13,6 +13,8 @@
 #                                     <hash>.<PROD_DOMAIN> -- then deploy, as its owner would; 202 {run_id, commit}.
 #                                     409 NOTHING_TO_DEPLOY / DEPLOYMENT_IN_PROGRESS / DOMAIN_TAKEN, 400
 #                                     INVALID_DOMAIN / NO_DOMAIN
+#   GET  /admin/sandbox-mode          the calling admin's own sandbox mode {sandbox, effective, server_sandbox}
+#   PUT  /admin/sandbox-mode          {sandbox}: switch their own purchases (payments + domains) to sandbox or back
 # The same sections scripts/manage.py's `status` prints.
 
 import asyncio
@@ -20,9 +22,12 @@ import asyncio
 import pydash
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from src.config import settings
 from src.dto.projects import Project, SetDomainsRequest
-from src.modules import deployments
+from src.dto.users import SetSandboxModeRequest, User
+from src.modules import deployments, payments
 from src.repositories import projects as projects_repo
+from src.repositories import users as users_repo
 from src.services import agent as agent_service
 from src.services import platform_status
 from src.services import projects as projects_service
@@ -121,3 +126,35 @@ async def deploy_project(project_id: int, body: SetDomainsRequest, request: Requ
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.get("/admin/sandbox-mode")
+async def get_sandbox_mode(request: Request, user: User = Depends(require_admin)) -> dict:
+    """The calling admin's own sandbox mode: {sandbox (their switch), effective (whether their purchases are in
+    sandbox mode now: test payments, sandbox domains), server_sandbox (the server's mode, everyone else's)}."""
+    try:
+        return _to_sandbox_mode(user)
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.put("/admin/sandbox-mode")
+async def set_sandbox_mode(body: SetSandboxModeRequest, request: Request, user: User = Depends(require_admin)) -> dict:
+    """Switch the calling admin's own purchases in or out of sandbox mode (users.meta.sandbox_mode) -- payments and
+    domains together. Only their purchases from now on: ones already made stay where they were made. Returns GET's
+    shape."""
+    try:
+        updated = await users_repo.update(user["id"], {"meta": {"sandbox_mode": body.sandbox}})
+        return _to_sandbox_mode(updated or user)
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+def _to_sandbox_mode(user: User) -> dict:
+    return {
+        "sandbox": bool((user.get("meta") or {}).get("sandbox_mode")),
+        "effective": payments.is_sandbox(user),
+        "server_sandbox": settings.sandbox_mode,
+    }

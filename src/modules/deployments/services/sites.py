@@ -101,7 +101,8 @@ async def check_external_domain(project: Project, domain: str) -> dict:
     found}], verified}. action "add": a record the user must have (the A and the TXT); "remove": one they must take
     off (any AAAA, listed only when there is one). verified = every "add" found and no "remove" left. The lookups
     ask public resolvers, not the server's cache, so a record the user
-    just added shows up as soon as it's out there. [I/O: reads]"""
+    just added shows up as soon as it's out there. Without settings.public_hosting (a dev box), every record counts
+    as found. [I/O: reads]"""
     try:
         normalized = normalize_domain(domain)
     except InvalidDomain:
@@ -115,8 +116,10 @@ async def check_external_domain(project: Project, domain: str) -> dict:
         blocked = None
     proof_name = f"{DOMAIN_PROOF_PREFIX}.{normalized}"
     proof_value = f"biveit-verify={get_domain_proof_token(project, normalized)}"
-    a_values, txt_values, aaaa_values = await asyncio.gather(
-        _resolve(normalized, "A"), _resolve(proof_name, "TXT"), _resolve(normalized, "AAAA")
+    a_values, txt_values, aaaa_values = (
+        await asyncio.gather(_resolve(normalized, "A"), _resolve(proof_name, "TXT"), _resolve(normalized, "AAAA"))
+        if settings.public_hosting
+        else ({settings.server_public_ip}, {proof_value}, set())
     )
     records = [
         {"type": "A", "name": normalized, "value": settings.server_public_ip, "action": "add", "found": settings.server_public_ip in a_values},
@@ -133,7 +136,9 @@ async def check_external_domain(project: Project, domain: str) -> dict:
 
 async def is_pointed_at_server(domain: str) -> bool:
     """Whether public DNS answers `domain`'s A record with the server's address -- what Let's Encrypt needs before
-    it can issue a certificate. [I/O: reads]"""
+    it can issue a certificate. Always yes without settings.public_hosting (a dev box). [I/O: reads]"""
+    if not settings.public_hosting:
+        return True
     return settings.server_public_ip in await _resolve(domain, "A")
 
 
@@ -178,7 +183,10 @@ async def set_domains(project: Project, domains: list[str]) -> list[str]:
 async def ensure_site(project: Project, domains: list[str]) -> None:
     """Make sure every one of `domains` (the active one, if any) has its certificate and routes to its container --
     or, with none, that there's no nginx site at all. Idempotent: certbot keeps a certificate that isn't due for
-    renewal, and nginx is only reloaded when the file changes. Raises SiteSetupFailed."""
+    renewal, and nginx is only reloaded when the file changes. Nothing at all without settings.public_hosting (a dev
+    box): the site stays on its localhost port. Raises SiteSetupFailed."""
+    if not settings.public_hosting:
+        return
     site_path = os.path.join(settings.nginx_sites_dir, f"biveit-site-{project['id']}.conf")
     if not domains:
         await nginx.remove_site(site_path)

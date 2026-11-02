@@ -136,6 +136,13 @@ class Settings(BaseSettings):
     # empty -> registered without one.
     certbot_webroot: str = "/var/www/certbot"
     certbot_email: str = ""
+    # Whether this server serves production sites on the public internet (prod: true). False on a dev box, which
+    # isn't reachable from outside: a site's release runs its container but writes no nginx file and asks for no
+    # certificate (the site's only on its localhost port), and public DNS checks on a site's domains are taken as
+    # passed -- a domain bought on the registrar's sandbox never shows up in public DNS, and nothing points at a dev
+    # box anyway. Everything before that (paying, registering the domain, its DNS records at the registrar) runs as
+    # usual. References: modules/deployments/services/sites.py.
+    public_hosting: bool = True
     # Our own domain for production sites, with a wildcard certificate for *.<prod_domain> set up once on the
     # VPS (at /etc/letsencrypt/live/<prod_domain>/, like dev_domain's). A site domain right under it uses that
     # certificate instead of getting its own. Empty -> every domain gets its own.
@@ -160,21 +167,28 @@ class Settings(BaseSettings):
     # key: long, random, never shared. Empty -> rendering a template that asks for a secret fails.
     project_secret_seed: str = ""
 
-    # Name.com, the registrar we buy users' domains through (modules/domains/services/namecom). The api url picks
-    # the environment: https://api.dev.name.com (sandbox) with "<username>-test" + the test token, or
-    # https://api.name.com with the live username + token. Nothing that buys may run against live from a dev box.
-    namecom_api_url: str = "https://api.dev.name.com"
+    # Sandbox mode: where money and domains go -- the payment provider's sandbox (test cards) and the registrar's
+    # sandbox (domains that don't really exist), or the live ones. ONE switch for both, so a test payment never buys
+    # a real domain and a real one never gets a fake. True everywhere but prod. On prod (false), an admin can still
+    # switch their OWN purchases to sandbox from the admin page (payments.is_sandbox).
+    sandbox_mode: bool = True
+
+    # Name.com, the registrar we buy users' domains through (modules/domains/services/namecom): one account per
+    # world -- live (the username + token) and the sandbox ("<username>-test" + the test token). Nothing that buys
+    # may run against live from a dev box. Leave the live pair empty off prod.
     namecom_username: str = ""
     namecom_api_token: str = ""
+    namecom_sandbox_username: str = ""
+    namecom_sandbox_api_token: str = ""
 
-    # Lemon Squeezy, the payment provider (modules/payments; merchant of record, so it handles taxes). API key + store
-    # for its API, the webhook signing secret to check its webhooks. payments_mock swaps it for a stand-in (fake
-    # checkout page, webhooks sent to ourselves) -- for local dev and testing before the store exists. It has to be
-    # switched on explicitly: a deployment that just forgot its key must fail, not hand out free plans.
-    lemonsqueezy_api_key: str = ""
-    lemonsqueezy_store_id: str = ""
-    lemonsqueezy_webhook_secret: str = ""
-    payments_mock: bool = False
+    # Polar, the payment provider (modules/payments; merchant of record, so it handles taxes). Two separate worlds,
+    # each with its own organization access token and webhook signing secret: live (real money) and the sandbox
+    # (test cards) -- which one a user pays in is sandbox_mode's call. Leave the live pair empty off prod. The webhook
+    # secrets are the whsec_... ones Polar shows for each endpoint.
+    polar_access_token: str = ""
+    polar_webhook_secret: str = ""
+    polar_sandbox_access_token: str = ""
+    polar_sandbox_webhook_secret: str = ""
     # The server's public IPv4 -- what a domain bought through us gets its A record pointed at, and what a user's
     # own domain must point at to be served (the launch flow, modules/deployments).
     server_public_ip: str = ""

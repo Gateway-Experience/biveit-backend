@@ -3,10 +3,14 @@
 # here (the routing table, or the caller's `registrar=` -- for a domain we hold, the one it was registered with),
 # so callers never deal with registrars. The registrars' APIs live in their own client modules (namecom.py), all
 # following registrars.py's contract.
+# Each registrar has two worlds -- live (real domains, real money) and its sandbox -- and each is a registrar of its
+# own here ("namecom" / "namecom_sandbox"): a NEW name goes where the caller's `sandbox` says, and a domain we hold
+# stays with the registrar it was registered at (register_domain returns it), so it's managed in its own world.
 
 import asyncio
+import functools
 import re
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pydash as _
 
@@ -15,8 +19,31 @@ from src.modules.domains.services import namecom
 from src.modules.domains.services.registrars import RegistrarError
 from src.utils import cache
 
-# Every registrar client we have, by the name domains and the routing table refer to them with.
-_REGISTRARS: dict[str, ModuleType] = {"namecom": namecom}
+# What every registrar client offers (registrars.py's contract) -- each takes the world (`sandbox`) first.
+_CLIENT_CALLS = [
+    "check_availability", "search", "get_pricing", "get_min_years", "get_domain", "list_domains", "create_domain",
+    "renew_domain", "update_domain", "set_nameservers", "get_auth_code", "list_records", "create_record",
+    "update_record", "delete_record", "list_unverified_contacts", "resend_verification", "get_account_name",
+    "get_balance",
+]  # fmt: skip
+_SANDBOX_SUFFIX = "_sandbox"
+
+
+def _bind(client: ModuleType, sandbox: bool) -> SimpleNamespace:
+    """[Pure] A registrar client with its world filled in: the same calls, minus the `sandbox` argument. Each call
+    is looked up on the client when it's made (not now), so what runs is always the client's current function."""
+    return SimpleNamespace(**{call: functools.partial(_call_client, client, call, sandbox) for call in _CLIENT_CALLS})
+
+
+def _call_client(client: ModuleType, call: str, sandbox: bool, *args, **kwargs):
+    return getattr(client, call)(sandbox, *args, **kwargs)
+
+
+# Every registrar we have, by the name domains and the routing table refer to them with: each client, once per world.
+_REGISTRARS: dict[str, SimpleNamespace] = {
+    "namecom": _bind(namecom, False),
+    f"namecom{_SANDBOX_SUFFIX}": _bind(namecom, True),
+}
 
 
 class InvalidDomainQuery(Exception):
@@ -27,17 +54,23 @@ class DomainUnavailable(Exception):
     """The domain can't be bought as a plain registration right now (taken, or only aftermarket/backorder)."""
 
 
-async def search_domains(query: str) -> dict:
+async def search_domains(query: str, sandbox: bool = False) -> dict:
     """What a domain search shows: {"exact": the name as typed across our TLDs (check_domains), "suggestions":
     buyable ideas around it (suggest_domains)}. The registrar's ideas often include the exact domains again, so
     those are dropped from suggestions. Available offers also get `min_years`, the term their price is for
     (None on taken ones). [I/O]"""
-    exact, suggestions = await asyncio.gather(check_domains(query), suggest_domains(query))
+    exact, suggestions = await asyncio.gather(
+        check_domains(query, sandbox=sandbox), suggest_domains(query, sandbox=sandbox)
+    )
     exact_domains = {offer["domain"] for offer in exact}
     new_suggestions = [offer for offer in suggestions if offer["domain"] not in exact_domains]
     available_domains = [offer["domain"] for offer in exact + new_suggestions if offer["available"]]
     min_years_by_domain = dict(
-        zip(available_domains, await asyncio.gather(*map(get_min_years, available_domains)), strict=True)
+        zip(
+            available_domains,
+            await asyncio.gather(*[get_min_years(domain, sandbox) for domain in available_domains]),
+            strict=True,
+        )
     )
     return {
         "exact": [{**offer, "min_years": min_years_by_domain.get(offer["domain"])} for offer in exact],
@@ -45,22 +78,25 @@ async def search_domains(query: str) -> dict:
     }
 
 
-async def get_min_years(domain_name: str) -> int:
+async def get_min_years(domain_name: str, sandbox: bool = False) -> int:
     """The shortest term `domain_name`'s TLD can be registered for -- 1 for most, 2 for .ai. Asking can be
     expensive (Name.com has to be probed), so it's cached per TLD (MIN_TERM_CACHE_SECONDS). [I/O]"""
     tld = domain_name.partition(".")[2]
+    registrar = get_registrar(domain_name, sandbox)
     return await cache.with_cache(
-        f"domains:min_years:{tld}", MIN_TERM_CACHE_SECONDS, lambda: _get_client(domain_name).get_min_years(domain_name)
+        f"domains:min_years:{registrar}:{tld}",
+        MIN_TERM_CACHE_SECONDS,
+        lambda: _REGISTRARS[registrar].get_min_years(domain_name),
     )
 
 
-async def check_domains(query: str, tlds: list[str] = SEARCH_TLDS) -> list[dict]:
+async def check_domains(query: str, tlds: list[str] = SEARCH_TLDS, sandbox: bool = False) -> list[dict]:
     """The exact name the user typed, across `tlds` in that order, as offers (_to_offer). A full domain ("Foo.io",
     "https://www.foo.io/about") puts its own TLD first. [I/O]"""
     name, typed_tld = _split_domain(query)
     domain_names = [f"{name}.{tld}" for tld in _.uniq(_.compact([typed_tld, *tlds]))]
     # Each registrar checks the TLDs it sells; the answers are put back in the order asked.
-    names_by_registrar = _.group_by(domain_names, _route_registrar)
+    names_by_registrar = _.group_by(domain_names, lambda domain_name: get_registrar(domain_name, sandbox))
     results = await asyncio.gather(
         *[_REGISTRARS[registrar].check_availability(names) for registrar, names in names_by_registrar.items()]
     )
@@ -68,20 +104,20 @@ async def check_domains(query: str, tlds: list[str] = SEARCH_TLDS) -> list[dict]
     return [_to_offer(result_by_domain.get(domain_name, {"domainName": domain_name})) for domain_name in domain_names]
 
 
-async def suggest_domains(query: str, tlds: list[str] | None = None) -> list[dict]:
+async def suggest_domains(query: str, tlds: list[str] | None = None, sandbox: bool = False) -> list[dict]:
     """Name ideas around what the user typed, as offers (_to_offer), only ones that can be bought. The ideas come
     from the default registrar. [I/O]"""
     if not _split_domain(query)[0]:
         raise InvalidDomainQuery(query)
-    results = await _REGISTRARS[DEFAULT_REGISTRAR].search(query.strip(), tlds)
+    results = await _REGISTRARS[_to_world(DEFAULT_REGISTRAR, sandbox)].search(query.strip(), tlds)
     return [offer for offer in map(_to_offer, results) if offer["available"]]
 
 
-async def get_domain_pricing(domain_name: str, years: int | None = None) -> dict:
+async def get_domain_pricing(domain_name: str, years: int | None = None, sandbox: bool = False) -> dict:
     """What a domain costs for a term (default: the TLD's minimum, 2 years for .ai), in USD: the totals for
     registering, renewing and transferring it for that term. [I/O]"""
-    term_years = years or await get_min_years(domain_name)
-    pricing = await _get_client(domain_name).get_pricing(domain_name, term_years)
+    term_years = years or await get_min_years(domain_name, sandbox)
+    pricing = await _REGISTRARS[get_registrar(domain_name, sandbox)].get_pricing(domain_name, term_years)
     return {
         "domain": domain_name,
         "years": term_years,
@@ -92,10 +128,12 @@ async def get_domain_pricing(domain_name: str, years: int | None = None) -> dict
     }
 
 
-async def register_domain(domain_name: str, years: int, registrant: dict, idempotency_key: str) -> dict:
+async def register_domain(
+    domain_name: str, years: int, registrant: dict, idempotency_key: str, sandbox: bool = False
+) -> dict:
     """Buys `domain_name` for `years` with the user as `registrant` (the contact shape in registrars.py; its
     optional companyName, if filled, makes that company the legal owner), at the registrar the routing table
-    picks. SPENDS from our balance there.
+    picks, in the world `sandbox` says. SPENDS from our balance there.
 
     Availability and price are re-checked live first: a search result is only advisory, and premium prices must
     be echoed back exactly. The user fills every contact role, so none of them fall back to our account's
@@ -103,7 +141,7 @@ async def register_domain(domain_name: str, years: int, registrant: dict, idempo
     result instead of buying twice. Returns which registrar holds it now -- store that, it's where every later
     call for this domain goes. Raises DomainUnavailable -- also when the registry turns it down at purchase time
     (a reserved name the availability check still calls available). [I/O]"""
-    registrar_name = _route_registrar(domain_name)
+    registrar_name = get_registrar(domain_name, sandbox)
     registrar = _REGISTRARS[registrar_name]
     availability = _.head(await registrar.check_availability([domain_name])) or {}
     if not _to_offer({"domainName": domain_name, **availability})["available"]:
@@ -137,8 +175,8 @@ async def register_domain(domain_name: str, years: int, registrant: dict, idempo
 
 # --- Managing what we hold -------------------------------------------------------------------------------------
 # Each takes an optional `registrar`: for a domain, pass the one it was registered with (register_domain returns
-# it) -- that's where it lives, whatever the routing table says today; left out, the domain's TLD picks. Account-
-# level calls default to the default registrar. Shapes are registrars.py's (Name.com's field names).
+# it, sandbox or not) -- that's where it lives, whatever the routing table says today; left out, the domain's TLD
+# picks, live. Account-level calls default to the default registrar (live). Shapes are registrars.py's (Name.com's field names).
 
 
 async def get_domain(domain_name: str, registrar: str | None = None) -> dict:
@@ -218,23 +256,29 @@ def get_account_name(registrar: str = DEFAULT_REGISTRAR) -> str:
     return _REGISTRARS[registrar].get_account_name()
 
 
-def is_live(registrar: str = DEFAULT_REGISTRAR) -> bool:
-    """Whether `registrar` is configured against production (real domains, real money) rather than a sandbox.
-    [Pure-ish]"""
-    return _REGISTRARS[registrar].is_live()
-
-
-def _route_registrar(domain_name: str) -> str:
-    """[Pure] Which registrar a NEW registration of `domain_name` goes to: constants.REGISTRAR_BY_TLD,
-    matched on the full TLD ("com.vn"), then its last label ("vn"), else the default."""
+def get_registrar(domain_name: str, sandbox: bool = False) -> str:
+    """[Pure] Which registrar a NEW registration of `domain_name` goes to, in its world: constants.REGISTRAR_BY_TLD,
+    matched on the full TLD ("com.vn"), then its last label ("vn"), else the default -- its sandbox when
+    `sandbox`."""
     tld = domain_name.partition(".")[2]
     routed_tld = _.find([tld, tld.rpartition(".")[2]], lambda candidate: candidate in REGISTRAR_BY_TLD)
-    return REGISTRAR_BY_TLD.get(routed_tld, DEFAULT_REGISTRAR)
+    return _to_world(REGISTRAR_BY_TLD.get(routed_tld, DEFAULT_REGISTRAR), sandbox)
 
 
-def _get_client(domain_name: str, registrar: str | None = None) -> ModuleType:
-    """[Pure] The client for a domain: the named registrar, else the one its TLD routes to."""
-    return _REGISTRARS[registrar or _route_registrar(domain_name)]
+def get_sandbox_registrar(registrar: str = DEFAULT_REGISTRAR) -> str:
+    """[Pure] A registrar's sandbox (the admin test bench only ever works there)."""
+    return _to_world(registrar, True)
+
+
+def _to_world(registrar: str, sandbox: bool) -> str:
+    """[Pure] A registrar's name in that world: "namecom" -> "namecom_sandbox" when `sandbox`."""
+    return f"{registrar.removesuffix(_SANDBOX_SUFFIX)}{_SANDBOX_SUFFIX if sandbox else ''}"
+
+
+def _get_client(domain_name: str, registrar: str | None = None) -> SimpleNamespace:
+    """[Pure] The client for a domain: the named registrar (where it's held), else the one its TLD routes to
+    (live)."""
+    return _REGISTRARS[registrar or get_registrar(domain_name)]
 
 
 def _to_offer(result: dict) -> dict:

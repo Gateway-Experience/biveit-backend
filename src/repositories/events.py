@@ -12,6 +12,7 @@
 # after the fact means the history you wanted is exactly the history you don't have. Reporting-shaped
 # reads (counts per type per day, ...) should get their own SQL here once a consumer asks for them.
 
+from datetime import datetime
 from typing import Any
 
 import pydash
@@ -55,13 +56,17 @@ async def get(event_id: int) -> dict | None:
     return await postgres.fetchrow(f"SELECT {_COLUMNS} FROM events WHERE id = $event_id", {"event_id": event_id})
 
 
-async def find(criteria: dict[str, Any] | None = None, *, limit: int | None = None) -> list[dict]:
+async def find(
+    criteria: dict[str, Any] | None = None, *, limit: int | None = None, created_after: datetime | None = None
+) -> list[dict]:
     """Events whose fields EQUAL `criteria` (e.g. {"type": ..., "subject_ref": ...}), oldest-first --
-    the natural order for a log. Keys outside the event fields are ignored. `limit` None means all."""
+    the natural order for a log. Keys outside the event fields are ignored. `limit` None means all;
+    `created_after` None means since the beginning."""
     filters = pydash.pick(criteria or {}, *_EVENT_FIELDS)
+    since = " AND created_at > $created_after" if created_after else ""
     return await postgres.fetch(
-        f"SELECT {_COLUMNS} FROM events WHERE {postgres.to_where_clause(filters)} ORDER BY created_at, id LIMIT $limit",
-        {**filters, "limit": limit},
+        f"SELECT {_COLUMNS} FROM events WHERE {postgres.to_where_clause(filters)}{since} ORDER BY created_at, id LIMIT $limit",
+        {**filters, "limit": limit, **({"created_after": created_after} if created_after else {})},
     )
 
 

@@ -110,7 +110,11 @@ def db(monkeypatch):
     monkeypatch.setattr(mock, "REPLY_DELAY_SECONDS", 0)
     # These tests exercise the mock agent, whatever the switch is set to in constants.py.
     monkeypatch.setattr(conversations, "AGENT_MOCK_REPLIES", True)
-    return state
+    yield state
+    # Background jobs a test captured but never ran (e.g. the site preview's capture_later): close them, or Python
+    # warns they were never awaited.
+    for job in state["spawned"]:
+        job.close()
 
 
 @pytest.fixture(autouse=True)

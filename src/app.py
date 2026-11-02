@@ -21,6 +21,7 @@ from src.constants import (
     AGENT_LISTENER_PORT,
     DEVENV_IDLE_SWEEP_SECONDS,
     LAUNCH_SWEEP_SECONDS,
+    PURCHASE_CATCH_UP_SECONDS,
     SERVER_GRACEFUL_SHUTDOWN_SECONDS,
 )
 from src.controllers.admin import router as admin_router
@@ -37,6 +38,7 @@ from src.controllers.projects import router as projects_router
 from src.controllers.system import router as system_router
 from src.controllers.system_configurations import router as system_configurations_router
 from src.controllers.users import router as users_router
+from src.modules import payments
 from src.services import devenv, system_config
 from src.services import projects as projects_service
 from src.services.launch import fulfilment
@@ -81,11 +83,13 @@ async def lifespan(app: FastAPI):
     agent_listener = await _serve_agent_listener()
     idle_sweep = asyncio.create_task(_sweep_idle_projects())
     launch_sweep = asyncio.create_task(_sweep_launches())
+    purchase_catch_up = asyncio.create_task(_catch_up_purchases())
 
     yield
 
     idle_sweep.cancel()
     launch_sweep.cancel()
+    purchase_catch_up.cancel()
     if agent_listener:
         agent_listener.should_exit = True
         await agent_listener.shutdown()
@@ -120,6 +124,19 @@ async def _sweep_launches() -> None:
                 await fulfilment.fulfil_hosted_projects()
         except Exception as error:
             log_error(error, "the launch sweep failed; the next round tries again")
+
+
+async def _catch_up_purchases() -> None:
+    """Every PURCHASE_CATCH_UP_SECONDS, bring in what the payment provider's webhooks missed
+    (payments.catch_up_purchases); the launch sweep then fulfils what changed. Like the other sweeps: one worker per
+    round, a failed round logged and tried again next time."""
+    while True:
+        await asyncio.sleep(PURCHASE_CATCH_UP_SECONDS)
+        try:
+            if await redis.set_if_absent("payments:catch-up", PURCHASE_CATCH_UP_SECONDS - 10):
+                await payments.catch_up_purchases()
+        except Exception as error:
+            log_error(error, "the purchase catch-up failed; the next round tries again")
 
 
 async def _serve_agent_listener() -> uvicorn.Server | None:

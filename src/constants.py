@@ -261,6 +261,9 @@ DEVENV_IDLE_SWEEP_SECONDS = 5 * 60
 # Purchases still on their way to a live site (a bought domain waiting for public DNS, mostly) are moved along by
 # reading their status -- and, so they get there with nobody watching, every LAUNCH_SWEEP_SECONDS (services/launch).
 LAUNCH_SWEEP_SECONDS = 5 * 60
+# How often purchases are caught up with the payment provider, for whatever its webhooks missed
+# (payments.catch_up_purchases).
+PURCHASE_CATCH_UP_SECONDS = 10 * 60
 # A domain we just bought takes a while to show up in public DNS, and Let's Encrypt can't issue its certificate
 # before then -- so setting it up waits until public DNS points it at us, for up to this long after it's attached
 # (counted from site_domains, so it survives restarts). Past that, it's attempted anyway (and will most likely fail,

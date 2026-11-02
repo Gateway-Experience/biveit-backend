@@ -7,8 +7,8 @@
 # The shared shapes are Name.com's (camelCase, as their API names them): it was the first client, so a new one
 # translates its registrar's answers into them rather than everything being re-shaped around a second example.
 #
-# The functions (all async unless noted; see namecom.py for each one's exact shape):
-#   is_live() -> bool                            [sync] pointed at production rather than a sandbox
+# The functions (all async unless noted; see namecom.py for each one's exact shape). Each takes `sandbox` first --
+# which of the registrar's two worlds (and our account there) the call goes to; domains.py fills it in:
 #   get_account_name() -> str                    [sync] which of our accounts it acts as
 #   check_availability(domain_names) -> [result]  {"domainName", "purchasable", "purchaseType", "premium",
 #                                                 "purchasePrice", "renewalPrice"} -- prices for the min term

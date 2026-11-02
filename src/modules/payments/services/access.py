@@ -53,9 +53,9 @@ def to_access(subscriptions: list[dict], now: datetime) -> dict:
         "edit_until": None if running_plan else edit_until,
         "one_time_subscription": one_time,
         # The data model supports many bought dodmains per project, but for now let's assume users can only buy 1 for each proj.
-        # The domain subscription existing doesn't mean it's effective. It could have been refunded
-        # (the subscription is only cancelled and refunded then, but the subscription is still in place).
-        # There is another combined check with domain failed event in the upper layer.
+        # A domain that failed to register has its subscription revoked (ended now) and refunded, so it stops
+        # running here once its webhook lands; the upper layer also leaves out ones with a domain.failed event, which
+        # covers the moment before that.
         "domain_subscription": pydash.find_last(domain_subs, lambda row: is_running(row, now)),
     }
 

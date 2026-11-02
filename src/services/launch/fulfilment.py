@@ -20,7 +20,7 @@
 # registry) gets its subscription cancelled and its payment refunded (a free-first-year one charged nothing), and
 # the failure recorded: the plan stays, the user picks another domain. Steps that talk to the registrar only run
 # until the domain is attached, so polling doesn't hammer it.
-# What payments' rows don't say comes from the checkout that started them (payments.get_checkout): who a bought
+# What payments' rows don't say comes from the checkout that started them (payments.get_recorded_checkout): who a bought
 # domain is registered to.
 # References: checkouts.py (what those checkouts record), status.py (where it's shown).
 
@@ -33,7 +33,7 @@ from src.config import settings
 from src.constants import PURCHASED_DOMAIN_DNS_WAIT_SECONDS
 from src.dto.projects import Project
 from src.modules import deployments, domains, payments
-from src.modules.domains import DomainUnavailable, LiveSpendRefused, RegistrarError
+from src.modules.domains import DomainUnavailable, RegistrarError
 from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
 from src.services.launch import access as launch_access
@@ -87,18 +87,11 @@ async def fulfil_hosted_projects() -> None:
         await fulfil(project_id)
 
 
-async def handle_payment_webhook(raw_body: bytes, signature: str) -> None:
+async def handle_payment_webhook(provider: payments.Provider, raw_body: bytes, headers: dict[str, str]) -> None:
     """Take in a payment provider webhook, then fulfil the project it was about. Raises payments.InvalidSignature."""
-    row = await payments.handle_webhook(raw_body, signature)
+    row = await payments.handle_webhook(provider, raw_body, headers)
     if row and row["target_type"] == payments.TargetType.PROJECT:
         await fulfil(row["target_id"])
-
-
-async def pay_mock_checkout(checkout_id: str) -> None:
-    """Pay a mock checkout (payments_mock): the stand-in provider's webhooks go through the same path as real ones.
-    Raises payments.MockCheckoutNotFound."""
-    for raw_body, signature in await payments.pay_mock_checkout(checkout_id):
-        await handle_payment_webhook(raw_body, signature)
 
 
 async def _ensure_purchased_domain(project: Project, subscription: dict) -> None:
@@ -109,8 +102,8 @@ async def _ensure_purchased_domain(project: Project, subscription: dict) -> None
       3. its A record -> our server
       4. attach it
     If it can't be registered (someone took it between checkout and payment, or the registry turned it down), the
-    user gets their money back for the domain only: the subscription is cancelled, its payment refunded, and the
-    failure recorded -- the status then asks for another domain, and the launch flow's access (access.py) no longer
+    user gets their money back for the domain only: the subscription is ended right away, its payment refunded, and
+    the failure recorded -- the status then asks for another domain, and the launch flow's access (access.py) no longer
     counts this subscription, so it never comes back here. The plan stays."""
     domain = subscription["product_data"]["domain"]
     attached = await deployments.get_site_domains(project)
@@ -118,54 +111,60 @@ async def _ensure_purchased_domain(project: Project, subscription: dict) -> None
     if pydash.find(attached, {"domain": domain}):
         return
     subscription_ref = subscription["provider_ref"]
-    checkout = await payments.get_checkout(pydash.get(subscription, "custom_data.checkout_id"))
+    checkout = await payments.get_recorded_checkout(pydash.get(subscription, "custom_data.checkout_id"))
     if checkout is None:
         raise ValueError(f"no checkout recorded for domain subscription {subscription_ref}")
+    # The domain lives in the same world as the money that paid for it: a sandbox payment, the registrar's sandbox.
+    sandbox = subscription["provider"] == payments.Provider.POLAR_SANDBOX
     try:
-        await _ensure_registered(project, domain, checkout, subscription_ref)
+        await _ensure_registered(project, domain, sandbox, checkout, subscription_ref)
     except DomainUnavailable:
-        await payments.cancel_subscription(subscription_ref)
-        await payments.refund_latest_payment(subscription_ref)
+        await payments.revoke_subscription(subscription)
+        await payments.refund_latest_payment(subscription)
         await domain_events.record_domain_failure(
             project["id"], checkout["checkout_id"], subscription_ref, domain, "unavailable"
         )
         return
-    await _ensure_a_record(domain)
+    await _ensure_a_record(domain, domains.get_registrar(domain, sandbox))
     # Attached, not active: step 2 makes it the active one only if the site has none yet. One bought to add to a
     # live site waits for the user to switch to it.
     await deployments.attach_domain(project, domain, deployments.SiteDomainKind.PURCHASED)
 
 
-async def _ensure_registered(project: Project, domain: str, checkout: dict, subscription_ref: str) -> None:
-    """The domain is in our registrar account -- registered now, for a year, to the registrant its `checkout`
-    recorded (the user), unless it already is; a registration is recorded (domain.registered). The subscription id
-    is the idempotency key, so a retry never buys twice. Raises DomainUnavailable; LiveSpendRefused when a mock
-    payment would buy a real domain."""
+async def _ensure_registered(
+    project: Project, domain: str, sandbox: bool, checkout: dict, subscription_ref: str
+) -> None:
+    """The domain is in our registrar account (its sandbox one when `sandbox`) -- registered now, for a year, to the
+    registrant its `checkout` recorded (the user), unless it already is; a registration is recorded
+    (domain.registered, with the registrar). The subscription id is the idempotency key, so a retry never buys
+    twice. Raises DomainUnavailable."""
     try:
-        await domains.get_domain(domain)
+        await domains.get_domain(domain, domains.get_registrar(domain, sandbox))
         return
     except RegistrarError as error:
         if error.status != 404:
             raise
-    # Intentions: a pretend payment (PAYMENTS_MOCK) must never spend real money -- on prod the registrar is live.
-    if settings.payments_mock and domains.is_live():
-        raise LiveSpendRefused(f"not registering {domain} on the live registrar for a mock payment")
     registrant = checkout.get("registrant")
     if not registrant:
         raise ValueError(f"no registrant recorded for {domain}")
     registration = await domains.register_domain(
-        domain, 1, _to_registrar_contact(registrant), f"subscription-{subscription_ref}"
+        domain,
+        1,
+        _to_registrar_contact(registrant),
+        f"subscription-{subscription_ref}",
+        sandbox=sandbox,
     )
     await domain_events.record_domain_registered(
         project["id"], checkout["checkout_id"], subscription_ref, registration, registrant
     )
 
 
-async def _ensure_a_record(domain: str) -> None:
-    """The domain's apex A record points at the server (its DNS is at our registrar)."""
-    records = await domains.list_records(domain)
+async def _ensure_a_record(domain: str, registrar: str) -> None:
+    """The domain's apex A record points at the server (its DNS is at `registrar`, where we registered it)."""
+    records = await domains.list_records(domain, registrar)
     if not pydash.find(records, lambda record: record.get("type") == "A" and not record.get("host")):
-        await domains.create_record(domain, {"host": "", "type": "A", "answer": settings.server_public_ip, "ttl": 300})
+        record = {"host": "", "type": "A", "answer": settings.server_public_ip, "ttl": 300}
+        await domains.create_record(domain, record, registrar)
 
 
 async def _ensure_active_domain(project: Project) -> None:
@@ -179,7 +178,7 @@ async def _ensure_active_domain(project: Project) -> None:
     if any(row["activated_at"] for row in attached):
         return
     activation = await deployments.get_activation(project)
-    newest = pydash.max_by(attached, "created_at")
+    newest = max(attached, key=lambda row: row["created_at"], default=None)  # pydash.max_by raises on an empty list
     if activation["domain"] or newest is None or not await _is_dns_wait_over(newest):
         return
     failure = activation["failure"]

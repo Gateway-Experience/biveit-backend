@@ -1,8 +1,6 @@
-# Intentions: try the domains module's operations against whatever Name.com env .env.local points at
-# (meant for the sandbox, https://api.dev.name.com). Without --apply it only reads: balance, an availability
+# Intentions: try the domains module's operations against our Name.com SANDBOX account (settings.namecom_sandbox_*). Without --apply it only reads: balance, an availability
 # check, and the domains we hold. With --apply it buys a throwaway domain and walks it through everything we
-# can do with one -- DNS records, autorenew, lock, auth code, renewal. Spending against the live API is refused
-# outside ENV=prod by the module itself, so --apply on a dev box pointed at live just fails.
+# can do with one -- DNS records, autorenew, lock, auth code, renewal.
 #
 #   uv run python -m scripts.probe_namecom [--apply]
 
@@ -10,9 +8,11 @@ import argparse
 import asyncio
 import uuid
 
-from src.config import settings
 from src.modules import domains
 from src.utils import http
+
+# Every call goes to the sandbox.
+_REGISTRAR = domains.get_sandbox_registrar()
 
 # A made-up registrant (the sandbox doesn't sync with production, so nothing real gets registered), with our
 # real admin inbox so the ICANN verification email can be seen arriving.
@@ -30,17 +30,19 @@ _SANDBOX_REGISTRANT = {
 
 
 async def _walk_a_domain_through(domain_name: str) -> None:
-    registered = await domains.register_domain(domain_name, 1, _SANDBOX_REGISTRANT, str(uuid.uuid4()))
+    registered = await domains.register_domain(domain_name, 1, _SANDBOX_REGISTRANT, str(uuid.uuid4()), sandbox=True)
     print("registered:", registered)
-    record = await domains.create_record(domain_name, {"host": "www", "type": "CNAME", "answer": "example.com"})
-    print("records after adding www:", await domains.list_records(domain_name))
-    await domains.delete_record(domain_name, record["id"])
-    await domains.update_domain(domain_name, {"autorenewEnabled": False})
+    record = await domains.create_record(
+        domain_name, {"host": "www", "type": "CNAME", "answer": "example.com"}, _REGISTRAR
+    )
+    print("records after adding www:", await domains.list_records(domain_name, _REGISTRAR))
+    await domains.delete_record(domain_name, record["id"], _REGISTRAR)
+    await domains.update_domain(domain_name, {"autorenewEnabled": False}, _REGISTRAR)
     # A fresh registration can't be unlocked for 60 days (ICANN), so only read the code; it comes back locked too.
-    print("auth code:", await domains.get_auth_code(domain_name))
-    renewed = await domains.renew_domain(domain_name, 1)
+    print("auth code:", await domains.get_auth_code(domain_name, _REGISTRAR))
+    renewed = await domains.renew_domain(domain_name, 1, registrar=_REGISTRAR)
     print("renewed, now expires:", renewed["domain"]["expireDate"])
-    domain = await domains.get_domain(domain_name)
+    domain = await domains.get_domain(domain_name, _REGISTRAR)
     print(
         "final state:",
         {
@@ -57,11 +59,14 @@ async def main() -> None:
 
     await http.connect()
     try:
-        print(f"Name.com at {settings.namecom_api_url} as {settings.namecom_username}, ENV={settings.env}")
-        print("balance (USD):", await domains.get_balance())
+        print(f"Name.com sandbox as {domains.get_account_name(_REGISTRAR)}")
+        print("balance (USD):", await domains.get_balance(_REGISTRAR))
         domain_name = f"biveit-probe-{uuid.uuid4().hex[:10]}.com"
-        print("check:", await domains.check_domains(domain_name, []))
-        print("we hold:", [domain["domainName"] for domain in (await domains.list_domains()).get("domains", [])])
+        print("check:", await domains.check_domains(domain_name, [], sandbox=True))
+        print(
+            "we hold:",
+            [domain["domainName"] for domain in (await domains.list_domains(1, _REGISTRAR)).get("domains", [])],
+        )
         if args.apply:
             await _walk_a_domain_through(domain_name)
         else:

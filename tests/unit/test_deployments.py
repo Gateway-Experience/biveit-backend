@@ -661,6 +661,7 @@ def host(tmp_path, monkeypatch):
         state["written"] = input_text if argv[2:3] == ["tee"] else state.get("written")
         return ""
 
+    monkeypatch.setattr(settings, "public_hosting", True)  # a dev box's .env.local may turn it off
     monkeypatch.setattr(settings, "nginx_sites_dir", str(tmp_path))
     monkeypatch.setattr(sites, "run_command", fake_run_command)
     monkeypatch.setattr(nginx, "run_command", fake_run_command)
@@ -693,6 +694,13 @@ async def test_a_subdomain_of_ours_uses_the_wildcard_certificate(host, monkeypat
     assert "/etc/letsencrypt/live/shop.example.com/fullchain.pem" in host["written"]
     # HTTP/1.1 to the container, or its gzip stays off.
     assert host["written"].count("proxy_http_version 1.1;") == len(domains)
+
+
+async def test_a_dev_box_runs_no_nginx_or_certbot_for_a_site(host, monkeypatch):
+    monkeypatch.setattr(settings, "public_hosting", False)
+    await sites.ensure_site(_PROJECT, ["shop.example.com"])
+    await sites.ensure_site(_PROJECT, [])
+    assert host["ran"] == []
 
 
 async def test_without_domains_there_is_no_site(host, tmp_path):

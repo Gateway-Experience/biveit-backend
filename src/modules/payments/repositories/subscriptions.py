@@ -1,6 +1,8 @@
 # Intentions: data access for `subscriptions` -- our copy of each purchase at the payment provider (plans and domains,
 # recurring; the one-time purchase, lifetime). Schema: migrations/0011_subscriptions.sql.
 
+from collections.abc import Sequence
+from datetime import datetime
 from typing import Any
 
 import pydash
@@ -25,6 +27,20 @@ async def find(criteria: dict[str, Any]) -> list[dict]:
     where = pydash.pick(criteria, "id", *_WRITABLE_COLUMNS)
     sql = f"SELECT {_COLUMNS} FROM subscriptions WHERE {postgres.to_where_clause(where)} ORDER BY created_at, id"
     return await postgres.fetch(sql, where)
+
+
+async def find_stale(statuses: Sequence[str], updated_before: datetime) -> list[dict]:
+    """Subscriptions in one of `statuses` last written before `updated_before`, oldest write first."""
+    sql = f"SELECT {_COLUMNS} FROM subscriptions WHERE status = ANY($statuses) AND updated_at < $updated_before ORDER BY updated_at"
+    return await postgres.fetch(sql, {"statuses": list(statuses), "updated_before": updated_before})
+
+
+async def find_by_checkout_ids(checkout_ids: list[str]) -> list[dict]:
+    """Subscriptions started by any of these checkouts (custom_data.checkout_id)."""
+    if not checkout_ids:
+        return []
+    sql = f"SELECT {_COLUMNS} FROM subscriptions WHERE custom_data->>'checkout_id' = ANY($checkout_ids)"
+    return await postgres.fetch(sql, {"checkout_ids": checkout_ids})
 
 
 async def upsert(row: dict[str, Any]) -> dict:

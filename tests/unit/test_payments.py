@@ -1,15 +1,20 @@
-# Payments tests (modules/payments): what we charge for a domain, what a project's purchases allow (access), and
-# taking in webhooks -- signature, the stand-in provider's purchases going through the real path, our rows following
-# what the provider says. The tables and Redis are faked; the real provider isn't involved (payments_mock).
+# Payments tests (modules/payments): what we charge for a domain, what a project's purchases allow (access), who pays
+# where (live / sandbox), and taking in Polar's webhooks -- signature, our rows following what Polar says. The tables
+# and Polar are faked (an in-memory Polar holding its objects); webhooks are really signed.
 
+import base64
+import hashlib
+import hmac
 import itertools
+import json
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from src.config import settings
 from src.modules import payments
-from src.modules.payments.services import lemonsqueezy, mock_lemonsqueezy, webhooks
+from src.modules.payments.services import catalog, checkouts, polar, purchases, subscriptions
 
 _NOW = datetime(2026, 10, 28, 12, tzinfo=UTC)
 
@@ -36,15 +41,19 @@ def test_a_domain_is_priced_at_the_first_price_point_covering_it(quote, expected
     assert offer["sold"] == (offer["price_per_year"] is not None)
 
 
-def test_every_price_point_has_its_variants():
+def test_every_product_we_sell_has_a_live_product_id_and_reads_back():
+    live = payments.Provider.POLAR
     for point in payments.DOMAIN_PRICE_POINTS:
-        assert payments.describe_variant(point["variant_id"]) == {
-            "product": "domain", "price_per_year": point["price_usd"], "discounted": False,
-        }  # fmt: skip
-        if point["discountable"]:
-            assert payments.describe_variant(point["discounted_variant_id"])["discounted"]
-    assert payments.describe_variant("mock-plan-yearly") == {"product": "plan", "plan": "yearly"}
-    assert payments.describe_variant("not-ours") is None
+        product_id = catalog.get_product_id(live, point["product_key"])
+        assert payments.describe_product(live, product_id) == {
+            "product": "domain",
+            "price_per_year": point["price_usd"],
+        }
+    yearly_id = catalog.get_product_id(live, payments.PLANS[payments.Plan.YEARLY]["product_key"])
+    assert payments.describe_product(live, yearly_id) == {"product": "plan", "plan": "yearly"}
+    assert payments.describe_product(live, "not-ours") is None
+    # A live product id means nothing in the sandbox: separate worlds.
+    assert payments.describe_product(payments.Provider.POLAR_SANDBOX, yearly_id) is None
 
 
 # --- access ---
@@ -152,54 +161,114 @@ def test_the_running_domain_subscription_is_picked_out():
 
 
 @pytest.mark.parametrize(
-    ("provider_object", "provider_status", "status"),
+    ("polar_subscription", "status"),
     [
-        ("subscription", "on_trial", "trialing"),
-        ("subscription", "past_due", "past_due"),
-        ("subscription", "cancelled", "cancelled"),
-        ("subscription", "unpaid", "ended"),
-        ("subscription", "paused", "ended"),
-        ("order", "paid", "active"),
-        ("order", "refunded", "refunded"),
+        ({"status": "trialing"}, "trialing"),
+        ({"status": "active", "cancel_at_period_end": False}, "active"),
+        ({"status": "active", "cancel_at_period_end": True}, "cancelled"),  # runs out its period
+        ({"status": "past_due"}, "past_due"),
+        ({"status": "incomplete"}, "pending"),
+        ({"status": "canceled"}, "ended"),
+        ({"status": "unpaid"}, "ended"),
+        ({"status": "paused"}, "ended"),
     ],
 )
-def test_lemonsqueezys_statuses_are_read_as_ours(provider_object, provider_status, status):
-    assert lemonsqueezy.to_status(provider_object, provider_status) == status
+def test_polars_subscription_statuses_are_read_as_ours(polar_subscription, status):
+    assert polar.to_subscription_status(polar_subscription) == status
+
+
+@pytest.mark.parametrize(
+    ("order_status", "status"),
+    [("paid", "active"), ("partially_refunded", "active"), ("refunded", "refunded"), ("pending", "pending")],
+)
+def test_polars_order_statuses_are_read_as_ours(order_status, status):
+    assert polar.to_order_status({"status": order_status}) == status
 
 
 def test_a_status_we_dont_know_fails_loudly():
     with pytest.raises(ValueError):
-        lemonsqueezy.to_status(payments.ProviderObject.SUBSCRIPTION, "on_vacation")
+        polar.to_subscription_status({"status": "on_vacation"})
+
+
+# --- who pays where ---
+
+
+@pytest.mark.parametrize(
+    ("server_sandbox", "user", "provider"),
+    [
+        (False, {"role": None, "meta": {}}, "polar"),
+        (False, {"role": "ADMIN", "meta": {}}, "polar"),
+        (False, {"role": "ADMIN", "meta": {"sandbox_mode": True}}, "polar_sandbox"),
+        # A user can write their own meta: the flag means nothing without the role.
+        (False, {"role": None, "meta": {"sandbox_mode": True}}, "polar"),
+        # A sandbox server is sandbox for everyone, whatever their switch says.
+        (True, {"role": None, "meta": {}}, "polar_sandbox"),
+        (True, {"role": "ADMIN", "meta": {"sandbox_mode": False}}, "polar_sandbox"),
+    ],
+)
+def test_only_an_admin_can_switch_their_own_purchases_to_sandbox(monkeypatch, server_sandbox, user, provider):
+    monkeypatch.setattr(settings, "sandbox_mode", server_sandbox)
+    assert payments.get_payment_provider(user) == provider
+    assert payments.is_sandbox(user) == (provider == "polar_sandbox")
 
 
 # --- webhooks ---
 
+_SECRET = "whsec_" + base64.b64encode(b"test-signing-key").decode()
+_SANDBOX = payments.Provider.POLAR_SANDBOX
+_YEARLY_ID, _MONTHLY_ID, _ONE_TIME_ID, _DOMAIN_15_ID = "prod-yearly", "prod-monthly", "prod-one-time", "prod-domain-15"
+
+
+def _sign(body: dict, secret: str = _SECRET, timestamp: int | None = None) -> tuple[bytes, dict]:
+    """A webhook as Polar would send it: (raw body, lower-cased headers), signed per Standard Webhooks."""
+    raw_body = json.dumps(body).encode()
+    webhook_id, sent_at = "msg_1", str(timestamp if timestamp is not None else int(time.time()))
+    key = base64.b64decode(secret.removeprefix("whsec_"))
+    signature = base64.b64encode(hmac.new(key, f"{webhook_id}.{sent_at}.".encode() + raw_body, hashlib.sha256).digest())
+    return raw_body, {
+        "webhook-id": webhook_id,
+        "webhook-timestamp": sent_at,
+        "webhook-signature": f"v1,{signature.decode()}",
+    }
+
 
 @pytest.fixture
 def stores(monkeypatch):
-    """Redis (for the stand-in provider), the subscriptions table and the events log, all in memory."""
-    state = {"redis": {}, "subscriptions": {}, "events": []}
-
-    async def set_value(key, value, ttl):
-        state["redis"] = {**state["redis"], key: value}
-
-    async def get_value(key):
-        return state["redis"].get(key)
-
-    async def delete(key):
-        state["redis"] = {k: v for k, v in state["redis"].items() if k != key}
+    """The subscriptions table, the events log, and a sandbox Polar (its objects, and what was asked of it), all in
+    memory. `pay(checkout)` makes what paying would: a subscription (+ its first order), or an order."""
+    state = {"subscriptions": {}, "events": [], "polar": {}, "checkouts": [], "calls": []}
 
     async def find(criteria):
         return [row for row in state["subscriptions"].values() if all(row.get(k) == v for k, v in criteria.items())]
 
     async def upsert(row):
-        key = (row["provider_object"], row["provider_ref"])
+        key = (row["provider"], row["provider_object"], row["provider_ref"])
         known = state["subscriptions"].get(key, {})
         # Like the SQL: custom_data kept once it's there.
         created = {"id": len(state["subscriptions"]) + 1, "created_at": _NOW}
-        merged = {**created, **known, **row, "custom_data": known.get("custom_data") or row.get("custom_data")}
+        merged = {
+            **created, **known, **row, "custom_data": known.get("custom_data") or row.get("custom_data"),
+            "updated_at": datetime.now(UTC),  # like the SQL: every write stamps it
+        }  # fmt: skip
         state["subscriptions"] = {**state["subscriptions"], key: merged}
         return merged
+
+    async def find_stale(statuses, updated_before):
+        rows = state["subscriptions"].values()
+        return [row for row in rows if row["status"] in statuses and row["updated_at"] < updated_before]
+
+    async def find_by_checkout_ids(checkout_ids):
+        rows = state["subscriptions"].values()
+        return [row for row in rows if str(row["custom_data"].get("checkout_id")) in checkout_ids]
+
+    async def find_events(criteria, created_after=None):
+        return [event for event in state["events"] if event["type"] == criteria["type"]]
+
+    async def find_checkout_orders(provider, checkout_id):
+        objects = state["polar"].values()
+        return [
+            obj for obj in objects if obj["id"].startswith("ord") and obj["metadata"].get("checkout_id") == checkout_id
+        ]
 
     async def insert_event(event):
         row = {**event, "id": len(state["events"]) + 1, "created_at": _NOW}
@@ -209,118 +278,313 @@ def stores(monkeypatch):
     async def get_event(event_id):
         return next((event for event in state["events"] if event["id"] == event_id), None)
 
-    monkeypatch.setattr(settings, "payments_mock", True)
+    async def create_checkout(provider, product_id, checkout_data):
+        checkout = {"id": f"co-{len(state['checkouts']) + 1}", "url": "https://polar.test/checkout", "provider": provider,
+                    "product_id": product_id, **checkout_data}  # fmt: skip
+        state["checkouts"] = [*state["checkouts"], checkout]
+        return checkout
+
+    async def get_object(provider, object_ref):
+        return state["polar"][object_ref]
+
+    async def find_subscription_orders(provider, subscription_ref):
+        orders = [obj for obj in state["polar"].values() if obj.get("subscription_id") == subscription_ref]
+        return sorted(orders, key=lambda order: order["created_at"], reverse=True)
+
+    async def record_call(*args):
+        state["calls"] = [*state["calls"], args]
+
+    products = {
+        "plan-yearly": _YEARLY_ID,
+        "plan-monthly": _MONTHLY_ID,
+        "one-time": _ONE_TIME_ID,
+        "domain-15": _DOMAIN_15_ID,
+    }
     monkeypatch.setattr(settings, "frontend_url", "https://app.test")
-    monkeypatch.setattr(mock_lemonsqueezy.redis, "set_value", set_value)
-    monkeypatch.setattr(mock_lemonsqueezy.redis, "get_value", get_value)
-    monkeypatch.setattr(mock_lemonsqueezy.redis, "delete", delete)
-    monkeypatch.setattr(webhooks.subscriptions_repo, "find", find)
-    monkeypatch.setattr(webhooks.subscriptions_repo, "upsert", upsert)
-    monkeypatch.setattr(webhooks.events_repo, "insert", insert_event)
-    monkeypatch.setattr(webhooks.events_repo, "get", get_event)
+    monkeypatch.setattr(settings, "sandbox_mode", True)
+    monkeypatch.setattr(settings, "polar_sandbox_webhook_secret", _SECRET)
+    monkeypatch.setitem(payments.constants.PRODUCT_IDS, _SANDBOX, products)
+    monkeypatch.setattr(purchases.subscriptions_repo, "find", find)
+    monkeypatch.setattr(purchases.subscriptions_repo, "upsert", upsert)
+    monkeypatch.setattr(checkouts.events_repo, "insert", insert_event)
+    monkeypatch.setattr(checkouts.events_repo, "get", get_event)
+    monkeypatch.setattr(checkouts.events_repo, "find", find_events)
+    monkeypatch.setattr(purchases.subscriptions_repo, "find_stale", find_stale)
+    monkeypatch.setattr(purchases.subscriptions_repo, "find_by_checkout_ids", find_by_checkout_ids)
+    monkeypatch.setattr(polar, "find_checkout_orders", find_checkout_orders)
+    monkeypatch.setattr(polar, "create_checkout", create_checkout)
+    monkeypatch.setattr(polar, "get_subscription", get_object)
+    monkeypatch.setattr(polar, "get_order", get_object)
+    monkeypatch.setattr(polar, "find_subscription_orders", find_subscription_orders)
+    for name in ("change_product", "revoke_subscription", "refund_order"):
+        monkeypatch.setattr(polar, name, lambda *args, name=name: record_call(name, *args))
     return state
 
 
-_USER = {"id": 7, "username": "anh@example.com"}
+def _pay(stores, checkout: dict) -> list[dict]:
+    """[Test helper] What Polar makes when a checkout's paid, saved in the fake Polar; returns the webhooks' bodies it
+    would send. A recurring product: a subscription (a trial when the checkout asked) and its first order; a one-time
+    one: an order."""
+    metadata, product_id = checkout["metadata"], checkout["product_id"]
+    if product_id == _ONE_TIME_ID:
+        order = {"id": "ord-1", "status": "paid", "paid": True, "product_id": product_id, "subscription_id": None,
+                 "billing_reason": "purchase", "metadata": metadata, "created_at": "2026-10-28T12:00:00Z"}  # fmt: skip
+        stores["polar"] = {**stores["polar"], "ord-1": order}
+        return [{"type": "order.paid", "data": order}]
+    trial = checkout.get("trial_interval") == "year"
+    subscription = {
+        "id": "sub-1", "status": "trialing" if trial else "active", "cancel_at_period_end": False,
+        "product_id": product_id, "metadata": metadata, "current_period_end": "2027-10-28T12:00:00Z",
+        "trial_end": "2027-10-28T12:00:00Z" if trial else None, "ends_at": None, "ended_at": None,
+    }  # fmt: skip
+    order = {"id": "ord-1", "status": "paid", "paid": not trial, "refundable_amount": 0 if trial else 15900,
+             "product_id": product_id, "subscription_id": "sub-1", "billing_reason": "subscription_create",
+             "metadata": metadata, "created_at": "2026-10-28T12:00:00Z"}  # fmt: skip
+    stores["polar"] = {**stores["polar"], "sub-1": subscription, "ord-1": order}
+    return [{"type": "subscription.created", "data": subscription}, {"type": "order.paid", "data": order}]
+
+
+async def _deliver(body: dict) -> dict | None:
+    return await payments.handle_webhook(_SANDBOX, *_sign(body))
+
+
+_USER = {"id": 7, "username": "anh@example.com", "role": None, "meta": {}}
 _PROJECT = {"id": 42}
-
-
-def _mock_checkout_id(url):
-    return url.rsplit("/", 1)[-1]
 
 
 async def test_a_paid_yearly_plan_becomes_our_subscription_row_pointing_at_its_checkout(stores):
     checkout = await payments.create_plan_checkout(_USER, _PROJECT, payments.Plan.YEARLY)
-    assert checkout["url"] == f"https://app.test/mock-checkout/{_mock_checkout_id(checkout['url'])}"
-    # The checkout is recorded first, with what it's for.
+    assert checkout["url"] == "https://polar.test/checkout"
+    # The checkout is recorded first, with what it's for and where; our ids ride along in Polar's metadata.
     assert stores["events"][0]["type"] == "payment.checkout_created"
-    recorded = await payments.get_checkout(checkout["checkout_id"])
+    recorded = await payments.get_recorded_checkout(checkout["checkout_id"])
     assert (recorded["product"], recorded["plan"], recorded.get("domain"), recorded["project_id"]) == (
-        "plan",
-        "yearly",
-        None,
-        42,
-    )
-    [(raw_body, signature)] = await payments.pay_mock_checkout(_mock_checkout_id(checkout["url"]))
-    row = await payments.handle_webhook(raw_body, signature)
-    assert (row["target_type"], row["target_id"], row["billing"], row["provider_object"]) == (
-        "PROJECT", 42, "recurring", "subscription",
+        "plan", "yearly", None, 42,
+    )  # fmt: skip
+    assert recorded["provider"] == "polar_sandbox"
+    [polar_checkout] = stores["checkouts"]
+    assert (polar_checkout["product_id"], polar_checkout["customer_email"]) == (_YEARLY_ID, "anh@example.com")
+    assert polar_checkout["success_url"] == "https://app.test/projects/42"
+    subscription_created, order_paid = _pay(stores, polar_checkout)
+    row = await _deliver(subscription_created)
+    assert (row["provider"], row["target_type"], row["target_id"], row["billing"], row["provider_object"]) == (
+        "polar_sandbox", "PROJECT", 42, "recurring", "subscription",
     )  # fmt: skip
     assert (row["product"], row["plan"], row["product_data"], row["status"]) == ("plan", "yearly", {}, "active")
+    assert row["renews_at"] == datetime(2027, 10, 28, 12, tzinfo=UTC)
     assert row["custom_data"] == {
-        "checkout_id": str(checkout["checkout_id"]),
-        "product": "plan",
-        "plan": "yearly",
-        "user_id": 7,
-        "project_id": 42,
-    }
-    assert await payments.get_checkout(row["custom_data"]["checkout_id"]) == recorded
+        "checkout_id": str(checkout["checkout_id"]), "product": "plan", "plan": "yearly", "user_id": 7,
+        "project_id": 42, "origin": "https://app.test",
+    }  # fmt: skip
+    assert await payments.get_recorded_checkout(row["custom_data"]["checkout_id"]) == recorded
     assert stores["events"][-1]["type"] == "payment.webhook" and stores["events"][-1]["grouping_ref"] == "42"
-    with pytest.raises(payments.MockCheckoutNotFound):  # paid once only
-        await payments.pay_mock_checkout(_mock_checkout_id(checkout["url"]))
+    # Its first payment's order just refreshes the same row -- not a purchase of its own.
+    assert (await _deliver(order_paid))["id"] == row["id"]
+    assert len(stores["subscriptions"]) == 1
 
 
-async def test_a_discounted_domain_is_a_trial_and_the_one_time_purchase_a_lifetime_row(stores):
+async def test_a_discounted_domain_is_a_years_trial_and_the_one_time_purchase_a_lifetime_row(stores):
     checkout = await payments.create_domain_checkout(
         _USER, _PROJECT, "cozy.com", 15, True, {"registrant": {"first_name": "An"}}
     )
-    assert (await payments.get_checkout(checkout["checkout_id"]))["registrant"] == {"first_name": "An"}
-    [(raw_body, signature)] = await payments.pay_mock_checkout(_mock_checkout_id(checkout["url"]))
-    row = await payments.handle_webhook(raw_body, signature)
+    assert (await payments.get_recorded_checkout(checkout["checkout_id"]))["registrant"] == {"first_name": "An"}
+    [domain_checkout] = stores["checkouts"]
+    assert (domain_checkout["product_id"], domain_checkout["trial_interval"], domain_checkout["trial_interval_count"]) == (
+        _DOMAIN_15_ID, "year", 1,
+    )  # fmt: skip
+    row = await _deliver(_pay(stores, domain_checkout)[0])
     assert (row["product"], row["product_data"], row["status"]) == ("domain", {"domain": "cozy.com"}, "trialing")
     assert row["trial_ends_at"] is not None
-    checkout = await payments.create_plan_checkout(_USER, _PROJECT, payments.Plan.ONE_TIME)
-    [(raw_body, signature)] = await payments.pay_mock_checkout(_mock_checkout_id(checkout["url"]))
-    one_time = await payments.handle_webhook(raw_body, signature)
+    await payments.create_plan_checkout(_USER, _PROJECT, payments.Plan.ONE_TIME)
+    [order_paid] = _pay(stores, stores["checkouts"][-1])
+    one_time = await _deliver(order_paid)
     assert (one_time["product"], one_time["billing"], one_time["provider_object"], one_time["status"]) == (
         "one_time", "lifetime", "order", "active",
     )  # fmt: skip
     assert payments.to_access(list(stores["subscriptions"].values()), datetime.now(UTC))["can_download"]
 
 
-async def test_the_order_for_a_subscriptions_first_payment_isnt_a_purchase_of_its_own(stores):
-    checkout = await payments.create_plan_checkout(_USER, _PROJECT, payments.Plan.MONTHLY)
-    order = mock_lemonsqueezy._to_object(
-        "order-1", {"status": "paid", "first_order_item": {"variant_id": "mock-plan-monthly"}}
-    )
-    await mock_lemonsqueezy._save("orders", "order-1", order)
-    custom_data = {"checkout_id": str(checkout["checkout_id"]), "user_id": 7, "project_id": 42, "product": "plan"}
-    raw_body, signature = mock_lemonsqueezy._to_webhook("order_created", "orders", order, custom_data)
-    assert await payments.handle_webhook(raw_body, signature) is None
-    assert stores["subscriptions"] == {} and stores["events"][-1]["type"] == "payment.webhook"
+async def test_an_email_polar_wont_take_is_left_for_the_buyer_to_type(stores, monkeypatch):
+    create_checkout = polar.create_checkout
+
+    async def picky_create_checkout(provider, product_id, checkout_data):
+        if checkout_data.get("customer_email"):
+            raise polar.ProviderError("polar_sandbox POST checkouts/: 422 ['customer_email' ...]", 422)
+        return await create_checkout(provider, product_id, checkout_data)
+
+    monkeypatch.setattr(polar, "create_checkout", picky_create_checkout)
+    checkout = await payments.create_plan_checkout({**_USER, "username": "x@bb.cc"}, _PROJECT, payments.Plan.YEARLY)
+    assert checkout["url"] and "customer_email" not in stores["checkouts"][0]
+
+
+async def test_a_plain_domain_checkout_has_no_trial(stores):
+    await payments.create_domain_checkout(_USER, _PROJECT, "cozy.com", 15, False, {})
+    assert "trial_interval" not in stores["checkouts"][0]
+
+
+async def test_purchases_we_didnt_start_here_are_recorded_and_left_alone(stores):
+    # Bought some other way (no metadata), or through another deployment of ours sharing the sandbox.
+    stores["polar"] = {
+        "sub-x": {"id": "sub-x", "status": "active", "product_id": _YEARLY_ID, "metadata": {}},
+        "sub-y": {
+            "id": "sub-y",
+            "status": "active",
+            "product_id": _YEARLY_ID,
+            "metadata": {"user_id": 7, "project_id": 42, "origin": "http://localhost:5173"},
+        },
+    }
+    assert await _deliver({"type": "subscription.created", "data": stores["polar"]["sub-x"]}) is None
+    assert await _deliver({"type": "subscription.created", "data": stores["polar"]["sub-y"]}) is None
+    assert stores["subscriptions"] == {} and len(stores["events"]) == 2
+
+
+async def test_events_we_dont_act_on_are_only_recorded(stores):
+    assert await _deliver({"type": "checkout.updated", "data": {"id": "co-1"}}) is None
+    assert stores["events"][-1]["direct_object_type"] == "checkout"
+
+
+async def test_a_webhook_about_something_polar_doesnt_know_is_kept_but_not_retried(stores, monkeypatch):
+    async def get_missing(provider, object_ref):
+        raise polar.ProviderError("polar_sandbox GET subscriptions/x: 404", 404)
+
+    monkeypatch.setattr(polar, "get_subscription", get_missing)
+    assert await _deliver({"type": "subscription.updated", "data": {"id": "gone"}}) is None
+    assert stores["subscriptions"] == {} and len(stores["events"]) == 1
+
+
+async def test_a_polar_outage_while_taking_in_a_webhook_is_an_error_so_polar_retries(stores, monkeypatch):
+    async def get_down(provider, object_ref):
+        raise polar.ProviderError("polar_sandbox GET subscriptions/x: 503", 503)
+
+    monkeypatch.setattr(polar, "get_subscription", get_down)
+    with pytest.raises(polar.ProviderError):
+        await _deliver({"type": "subscription.updated", "data": {"id": "sub-1"}})
 
 
 async def test_an_unknown_checkout_is_none(stores):
-    assert await payments.get_checkout(None) is None and await payments.get_checkout("999") is None
+    assert await payments.get_recorded_checkout(None) is None and await payments.get_recorded_checkout("999") is None
 
 
-async def test_a_webhook_with_a_bad_signature_is_refused_and_not_recorded(stores):
+@pytest.mark.parametrize(
+    "signed",
+    [
+        _sign({"type": "x"}, secret="whsec_" + base64.b64encode(b"someone-else").decode()),  # another secret
+        _sign({"type": "x"}, timestamp=int(time.time()) - 3600),  # too old: a replay
+        (
+            b'{"type": "x"}',
+            {"webhook-id": "msg_1", "webhook-timestamp": str(int(time.time())), "webhook-signature": "v1,forged"},
+        ),
+    ],
+)
+async def test_a_webhook_that_isnt_signed_right_is_refused_and_not_recorded(stores, signed):
     with pytest.raises(payments.InvalidSignature):
-        await payments.handle_webhook(b'{"meta": {}, "data": {}}', "forged")
+        await payments.handle_webhook(_SANDBOX, *signed)
     assert stores["events"] == []
 
 
-async def test_a_later_webhook_without_custom_data_still_updates_the_row(stores):
-    checkout = await payments.create_plan_checkout(_USER, _PROJECT, payments.Plan.MONTHLY)
-    [(raw_body, signature)] = await payments.pay_mock_checkout(_mock_checkout_id(checkout["url"]))
-    subscription_ref = (await payments.handle_webhook(raw_body, signature))["provider_ref"]
-    await payments.cancel_subscription(subscription_ref)
-    fresh = await mock_lemonsqueezy.get_object("subscriptions", subscription_ref)
-    cancelled_body, cancelled_signature = mock_lemonsqueezy._to_webhook(
-        "subscription_cancelled", "subscriptions", fresh, {}
-    )
-    row = await payments.handle_webhook(cancelled_body, cancelled_signature)
-    assert row["status"] == "cancelled" and row["ends_at"] is not None and row["custom_data"]["project_id"] == 42
+async def test_a_webhook_signed_with_polars_own_key_scheme_is_taken_too(stores):
+    # Polar's own scheme keys the HMAC with the whole secret string's bytes, not its decoded base64 part.
+    raw_body = json.dumps({"type": "checkout.updated", "data": {"id": "co-1"}}).encode()
+    webhook_id, sent_at = "msg_2", str(int(time.time()))
+    digest = hmac.new(_SECRET.encode(), f"{webhook_id}.{sent_at}.".encode() + raw_body, hashlib.sha256).digest()
+    headers = {
+        "webhook-id": webhook_id,
+        "webhook-timestamp": sent_at,
+        "webhook-signature": f"v1,{base64.b64encode(digest).decode()}",
+    }
+    assert await payments.handle_webhook(_SANDBOX, raw_body, headers) is None
+    assert len(stores["events"]) == 1
 
 
-async def test_a_plan_change_keeps_the_same_subscription_on_its_new_plan(stores):
-    checkout = await payments.create_plan_checkout(_USER, _PROJECT, payments.Plan.MONTHLY)
-    [(raw_body, signature)] = await payments.pay_mock_checkout(_mock_checkout_id(checkout["url"]))
-    monthly = await payments.handle_webhook(raw_body, signature)
-    [(changed_body, changed_signature)] = await payments.change_plan(monthly["provider_ref"], payments.Plan.YEARLY)
-    yearly = await payments.handle_webhook(changed_body, changed_signature)
-    assert (yearly["id"], yearly["plan"], yearly["custom_data"]) == (monthly["id"], "yearly", monthly["custom_data"])
-    assert len(stores["subscriptions"]) == 1
+async def test_a_sandbox_webhook_isnt_taken_as_a_live_one(stores):
+    # The live endpoint checks the live secret -- unset here, so nothing passes.
+    with pytest.raises(payments.InvalidSignature):
+        await payments.handle_webhook(payments.Provider.POLAR, *_sign({"type": "x"}))
+
+
+async def test_a_cancel_at_period_end_reads_as_cancelled_until_it_ends(stores):
+    await payments.create_plan_checkout(_USER, _PROJECT, payments.Plan.MONTHLY)
+    await _deliver(_pay(stores, stores["checkouts"][0])[0])
+    cancelling = {**stores["polar"]["sub-1"], "cancel_at_period_end": True, "ends_at": "2026-11-28T12:00:00Z"}
+    stores["polar"] = {**stores["polar"], "sub-1": cancelling}
+    row = await _deliver({"type": "subscription.canceled", "data": cancelling})
+    assert (row["status"], row["renews_at"]) == ("cancelled", None)
+    assert row["ends_at"] == datetime(2026, 11, 28, 12, tzinfo=UTC) and row["custom_data"]["project_id"] == 42
+
+
+async def test_a_refund_refreshes_the_subscription_it_was_for(stores):
+    await payments.create_plan_checkout(_USER, _PROJECT, payments.Plan.YEARLY)
+    await _deliver(_pay(stores, stores["checkouts"][0])[0])
+    stores["polar"] = {**stores["polar"], "sub-1": {**stores["polar"]["sub-1"], "status": "canceled"}}
+    row = await _deliver({"type": "refund.created", "data": {"id": "ref-1", "order_id": "ord-1"}})
+    assert row["status"] == "ended"
+
+
+async def test_a_plan_change_and_ending_a_subscription_go_to_the_polar_it_was_made_in(stores):
+    await payments.create_plan_checkout(_USER, _PROJECT, payments.Plan.MONTHLY)
+    monthly = await _deliver(_pay(stores, stores["checkouts"][0])[0])
+    await payments.change_plan(monthly, payments.Plan.YEARLY)
+    await payments.revoke_subscription(monthly)
+    await payments.refund_latest_payment(monthly)
+    assert stores["calls"] == [
+        ("change_product", _SANDBOX, "sub-1", _YEARLY_ID),
+        ("revoke_subscription", _SANDBOX, "sub-1"),
+        ("refund_order", _SANDBOX, stores["polar"]["ord-1"], "service_disruption"),
+    ]
+
+
+async def test_a_trial_has_nothing_to_refund(stores):
+    await payments.create_domain_checkout(_USER, _PROJECT, "cozy.com", 15, True, {})
+    domain = await _deliver(_pay(stores, stores["checkouts"][0])[0])
+    await subscriptions.refund_latest_payment(domain)
+    assert stores["calls"] == []
+
+
+# --- catching up what webhooks missed ---
+
+
+async def test_a_purchase_quiet_for_a_day_is_read_again_and_a_busy_one_isnt(stores):
+    await payments.create_plan_checkout(_USER, _PROJECT, payments.Plan.YEARLY)
+    row = await _deliver(_pay(stores, stores["checkouts"][0])[0])
+    # Revoked on Polar's side, and every webhook about it lost.
+    revoked = {**stores["polar"]["sub-1"], "status": "canceled", "ended_at": "2026-11-02T12:00:00Z"}
+    stores["polar"] = {**stores["polar"], "sub-1": revoked}
+    assert await payments.catch_up_purchases() == []  # heard from it just now: not asked about yet
+    caught_up = await payments.catch_up_purchases(now=row["updated_at"] + timedelta(days=1, seconds=1))
+    assert [(r["provider_ref"], r["status"]) for r in caught_up] == [("sub-1", "ended")]
+    # Settled for good: an ended purchase isn't asked about again.
+    assert await payments.catch_up_purchases(now=datetime.now(UTC) + timedelta(days=2)) == []
+
+
+async def test_a_paid_checkout_whose_webhooks_were_all_lost_gets_its_row(stores):
+    await payments.create_plan_checkout(_USER, _PROJECT, payments.Plan.ONE_TIME)
+    _pay(stores, stores["checkouts"][0])  # paid at Polar, nothing delivered
+    assert stores["subscriptions"] == {}
+    [one_time] = await payments.catch_up_purchases()
+    assert (one_time["product"], one_time["status"], one_time["target_id"]) == ("one_time", "active", 42)
+    assert await payments.catch_up_purchases() == []  # it has its row now
+
+
+async def test_a_checkout_never_paid_brings_nothing(stores):
+    await payments.create_plan_checkout(_USER, _PROJECT, payments.Plan.MONTHLY)
+    assert await payments.catch_up_purchases() == [] and stores["subscriptions"] == {}
+
+
+async def test_one_purchase_that_cant_be_caught_up_doesnt_stop_the_others(stores, monkeypatch):
+    await payments.create_plan_checkout(_USER, _PROJECT, payments.Plan.ONE_TIME)
+    await payments.create_plan_checkout(_USER, {"id": 43}, payments.Plan.ONE_TIME)
+    _pay(stores, stores["checkouts"][1])  # only the second one's paid
+    find_checkout_orders = polar.find_checkout_orders
+
+    async def first_one_fails(provider, checkout_id):
+        if checkout_id == str(stores["events"][0]["id"]):
+            raise polar.ProviderError("polar_sandbox GET orders/: 503", 503)
+        return await find_checkout_orders(provider, checkout_id)
+
+    monkeypatch.setattr(polar, "find_checkout_orders", first_one_fails)
+    monkeypatch.setattr(purchases, "log_error", lambda *args, **kwargs: None)
+    [caught_up] = await payments.catch_up_purchases()
+    assert caught_up["target_id"] == 43
 
 
 def test_a_domain_needs_a_plan_ever_paid_not_a_running_one():

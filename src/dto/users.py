@@ -133,3 +133,10 @@ class UpdateMeRequest(BaseModel):
         if value is None:
             raise ValueError("can't be null")
         return value
+
+
+class SetSandboxModeRequest(BaseModel):
+    """PUT /admin/sandbox-mode: whether the calling admin's own purchases happen in sandbox mode (test payments,
+    sandbox domains)."""
+
+    sandbox: bool

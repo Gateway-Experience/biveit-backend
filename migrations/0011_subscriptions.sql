@@ -1,5 +1,5 @@
 -- subscriptions: the payments module's purchases (modules/payments) -- what users have bought from us, as the payment
--- provider (Lemon Squeezy) reports it, recurring or not. The provider is the source of truth; these rows are our
+-- provider (Polar) reports it, recurring or not. The provider is the source of truth; these rows are our
 -- copy, kept current by its webhooks (each one re-fetches the object from the provider's API and overwrites the
 -- row) and a reconcile. The raw webhooks themselves are in `events` (payment.webhook) -- the history, and our copy
 -- of every charge (amounts, invoices and receipts are the provider's business); these rows are the current state.
@@ -10,8 +10,8 @@
 -- one-time purchase). provider_object: which kind of object provider_ref is at the provider -- subscription or
 -- order, two separate id spaces there (so it's part of the key), and which API to re-fetch it from.
 -- target_type + target_id: what it was bought for -- PROJECT + the project's id (the only kind so far).
--- custom_data: what our checkout attached (user, project, checkout id...) -- the provider hands it back only in
--- webhooks, so it's kept from the first one we see. snapshot: the provider's object as last fetched.
+-- custom_data: the metadata our checkout attached (user, project, checkout id, origin...), as Polar copies it onto
+-- the subscription / order; kept from the first time it came. snapshot: the provider's object as last fetched.
 
 -- One row per subscription / order at the provider. product: plan (hosting + agent; plan = monthly | yearly),
 -- domain (one yearly subscription per domain bought through us) or one_time (just the code; plan = one_time).
@@ -21,7 +21,7 @@
 CREATE TABLE IF NOT EXISTS subscriptions
 (
     id              BIGSERIAL PRIMARY KEY,
-    provider        varchar(32)  NOT NULL,                -- lemonsqueezy
+    provider        varchar(32)  NOT NULL,                -- polar | polar_sandbox (which Polar world)
     provider_object varchar(16)  NOT NULL,                -- subscription | order
     provider_ref    varchar(64)  NOT NULL,                -- the provider's id for it
     billing         varchar(16)  NOT NULL,                -- recurring | lifetime

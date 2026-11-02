@@ -1,6 +1,9 @@
 # The payments module's services:
-#   catalog.py            what we sell (plans, domain prices, provider variants) -- pure, off the constants
-#   checkouts.py          starting a purchase: a checkout link at the provider, recorded as an event, our ids attached
-#   webhooks.py           taking in the provider's webhooks into our tables
+#   catalog.py            what we sell (plans, domain prices, provider products) -- pure, off the constants
+#   checkouts.py          starting a purchase: a checkout at the provider, recorded as an event, our ids attached;
+#                         which provider a user pays through; changing a running plan
+#   purchases.py          our rows kept in step with the provider: refreshing one, catching up what webhooks miss
+#   webhooks.py           taking in the provider's webhooks (each refreshes a row through purchases.py)
+#   subscriptions.py      acting on a purchase we have: ending it now, refunding it
 #   access.py             what a user may do with a project, derived from what's been bought
-#   lemonsqueezy.py       the provider's API (mock_lemonsqueezy.py stands in for it with payments_mock on)
+#   polar.py              the provider's API (Polar, live and sandbox)

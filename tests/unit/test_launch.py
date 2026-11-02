@@ -97,7 +97,7 @@ def launch_world(monkeypatch):
     async def get_project_access(project_id):
         return state["access"]
 
-    async def quote_domain(name):
+    async def quote_domain(name, sandbox):
         return state.get(
             "quote",
             {"domain": name, "available": True, "sold": True, "price_per_year": 15, "discountable": True},
@@ -166,16 +166,16 @@ def _bought(world):
 
 
 async def test_a_quote_is_the_registrars_answer_with_our_price(monkeypatch):
-    async def check_domains(query, tlds):
+    async def check_domains(query, tlds, sandbox=False):
         return [{"domain": query, "available": True, "premium": False, "price_usd": 12, "renewal_price_usd": 14}]
 
-    async def get_min_years(domain_name):
+    async def get_min_years(domain_name, sandbox=False):
         return 1
 
     # monkeypatch refuses names the module doesn't have -- so this also checks the domains module exports them.
     monkeypatch.setattr(offers.domains, "check_domains", check_domains)
     monkeypatch.setattr(offers.domains, "get_min_years", get_min_years)
-    quote = await offers.quote_domain("cozy.com")
+    quote = await offers.quote_domain("cozy.com", False)
     assert (quote["domain"], quote["available"], quote["sold"], quote["price_per_year"]) == ("cozy.com", True, True, 15)
 
 
@@ -404,6 +404,7 @@ def dns(monkeypatch):
     async def find(criteria):
         return [row for row in state["owners"] if row["domain"] == criteria["domain"]]
 
+    monkeypatch.setattr(settings, "public_hosting", True)  # a dev box's .env.local may turn it off
     monkeypatch.setattr(settings, "project_secret_seed", "seed-for-tests")
     monkeypatch.setattr(settings, "server_public_ip", "57.0.0.1")
     monkeypatch.setattr(settings, "dev_domain", "dev.biveitapp.com")
@@ -430,6 +431,15 @@ async def test_a_users_own_domain_is_verified_once_both_records_are_there(dns):
     # The token is the project's: another project's record doesn't prove anything for this one.
     other = await deployments.check_external_domain({**_PROJECT, "id": 43}, "shop.example.com")
     assert other["records"][1]["value"] != txt_record["value"] and not other["verified"]
+
+
+async def test_on_a_dev_box_public_dns_checks_count_as_passed(dns, monkeypatch):
+    # A sandbox-registered domain never reaches public DNS, and nothing points at a dev box anyway.
+    monkeypatch.setattr(settings, "public_hosting", False)
+    assert (await deployments.check_external_domain(_PROJECT, "shop.example.com"))["verified"]
+    assert await deployments.is_pointed_at_server("cozy.com")
+    # What makes a domain off-limits still does.
+    assert (await deployments.check_external_domain(_PROJECT, "x.biveitapp.com"))["blocked"] == "ours"
 
 
 async def test_an_aaaa_record_must_go_before_the_domain_counts_as_ready(dns):
@@ -469,6 +479,7 @@ async def test_some_domains_can_never_be_brought(dns, domain, blocked):
 def fulfilment_world(monkeypatch):
     """Everything fulfilment touches, faked: payments, the registrar, attached domains, setting a domain up."""
     subscription = {
+        "provider": "polar",
         "product_data": {"domain": "cozy.com"},
         "provider_ref": "sub-1",
         "custom_data": {"checkout_id": "2"},
@@ -477,7 +488,7 @@ def fulfilment_world(monkeypatch):
         "access": {"can_host": True, "domain_subscription": subscription},
         "attached": [], "registered": [], "records": [], "refunded": [], "cancelled": [], "failures": [],
         "registrar_has": set(), "unavailable": False, "servable": {}, "now": _NOW, "points_at_us": False,
-        "registrations": [], "set_up": [], "activation": {"domain": None, "failure": None},
+        "registrations": [], "set_up": [], "activation": {"domain": None, "failure": None}, "registrars": set(),
     }  # fmt: skip
 
     async def get_project_access(project_id):
@@ -492,7 +503,7 @@ def fulfilment_world(monkeypatch):
     async def delete(key):
         pass
 
-    async def get_checkout(checkout_id):
+    async def get_recorded_checkout(checkout_id):
         # The domain's checkout: who it's registered to.
         domain_checkout = {
             "checkout_id": 2,
@@ -515,21 +526,26 @@ def fulfilment_world(monkeypatch):
         failure = {"checkout_id": checkout_id, "subscription_ref": subscription_ref, "domain": domain, "reason": reason}
         state["failures"] = [*state["failures"], failure]
 
-    async def get_domain(domain):
+    async def get_domain(domain, registrar):
+        state["registrars"] = {*state["registrars"], registrar}
         if domain not in state["registrar_has"]:
             raise RegistrarError("namecom", 404, "not found")
         return {"domainName": domain}
 
-    async def register_domain(domain, years, registrant, key):
+    async def register_domain(domain, years, registrant, key, sandbox):
         if state["unavailable"]:
             raise DomainUnavailable(domain)
         state["registered"] = [*state["registered"], (domain, years, registrant["country"], key)]
-        return {"domain": domain, "registrar": "namecom", "registrar_order_id": 7, "paid_usd": 9.99}
+        registrar = "namecom_sandbox" if sandbox else "namecom"
+        state["registrars"] = {*state["registrars"], registrar}
+        return {"domain": domain, "registrar": registrar, "registrar_order_id": 7, "paid_usd": 9.99}
 
-    async def list_records(domain):
+    async def list_records(domain, registrar):
+        state["registrars"] = {*state["registrars"], registrar}
         return state["records"]
 
-    async def create_record(domain, record):
+    async def create_record(domain, record, registrar):
+        state["registrars"] = {*state["registrars"], registrar}
         state["records"] = [*state["records"], record]
 
     async def get_site_domains(project):
@@ -562,21 +578,21 @@ def fulfilment_world(monkeypatch):
             {**row, "activated_at": state["now"] if row["domain"] == domain else None} for row in state["attached"]
         ]
 
-    async def cancel_subscription(ref):
-        state["cancelled"] = [*state["cancelled"], ref]
+    async def revoke_subscription(subscription):
+        state["cancelled"] = [*state["cancelled"], subscription["provider_ref"]]
 
-    async def refund_latest_payment(ref):
-        state["refunded"] = [*state["refunded"], ref]
+    async def refund_latest_payment(subscription):
+        state["refunded"] = [*state["refunded"], subscription["provider_ref"]]
 
     monkeypatch.setattr(settings, "server_public_ip", "57.0.0.1")
     for target, name, fake in [
         (fulfilment.payments, "get_project_access", get_project_access),
-        (fulfilment.payments, "cancel_subscription", cancel_subscription),
+        (fulfilment.payments, "revoke_subscription", revoke_subscription),
         (fulfilment.payments, "refund_latest_payment", refund_latest_payment),
         (fulfilment.projects_repo, "find", find_projects),
         (fulfilment.redis, "set_if_absent", set_if_absent),
         (fulfilment.redis, "delete", delete),
-        (fulfilment.payments, "get_checkout", get_checkout),
+        (fulfilment.payments, "get_recorded_checkout", get_recorded_checkout),
         (domain_events, "get_domain_failures", get_domain_failures),
         (domain_events, "record_domain_registered", record_domain_registered),
         (domain_events, "record_domain_failure", record_domain_failure),
@@ -615,6 +631,19 @@ async def test_a_paid_domain_is_registered_pointed_at_us_attached_and_set_up(ful
     assert len(fulfilment_world["registered"]) == 1 and fulfilment_world["set_up"] == ["cozy.com"]
 
 
+async def test_every_registrar_call_for_a_domain_is_in_the_world_its_payment_was(fulfilment_world):
+    await fulfilment.fulfil(42)
+    assert fulfilment_world["registrars"] == {"namecom"}  # live money: the live registrar
+
+
+async def test_a_sandbox_payments_domain_lives_on_the_registrars_sandbox(fulfilment_world):
+    sandbox_subscription = {**fulfilment_world["access"]["domain_subscription"], "provider": "polar_sandbox"}
+    fulfilment_world["access"] = {**fulfilment_world["access"], "domain_subscription": sandbox_subscription}
+    await fulfilment.fulfil(42)
+    assert fulfilment_world["registrars"] == {"namecom_sandbox"}
+    assert fulfilment_world["registrations"][0][2]["registrar"] == "namecom_sandbox"
+
+
 async def test_a_domain_just_bought_is_set_up_once_public_dns_has_it(fulfilment_world):
     fulfilment_world["now"] = datetime.now(UTC)
     await fulfilment.fulfil(42)
@@ -645,6 +674,13 @@ async def test_a_domain_gone_by_payment_is_refunded_and_the_plan_stays(fulfilmen
     assert fulfilment_world["attached"] == [] and fulfilment_world["set_up"] == []
     await fulfilment.fulfil(42)  # not retried
     assert fulfilment_world["cancelled"] == ["sub-1"]
+
+
+async def test_a_plan_with_no_domain_yet_just_waits_for_one(fulfilment_world):
+    # Right after the plan's paid, before any domain's bought or added.
+    fulfilment_world.update(_own_domains(fulfilment_world))
+    await fulfilment.fulfil(42)
+    assert fulfilment_world["set_up"] == []
 
 
 async def test_nothing_happens_without_hosting(fulfilment_world):
@@ -732,43 +768,42 @@ async def test_the_sweep_fulfils_each_hosted_project_once(monkeypatch):
     assert swept["ids"] == [1, 2, 4]
 
 
-async def test_a_mock_payment_never_buys_a_real_domain(fulfilment_world, monkeypatch):
-    monkeypatch.setattr(fulfilment.settings, "payments_mock", True)
-    monkeypatch.setattr(fulfilment.domains, "is_live", lambda: True)
-    monkeypatch.setattr(fulfilment, "log_error", lambda *args, **kwargs: None)
-    await fulfilment.fulfil(42)
-    assert fulfilment_world["registered"] == [] and fulfilment_world["refunded"] == []
-    assert fulfilment_world["attached"] == [] and fulfilment_world["set_up"] == []
-
-
 # --- after launch: upgrading, switching ---
 
 
 @pytest.fixture
 def plan_world(monkeypatch):
-    """The launch access and the plan change faked; records the plan changes and the webhooks fed through."""
-    state = {"plan_subscription": None, "changes": [], "webhooks": []}
+    """The launch access and the plan change faked; records the plan changes. `refusal`: the status the provider
+    turns a change down with (None: it goes through)."""
+    state = {"plan_subscription": None, "changes": [], "refusal": None}
 
     async def get_launch_access(project_id):
         return {"plan_subscription": state["plan_subscription"]}
 
-    async def change_plan(subscription_ref, plan):
-        state["changes"] = [*state["changes"], (subscription_ref, plan)]
-        return [(b"body", "signature")]
-
-    async def handle_payment_webhook(raw_body, signature):
-        state["webhooks"] = [*state["webhooks"], raw_body]
+    async def change_plan(subscription, plan):
+        if state["refusal"]:
+            raise checkouts.payments.ProviderError("refused", state["refusal"])
+        state["changes"] = [*state["changes"], (subscription["provider_ref"], plan)]
 
     monkeypatch.setattr(checkouts.launch_access, "get_launch_access", get_launch_access)
     monkeypatch.setattr(checkouts.payments, "change_plan", change_plan)
-    monkeypatch.setattr(checkouts.fulfilment, "handle_payment_webhook", handle_payment_webhook)
     return state
 
 
 async def test_upgrading_moves_the_running_monthly_plan_to_yearly(plan_world):
     plan_world["plan_subscription"] = {"plan": "monthly", "status": "active", "provider_ref": "plan-1"}
     await checkouts.upgrade_plan(_PROJECT)
-    assert plan_world["changes"] == [("plan-1", "yearly")] and plan_world["webhooks"] == [b"body"]
+    assert plan_world["changes"] == [("plan-1", "yearly")]
+
+
+async def test_an_upgrade_the_provider_turns_down_is_refused_but_its_outage_isnt(plan_world):
+    plan_world["plan_subscription"] = {"plan": "monthly", "status": "active", "provider_ref": "plan-1"}
+    plan_world["refusal"] = 402  # the payment failed
+    with pytest.raises(checkouts.LaunchRefused, match="NOT_UPGRADABLE"):
+        await checkouts.upgrade_plan(_PROJECT)
+    plan_world["refusal"] = 503
+    with pytest.raises(checkouts.payments.ProviderError):
+        await checkouts.upgrade_plan(_PROJECT)
 
 
 @pytest.mark.parametrize(

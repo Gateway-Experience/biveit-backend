@@ -42,7 +42,8 @@ async def get_launch_status(project: Project, user: User) -> dict:
     registration_failure  the last bought domain that couldn't be registered {domain, reason, at}, while no domain
                      bought since replaces it (and since the plan started) | None
     deployment       deployments.get_deployment_status
-    server_ip        where a user's own domain must point"""
+    server_ip        where a user's own domain must point
+    payment_provider where this user's checkouts would go: polar | polar_sandbox (test cards -- the FE flags it)"""
     access = await launch_access.get_launch_access(project["id"])
     conversation = await agent_service.get_current_conversation(project["id"], user["id"])
     deployment = await deployments.get_deployment_status(project, conversation["id"])
@@ -88,6 +89,7 @@ async def get_launch_status(project: Project, user: User) -> dict:
         else None,
         "deployment": deployment,
         "server_ip": settings.server_public_ip,
+        "payment_provider": payments.get_payment_provider(user),
     }
     stage = to_stage(status)
     if access["can_host"] and stage in _PENDING_STAGES:
