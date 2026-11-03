@@ -75,6 +75,15 @@ class DomainCheckRequest(BaseModel):
     domain: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)]
 
 
+class SubdomainRequest(BaseModel):
+    """POST /projects/{id}/launch/subdomain body: the slug the user picked for <slug>.<PROD_DOMAIN>, as typed (its
+    rules are checked by services/launch/subdomains, which answers with why it can't be used)."""
+
+    model_config = {"extra": "forbid"}
+
+    slug: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=63)]
+
+
 class ActivateDomainRequest(BaseModel):
     """POST /projects/{id}/launch/domains/activate body: which of the project's domains to serve the site on."""
 

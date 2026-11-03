@@ -1,7 +1,8 @@
 # Intentions: a project's site on its domains -- the host's nginx in front of the site's container. The terms
 # (docs/launchflow.txt, "Domains"):
 #   attached  a project's rows in site_domains, in any state (a domain is only ever one project's)
-#   servable  we can make it point at us on command: one we bought (we own it) or an admin set, always; the user's
+#   servable  we can make it point at us on command: one we bought (we own it), an admin set or a subdomain of ours,
+#             always; the user's
 #             own only while its records check out right now (check_external_domain) -- we can't change those
 #   active    the one domain we've fully set up for the site (certificate, container env, nginx) and serve. Set
 #             only after that setup succeeds (deployments.activate_domain), and never undone by itself: it stays
@@ -93,6 +94,18 @@ async def attach_domain(project: Project, domain: str, kind: SiteDomainKind) -> 
     """Attach a domain to the project (kept if it's already there). Attaching never makes it active: that's setting
     it up (deployments.activate_domain). Raises InvalidDomain, DomainTaken."""
     await site_domains_repo.attach(project["id"], normalize_domain(domain), kind)
+
+
+async def detach_domain(project: Project, domain: str) -> None:
+    """Take a domain off the project, freeing the name. Only for one that isn't active: the site is served on that
+    one, so it's switched away from first."""
+    await site_domains_repo.detach(project["id"], domain)
+
+
+async def find_taken_domains(project: Project, domains: list[str]) -> set[str]:
+    """Which of `domains` are attached to some OTHER project. [I/O: reads]"""
+    rows = await site_domains_repo.find_by_domains(domains)
+    return {row["domain"] for row in rows if row["project_id"] != project["id"]}
 
 
 async def check_external_domain(project: Project, domain: str) -> dict:

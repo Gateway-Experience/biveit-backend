@@ -43,6 +43,7 @@ async def get_launch_status(project: Project, user: User) -> dict:
                      bought since replaces it (and since the plan started) | None
     deployment       deployments.get_deployment_status
     server_ip        where a user's own domain must point
+    subdomain_parent our domain a free subdomain goes under (<slug>.<subdomain_parent>) | None (none on this server)
     payment_provider where this user's checkouts would go: polar | polar_sandbox (test cards -- the FE flags it)"""
     access = await launch_access.get_launch_access(project["id"])
     conversation = await agent_service.get_current_conversation(project["id"], user["id"])
@@ -89,6 +90,7 @@ async def get_launch_status(project: Project, user: User) -> dict:
         else None,
         "deployment": deployment,
         "server_ip": settings.server_public_ip,
+        "subdomain_parent": settings.prod_domain or None,
         "payment_provider": payments.get_payment_provider(user),
     }
     stage = to_stage(status)

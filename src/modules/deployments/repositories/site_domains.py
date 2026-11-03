@@ -25,6 +25,12 @@ async def find(criteria: dict[str, Any]) -> list[dict]:
     return await postgres.fetch(sql, where)
 
 
+async def find_by_domains(domains: list[str]) -> list[dict]:
+    """The rows of any of `domains`, whichever projects they're attached to. Rides uq_site_domains_domain."""
+    sql = f"SELECT {_COLUMNS} FROM site_domains WHERE domain = ANY($domains) ORDER BY created_at, id"
+    return await postgres.fetch(sql, {"domains": domains})
+
+
 async def attach(project_id: int, domain: str, kind: str) -> dict:
     """Attach a domain to the project (not active), or return its row if it's already the project's (kind kept).
     Raises DomainTaken when it's another project's."""

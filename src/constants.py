@@ -180,6 +180,9 @@ RUNNER_SEND_ATTEMPTS = 10
 # git, uv, npm. Everything else stays behind: python-dotenv loads our .env files
 # INTO our environment, so passing it on would hand our secrets to code the agent writes, and our config
 # (API_PORT...) would override the project's own .env files.
+# How long a one-off question to Claude Code on the host (utils/claude_cli) may take.
+CLAUDE_CLI_TIMEOUT_SECONDS = 90
+
 SUBPROCESS_ENV_PASSTHROUGH = [
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM", "TMPDIR",
     "XDG_RUNTIME_DIR",
@@ -274,6 +277,17 @@ PURCHASE_CATCH_UP_SECONDS = 10 * 60
 # (counted from site_domains, so it survives restarts). Past that, it's attempted anyway (and will most likely fail,
 # showing it).
 PURCHASED_DOMAIN_DNS_WAIT_SECONDS = 2 * 24 * 60 * 60
+# A site's free subdomain of ours, <slug>.<PROD_DOMAIN> (services/launch/subdomains). The slug is one DNS label:
+# lower-case letters, digits and inner hyphens, at least SUBDOMAIN_MIN_LENGTH long (very short names are worth
+# keeping back). Reserved ones are names the platform uses, or might, or that would pass as ours -- never a user's.
+SUBDOMAIN_MIN_LENGTH = 3
+SUBDOMAIN_RESERVED_SLUGS = [
+    "admin", "api", "app", "apps", "assets", "auth", "billing", "biveit", "blog", "cdn", "dashboard", "dev", "docs",
+    "help", "login", "mail", "news", "pay", "prod", "proj", "rsend", "send", "shop", "signup", "staging", "static",
+    "status", "support", "test", "www",
+]  # fmt: skip
+# How far a suggested slug is numbered (bike-rental, bike-rental-2...) before giving up on it.
+SUBDOMAIN_SUGGESTION_MAX_NUMBER = 50
 DEVENV_CONTAINER_LIMITS = {"memory": "3g", "cpus": "1.0", "pids": 2048, "nofile": 65536, "tmp_size": "256m"}
 
 

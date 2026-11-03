@@ -38,10 +38,11 @@ async def run_command_binary(
     cwd: str | None = None,
     timeout_seconds: float = 600,
     env: dict[str, str] | None = None,
+    input_text: str | bytes | None = None,
 ) -> bytes:
     """run_command for a command whose output is DATA (an archive...): its stdout as raw bytes, stderr kept
     apart so it can't corrupt them -- it only shows up in the CommandFailed message."""
-    return await _run(argv, cwd, None, timeout_seconds, env, merge_stderr=False)
+    return await _run(argv, cwd, input_text, timeout_seconds, env, merge_stderr=False)
 
 
 async def _run(

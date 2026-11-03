@@ -8,6 +8,9 @@
 #                                                         DNS records in place
 #   POST /projects/{id}/launch/domains            (auth)  {domain}: add the user's own domain (no plan needed) ->
 #                                                         the same answer as /check
+#   GET  /projects/{id}/launch/subdomain/suggestion  (auth)  {slug, domain}: a free subdomain of ours to offer
+#   POST /projects/{id}/launch/subdomain          (auth)  {slug}: pick <slug>.<PROD_DOMAIN> as the site's subdomain
+#                                                         (no plan needed; replaces the one it had) -> {domain}
 #   POST /projects/{id}/launch/checkout           (auth)  {plan} or {domain, registrant} (after a plan) ->
 #                                                         {product, url}: one thing to pay for
 #   POST /projects/{id}/launch/plan/upgrade       (auth)  the running monthly plan -> yearly (no checkout page)
@@ -25,12 +28,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from src.dto.launch import ActivateDomainRequest, DomainCheckRequest, LaunchCheckoutRequest
+from src.dto.launch import ActivateDomainRequest, DomainCheckRequest, LaunchCheckoutRequest, SubdomainRequest
 from src.dto.projects import Project
 from src.dto.users import User
 from src.modules import deployments, domains, payments
 from src.repositories import projects as projects_repo
-from src.services.launch import checkouts, offers, status
+from src.services.launch import checkouts, offers, status, subdomains
 from src.utils.auth import get_current_user
 from src.utils.logging import log_http_error
 
@@ -98,6 +101,37 @@ async def add_own_domain(
 ) -> dict | JSONResponse:
     try:
         return await status.add_own_domain(await _get_owned_project(project_id, user), body.domain)
+    except HTTPException:
+        raise
+    except checkouts.LaunchRefused as refusal:
+        return _to_refusal(refusal)
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.get("/projects/{project_id}/launch/subdomain/suggestion", response_model=None)
+async def get_subdomain_suggestion(
+    project_id: int, request: Request, user: User = Depends(get_current_user)
+) -> dict | JSONResponse:
+    try:
+        slug = await subdomains.get_suggestion(await _get_owned_project(project_id, user))
+        return {"slug": slug, "domain": subdomains.to_subdomain(slug)}
+    except HTTPException:
+        raise
+    except checkouts.LaunchRefused as refusal:
+        return _to_refusal(refusal)
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.post("/projects/{project_id}/launch/subdomain", response_model=None)
+async def choose_subdomain(
+    project_id: int, body: SubdomainRequest, request: Request, user: User = Depends(get_current_user)
+) -> dict | JSONResponse:
+    try:
+        return {"domain": await subdomains.choose_subdomain(await _get_owned_project(project_id, user), body.slug)}
     except HTTPException:
         raise
     except checkouts.LaunchRefused as refusal:

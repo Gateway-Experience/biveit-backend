@@ -9,5 +9,6 @@
 #                     until done
 #   domain_events.py  what happened to a domain we bought (domain.registered / domain.failed), as events
 #   status.py         where a project stands, as the FE shows it (and adding the user's own domain, switching)
+#   subdomains.py     the free option: a subdomain of ours (<slug>.<PROD_DOMAIN>), and suggesting its name
 # "Launch" is only the flow's name, not a thing we store: what's bought is payments' (subscriptions, and the
 # checkout events that started them), the domains and the site are deployments'.

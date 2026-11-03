@@ -33,6 +33,7 @@ class SiteDomainKind(StrEnum):
     PURCHASED = "purchased"  # bought through us: we hold it and set its DNS
     EXTERNAL = "external"  # the user's own: served once its ownership proof checks out
     ADMIN = "admin"  # set by an admin by hand: trusted
+    SUBDOMAIN = "subdomain"  # the user's pick of a subdomain of ours (<slug>.<prod_domain>): free, under our wildcard
 
 
 # A user's own domain proves it's theirs with a TXT record at DOMAIN_PROOF_PREFIX.<domain>. The checks ask public

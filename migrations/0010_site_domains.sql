@@ -12,6 +12,7 @@
 --   purchased  bought through us (we hold it at our registrar and set its DNS)
 --   external   the user's own -- served only once its ownership proof (a TXT record) checks out
 --   admin      set by an admin by hand (trusted, no proof)
+--   subdomain  the user's pick of a subdomain of ours, <slug>.<PROD_DOMAIN> (free, no proof; one per project)
 -- activated_at: when it became the site's active domain; NULL = attached but not served. At most one per project
 -- (the partial unique index). A deployment that started before it means the site still needs a redeploy to
 -- serve it.
@@ -21,7 +22,7 @@ CREATE TABLE IF NOT EXISTS site_domains
     id           BIGSERIAL PRIMARY KEY,
     project_id   BIGINT       NOT NULL REFERENCES projects (id),
     domain       varchar(253) NOT NULL,                   -- lower case, no trailing dot (the module normalizes)
-    kind         varchar(16)  NOT NULL DEFAULT 'admin',   -- purchased | external | admin
+    kind         varchar(16)  NOT NULL DEFAULT 'admin',   -- purchased | external | admin | subdomain
     activated_at TIMESTAMPTZ,
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
