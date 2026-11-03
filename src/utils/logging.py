@@ -54,6 +54,7 @@ _RESERVED_RECORD_ATTRS = frozenset(logging.makeLogRecord({}).__dict__) | {
     "message",
     "asctime",
     "taskName",
+    "color_message",  # uvicorn's copy of msg with terminal colour codes -- pure noise in our lines
 }
 
 
