@@ -285,3 +285,71 @@ def test_past_the_hard_limit_the_proxy_refuses_without_asking_the_model(proxy, s
     assert response.status_code == 403
     assert response.json()["error"]["type"] == "permission_error"
     assert not proxy["upstream"].released  # never opened
+
+
+# --- the admin's cost report ---
+
+
+def _tokens(model="deepseek-flash", input_tokens=0, output_tokens=0):
+    return {"model": model, "input_tokens": input_tokens, "output_tokens": output_tokens, "cache_read_tokens": 0, "cache_write_tokens": 0}  # fmt: skip
+
+
+async def test_the_report_adds_up_projects_into_their_owners(spend, monkeypatch):
+    async def find_project_totals(since, until):
+        owner_7 = {"user_id": 7, "username": "anh", "first_name": None, "last_name": None}
+        guest_9 = {"user_id": 9, "username": None, "first_name": None, "last_name": None}
+        return [
+            {**owner_7, "project_id": 3, "project_name": "Bikes", **_tokens(input_tokens=10_000_000)},  # $1.40
+            {
+                **owner_7,
+                "project_id": 3,
+                "project_name": "Bikes",
+                **_tokens("claude-haiku", output_tokens=100_000),
+            },  # $0.50
+            {**owner_7, "project_id": 4, "project_name": "Cafe", **_tokens(output_tokens=1_000_000)},  # $0.28
+            {**guest_9, "project_id": 5, "project_name": "Yoga", **_tokens(input_tokens=1_000_000)},  # $0.14
+        ]
+
+    monkeypatch.setattr(ai_usage_repo, "find_project_totals", find_project_totals)
+
+    report = await usage.get_cost_report(datetime(2026, 11, 1, tzinfo=UTC), datetime(2026, 11, 3, tzinfo=UTC))
+
+    assert report["total_usd"] == pytest.approx(2.32)
+    assert [(project["project_id"], round(project["cost_usd"], 2)) for project in report["projects"]] == [
+        (3, 1.9),
+        (4, 0.28),
+        (5, 0.14),
+    ]
+    assert report["projects"][0]["user_name"] == "anh"
+    assert [(user["name"], round(user["cost_usd"], 2), user["project_count"]) for user in report["users"]] == [
+        ("anh", 2.18, 2),
+        ("guest #9", 0.14, 1),
+    ]
+
+
+async def test_a_short_range_is_charted_by_hour_with_empty_hours_at_zero(spend, monkeypatch):
+    since, until = datetime(2026, 11, 3, 10, 30, tzinfo=UTC), datetime(2026, 11, 3, 13, 15, tzinfo=UTC)
+    asked = []
+
+    async def find_bucket_totals(project_id, from_time, to_time, bucket):
+        asked.append((project_id, bucket))
+        return [{"bucket_start": datetime(2026, 11, 3, 12, tzinfo=UTC), **_tokens(input_tokens=1_000_000)}]
+
+    monkeypatch.setattr(ai_usage_repo, "find_bucket_totals", find_bucket_totals)
+
+    series = await usage.get_project_cost_series(3, since, until)
+
+    assert asked == [(3, "hour")]
+    assert series["bucket"] == "hour"
+    assert [(point["at"].hour, round(point["cost_usd"], 2)) for point in series["points"]] == [
+        (10, 0.0),
+        (11, 0.0),
+        (12, 0.14),
+        (13, 0.0),
+    ]
+
+
+def test_a_long_range_goes_by_day():
+    starts = usage.to_bucket_starts(datetime(2026, 10, 1, 15, tzinfo=UTC), datetime(2026, 10, 4, 1, tzinfo=UTC), "day")
+    assert [start.day for start in starts] == [1, 2, 3, 4]
+    assert all(start.hour == 0 for start in starts)

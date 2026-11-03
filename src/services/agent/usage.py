@@ -29,6 +29,7 @@ from src.constants import (
     AI_HARD_LIMIT_FACTOR,
     AI_MODEL_PRICES,
     AI_UNKNOWN_MODEL_PRICE,
+    AI_USAGE_HOURLY_MAX_DAYS,
     AiMessageRole,
     ConfigName,
 )
@@ -169,8 +170,7 @@ async def _check_limits(user_id: int, ip_group: str | None, factor: float) -> No
     """Raises AiLimitReached for the first of the user's / the IP group's daily limits (times `factor`) that
     today's spend has reached."""
     day_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-    prices = await system_config.get(ConfigName.AI_MODEL_PRICES, AI_MODEL_PRICES)
-    unknown_model_price = await system_config.get(ConfigName.AI_UNKNOWN_MODEL_PRICE, AI_UNKNOWN_MODEL_PRICE)
+    prices, unknown_model_price = await _get_prices()
     user_limit = await _get_number(ConfigName.AI_DAILY_LIMIT_USD_PER_USER, AI_DAILY_LIMIT_USD_PER_USER)
     user_spend = to_cost_usd(await ai_usage_repo.find_totals(day_start, user_id=user_id), prices, unknown_model_price)
     if user_spend >= user_limit * factor:
@@ -181,6 +181,79 @@ async def _check_limits(user_id: int, ip_group: str | None, factor: float) -> No
     ip_spend = to_cost_usd(await ai_usage_repo.find_totals(day_start, ip_group=ip_group), prices, unknown_model_price)
     if ip_spend >= ip_limit * factor:
         raise AiLimitReached("ip", day_start + timedelta(days=1))
+
+
+async def get_cost_report(since: datetime, until: datetime) -> dict:
+    """What the agents cost in [since, until), from ai_usage at today's prices (system config):
+      total_usd
+      users      [{user_id, name, cost_usd, project_count}], costliest first
+      projects   [{project_id, name, user_id, user_name, cost_usd}], costliest first
+    Original purpose: the admin's AI usage page. [I/O: reads]"""
+    prices, unknown_model_price = await _get_prices()
+    rows = await ai_usage_repo.find_project_totals(since, until)
+    projects = [
+        {
+            "project_id": project_id,
+            "name": project_rows[0]["project_name"],
+            "user_id": project_rows[0]["user_id"],
+            "user_name": _to_user_name(project_rows[0]),
+            "cost_usd": to_cost_usd(project_rows, prices, unknown_model_price),
+        }
+        for project_id, project_rows in pydash.group_by(rows, "project_id").items()
+    ]
+    users = [
+        {
+            "user_id": user_id,
+            "name": user_projects[0]["user_name"],
+            "cost_usd": sum(project["cost_usd"] for project in user_projects),
+            "project_count": len(user_projects),
+        }
+        for user_id, user_projects in pydash.group_by(projects, "user_id").items()
+    ]
+    return {
+        "total_usd": sum(project["cost_usd"] for project in projects),
+        "users": pydash.sort_by(users, "cost_usd", reverse=True),
+        "projects": pydash.sort_by(projects, "cost_usd", reverse=True),
+    }
+
+
+async def get_project_cost_series(project_id: int, since: datetime, until: datetime) -> dict:
+    """One project's cost over [since, until), per hour for a range of up to AI_USAGE_HOURLY_MAX_DAYS days, else per
+    day (UTC): {bucket: hour | day, points: [{at, cost_usd}]}, every bucket in the range, empty ones at 0.
+    Original purpose: the admin's AI usage page, a project's bar chart. [I/O: reads]"""
+    bucket = "hour" if until - since <= timedelta(days=AI_USAGE_HOURLY_MAX_DAYS) else "day"
+    prices, unknown_model_price = await _get_prices()
+    rows = await ai_usage_repo.find_bucket_totals(project_id, since, until, bucket)
+    costs = {
+        bucket_start: to_cost_usd(bucket_rows, prices, unknown_model_price)
+        for bucket_start, bucket_rows in pydash.group_by(rows, "bucket_start").items()
+    }
+    return {
+        "bucket": bucket,
+        "points": [{"at": at, "cost_usd": costs.get(at, 0.0)} for at in to_bucket_starts(since, until, bucket)],
+    }
+
+
+def to_bucket_starts(since: datetime, until: datetime, bucket: str) -> list[datetime]:
+    """[Pure] The start of every hour / day (UTC) that overlaps [since, until)."""
+    step = timedelta(hours=1) if bucket == "hour" else timedelta(days=1)
+    first = since.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+    first_bucket = first if bucket == "hour" else first.replace(hour=0)
+    count = max(0, -(-(until - first_bucket) // step))  # ceiling division: the last, partial bucket counts too
+    return [first_bucket + step * index for index in range(count)]
+
+
+def _to_user_name(row: dict) -> str:
+    """[Pure] How a user is shown: their username, else their name, else that they're a guest."""
+    full_name = " ".join(pydash.compact([row.get("first_name"), row.get("last_name")]))
+    return row.get("username") or full_name or f"guest #{row['user_id']}"
+
+
+async def _get_prices() -> tuple[dict, dict]:
+    """(AI_MODEL_PRICES, AI_UNKNOWN_MODEL_PRICE) as system config has them, else the code defaults."""
+    prices = await system_config.get(ConfigName.AI_MODEL_PRICES, AI_MODEL_PRICES)
+    unknown_model_price = await system_config.get(ConfigName.AI_UNKNOWN_MODEL_PRICE, AI_UNKNOWN_MODEL_PRICE)
+    return prices, unknown_model_price
 
 
 async def _get_number(name: ConfigName, default: float) -> float:

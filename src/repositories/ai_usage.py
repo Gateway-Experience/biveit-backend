@@ -46,3 +46,43 @@ async def find_totals(since: datetime, user_id: int | None = None, ip_group: str
         GROUP BY model
     """
     return await postgres.fetch(sql, {"value": value, "since": since})
+
+
+async def find_project_totals(since: datetime, until: datetime) -> list[dict]:
+    """Tokens used in [since, until), summed per project and model, with each project's name and owner (deleted ones
+    too -- the spend happened): [{project_id, project_name, user_id, username, first_name, last_name, model,
+    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens}]."""
+    sql = """
+        SELECT ai_usage.project_id, projects.name AS project_name, ai_usage.user_id,
+               users.username, users.first_name, users.last_name, ai_usage.model,
+               sum(input_tokens)::bigint AS input_tokens,
+               sum(output_tokens)::bigint AS output_tokens,
+               sum(cache_read_tokens)::bigint AS cache_read_tokens,
+               sum(cache_write_tokens)::bigint AS cache_write_tokens
+        FROM ai_usage
+        LEFT JOIN projects ON projects.id = ai_usage.project_id
+        LEFT JOIN users ON users.id = ai_usage.user_id
+        WHERE ai_usage.created_at >= $since AND ai_usage.created_at < $until
+        GROUP BY ai_usage.project_id, projects.name, ai_usage.user_id, users.username, users.first_name,
+                 users.last_name, ai_usage.model
+    """
+    return await postgres.fetch(sql, {"since": since, "until": until})
+
+
+async def find_bucket_totals(project_id: int, since: datetime, until: datetime, bucket: str) -> list[dict]:
+    """One project's tokens in [since, until), summed per `bucket` (hour | day, in UTC) and model:
+    [{bucket_start, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens}]."""
+    if bucket not in ("hour", "day"):
+        raise ValueError(f"unknown bucket {bucket}")
+    # `bucket` is checked above, so splicing it in is safe.
+    sql = f"""
+        SELECT date_trunc('{bucket}', created_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS bucket_start, model,
+               sum(input_tokens)::bigint AS input_tokens,
+               sum(output_tokens)::bigint AS output_tokens,
+               sum(cache_read_tokens)::bigint AS cache_read_tokens,
+               sum(cache_write_tokens)::bigint AS cache_write_tokens
+        FROM ai_usage
+        WHERE project_id = $project_id AND created_at >= $since AND created_at < $until
+        GROUP BY bucket_start, model
+    """
+    return await postgres.fetch(sql, {"project_id": project_id, "since": since, "until": until})

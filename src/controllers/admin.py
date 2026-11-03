@@ -15,12 +15,18 @@
 #                                     INVALID_DOMAIN / NO_DOMAIN
 #   GET  /admin/sandbox-mode          the calling admin's own sandbox mode {sandbox, effective, server_sandbox}
 #   PUT  /admin/sandbox-mode          {sandbox}: switch their own purchases (payments + domains) to sandbox or back
+#   GET  /admin/ai-usage?since=&until=   what the agents cost in [since, until) (ISO datetimes): {total_usd, users,
+#                                     projects} (services/agent/usage.get_cost_report)
+#   GET  /admin/ai-usage/projects/{id}?since=&until=  that project's cost per hour / day: {bucket, points}
+#                                     (usage.get_project_cost_series). Both 400 INVALID_RANGE for a backwards
+#                                     range or one longer than a year
 # The same sections scripts/manage.py's `status` prints.
 
 import asyncio
+from datetime import datetime, timedelta
 
 import pydash
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from src.config import settings
 from src.dto.projects import Project, SetDomainsRequest
@@ -158,3 +164,30 @@ def _to_sandbox_mode(user: User) -> dict:
         "effective": payments.is_sandbox(user),
         "server_sandbox": settings.sandbox_mode,
     }
+
+
+def _check_range(since: datetime, until: datetime) -> None:
+    if not since < until <= since + timedelta(days=366):
+        raise HTTPException(status_code=400, detail="INVALID_RANGE")
+
+
+@router.get("/admin/ai-usage")
+async def get_ai_usage(request: Request, since: datetime = Query(), until: datetime = Query()) -> dict:
+    _check_range(since, until)
+    try:
+        return await agent_service.get_cost_report(since, until)
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.get("/admin/ai-usage/projects/{project_id}")
+async def get_project_ai_usage(
+    project_id: int, request: Request, since: datetime = Query(), until: datetime = Query()
+) -> dict:
+    _check_range(since, until)
+    try:
+        return await agent_service.get_project_cost_series(project_id, since, until)
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error

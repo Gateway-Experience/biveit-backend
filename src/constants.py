@@ -178,6 +178,8 @@ AI_MODEL_PRICES = {
     "claude-sonnet": {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75},
     "claude-opus": {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25},
 }
+# The admin's AI usage page shows a project's cost per hour for a range up to this many days, per day beyond.
+AI_USAGE_HOURLY_MAX_DAYS = 2
 AI_UNKNOWN_MODEL_PRICE = {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25}
 MODEL_PROXY_READ_TIMEOUT_SECONDS = 600
 # How long the backend waits on any one request to a runner (they all answer right away) before calling it hung.

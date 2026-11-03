@@ -54,7 +54,13 @@ from src.services.agent.model_proxy import ModelPathRefused, ModelUnavailable, o
 from src.services.agent.sessions import SessionUnavailable, ensure_introduced, ensure_session, stop_session
 from src.services.agent.storage import FileNotAvailable
 from src.services.agent.tokens import get_token_conversation_id
-from src.services.agent.usage import AiLimitReached, check_hard_limits, meter_model_stream
+from src.services.agent.usage import (
+    AiLimitReached,
+    check_hard_limits,
+    get_cost_report,
+    get_project_cost_series,
+    meter_model_stream,
+)
 
 __all__ = [
     "AiLimitReached",
@@ -77,9 +83,11 @@ __all__ = [
     "ensure_introduced",
     "ensure_session",
     "get_conversation_file",
+    "get_cost_report",
     "get_current_conversation",
     "get_devenv_status",
     "get_owned_conversation",
+    "get_project_cost_series",
     "get_project_from_conv_id",
     "get_token_conversation_id",
     "list_artifacts",
