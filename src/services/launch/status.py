@@ -19,6 +19,12 @@ from src.services.launch import checkouts, fulfilment
 from src.services.launch.checkouts import LaunchRefused
 from src.utils.common import spawn
 
+# How the domain discount works, in words -- for the agent explaining it (checkouts.has_domain_discount is the check).
+_DOMAIN_DISCOUNT_RULE = (
+    "With a yearly plan running, one domain bought through us at a discountable price gets its first year free "
+    "(then the normal yearly price). Once per project: a domain that failed to register with the registrar doesn't use it up."
+)
+
 # The stages where fulfilment still has something to do -- reading the status then runs it.
 _PENDING_STAGES = {"registering_domain", "waiting_dns"}
 
@@ -62,19 +68,7 @@ async def get_launch_status(project: Project, user: User) -> dict:
     )
     status = {
         "plans": payments.get_plans(),
-        "access": pydash.pick(access, "can_download", "can_edit", "can_host", "has_had_plan", "edit_until"),
-        "plan": pydash.pick(access["plan_subscription"], "plan", "status", "renews_at", "ends_at")
-        if access["plan_subscription"]
-        else None,
-        "one_time": {"paid_at": access["one_time_subscription"]["created_at"]}
-        if access["one_time_subscription"]
-        else None,
-        "domain_subscription": {
-            "domain": access["domain_subscription"]["product_data"]["domain"],
-            **pydash.pick(access["domain_subscription"], "status", "renews_at", "trial_ends_at"),
-        }
-        if access["domain_subscription"]
-        else None,
+        **_to_purchases(access),
         "domain": {**pydash.pick(active_domain, "domain", "kind", "activated_at", "servable"), "check": dns_check}
         if active_domain
         else None,
@@ -97,6 +91,54 @@ async def get_launch_status(project: Project, user: User) -> dict:
     if access["can_host"] and stage in _PENDING_STAGES:
         spawn(fulfilment.fulfil(project["id"]))
     return {**status, "stage": stage}
+
+
+def _to_purchases(access: dict) -> dict:
+    """[Pure] What the project has bought, from its launch access: {access, plan, one_time, domain_subscription}
+    (get_launch_status' fields of the same names)."""
+    return {
+        "access": pydash.pick(access, "can_download", "can_edit", "can_host", "has_had_plan", "edit_until"),
+        "plan": pydash.pick(access["plan_subscription"], "plan", "status", "renews_at", "ends_at")
+        if access["plan_subscription"]
+        else None,
+        "one_time": {"paid_at": access["one_time_subscription"]["created_at"]}
+        if access["one_time_subscription"]
+        else None,
+        "domain_subscription": {
+            "domain": access["domain_subscription"]["product_data"]["domain"],
+            **pydash.pick(access["domain_subscription"], "status", "renews_at", "trial_ends_at"),
+        }
+        if access["domain_subscription"]
+        else None,
+    }
+
+
+async def get_plans_overview(project: Project) -> dict:
+    """The plans on sale, kept apart from what this project has bought, so neither is mistaken for the other:
+      plans_on_sale   the catalog, the same for every site (payments.get_plans)
+      this_site       the project's own: {access, plan, one_time, domain_subscription} (get_launch_status' fields)
+    Original purpose: the agent's get_plans tool, so it can answer plan questions from the real catalog. [I/O: reads]"""
+    access = await launch_access.get_launch_access(project["id"])
+    return {"plans_on_sale": payments.get_plans(), "this_site": _to_purchases(access)}
+
+
+async def get_domain_discount(project: Project) -> dict:
+    """The domain discount, kept apart from whether this project would get it:
+      discount    how it works, the same for every site: {terms (payments.DOMAIN_DISCOUNT_TERMS),
+                  discountable_prices_per_year (the domain prices it applies to), rule}
+      this_site   {eligible}: whether a domain bought now gets it
+    Original purpose: the agent's get_domain_discount tool. [I/O: reads]"""
+    access = await launch_access.get_launch_access(project["id"])
+    return {
+        "discount": {
+            "terms": payments.DOMAIN_DISCOUNT_TERMS,
+            "discountable_prices_per_year": [
+                point["price_usd"] for point in payments.DOMAIN_PRICE_POINTS if point["discountable"]
+            ],
+            "rule": _DOMAIN_DISCOUNT_RULE,
+        },
+        "this_site": {"eligible": await checkouts.has_domain_discount(project, access)},
+    }
 
 
 def to_stage(status: dict) -> str:

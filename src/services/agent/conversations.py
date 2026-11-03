@@ -114,6 +114,12 @@ async def get_conversation_project(conversation: AiConversation) -> Project:
     return projects[0]
 
 
+async def get_project_from_conv_id(conversation_id: int) -> Project:
+    """The project a session's conversation belongs to -- for callers already proven to speak for it (its
+    session's token). Raises ConversationNotFound."""
+    return await get_conversation_project(await get_live_conversation(conversation_id))
+
+
 async def get_conversation_file(conversation: AiConversation, relative_path: str) -> tuple[int, dict]:
     """A file from the conversation's uploads/ or artifacts/ folder by its relative path, as (an open read
     descriptor the caller closes, {path, name, mime, size, version, immutable}). Raises

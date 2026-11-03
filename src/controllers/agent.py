@@ -6,6 +6,13 @@
 #   POST /agent/signals      {slug, description?, meta?}: a signal from the agent (BUILDING, BUILDING_DONE);
 #                            403 for the ones only we write
 #   POST /agent/dev-servers  {action}: status / start / restart / stop the project's dev servers
+#   POST /agent/launch/plans            {plans_on_sale (the catalog), this_site (what the project has bought)}
+#                                       (services/launch/status.get_plans_overview)
+#   POST /agent/launch/domains          {query}: domains to buy, with our price (the launch flow's domain search;
+#                                       an empty query gives ideas around the project's name). 502 REGISTRAR_ERROR
+#   POST /agent/launch/domain-discount  {discount (how it works), this_site ({eligible}: would it get it now)}
+#                                       Read-only, all three: the agent can tell the user about plans and domains,
+#                                       never buy anything (that's the user's, in the Deploy tab).
 #   /agent/model/{path}      the model API, with OUR key (services/agent/model_proxy): an agent's Claude Code
 #                            never holds the key
 # Only the agent listener (src/app.py, on the containers' gateway) serves these, never the public API -- so
@@ -17,9 +24,18 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from src.dto.ai_conversations import AiMessage, PostAgentMessageRequest, PostAgentSignalRequest, PostDevServersRequest
+from src.dto.ai_conversations import (
+    AiMessage,
+    FindDomainsRequest,
+    PostAgentMessageRequest,
+    PostAgentSignalRequest,
+    PostDevServersRequest,
+)
+from src.modules import domains, payments
+from src.repositories import users as users_repo
 from src.services import activity
 from src.services import agent as agent_service
+from src.services.launch import offers, status
 from src.utils.logging import log_http_error
 
 _bearer = HTTPBearer(auto_error=False)
@@ -79,6 +95,51 @@ async def post_dev_servers(
         raise HTTPException(status_code=404, detail="CONVERSATION_NOT_FOUND") from error
     except agent_service.BuildingNotStarted as error:
         raise HTTPException(status_code=409, detail="BUILDING_NOT_STARTED") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.post("/agent/launch/plans")
+async def post_launch_plans(request: Request, conversation_id: int = Depends(get_session_conversation_id)) -> dict:
+    try:
+        return await status.get_plans_overview(await agent_service.get_project_from_conv_id(conversation_id))
+    except agent_service.ConversationNotFound as error:
+        raise HTTPException(status_code=404, detail="CONVERSATION_NOT_FOUND") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.post("/agent/launch/domains")
+async def post_launch_domains(
+    body: FindDomainsRequest, request: Request, conversation_id: int = Depends(get_session_conversation_id)
+) -> dict:
+    try:
+        project = await agent_service.get_project_from_conv_id(conversation_id)
+        # The owner's sandbox mode decides which registrar is asked, the same as their own domain step.
+        owner = await users_repo.get(project["user_id"])
+        return {"domains": await offers.search_offers(project, body.query, payments.is_sandbox(owner or {}))}
+    except agent_service.ConversationNotFound as error:
+        raise HTTPException(status_code=404, detail="CONVERSATION_NOT_FOUND") from error
+    except domains.InvalidDomainQuery:
+        return {"domains": []}
+    except domains.RegistrarError as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=502, detail="REGISTRAR_ERROR") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.post("/agent/launch/domain-discount")
+async def post_launch_domain_discount(
+    request: Request, conversation_id: int = Depends(get_session_conversation_id)
+) -> dict:
+    try:
+        return await status.get_domain_discount(await agent_service.get_project_from_conv_id(conversation_id))
+    except agent_service.ConversationNotFound as error:
+        raise HTTPException(status_code=404, detail="CONVERSATION_NOT_FOUND") from error
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error

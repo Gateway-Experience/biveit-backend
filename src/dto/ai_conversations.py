@@ -63,6 +63,14 @@ class PostAgentSignalRequest(BaseModel):
     meta: dict[str, Any] | None = None
 
 
+class FindDomainsRequest(BaseModel):
+    """POST /agent/launch/domains body: what to search for (empty: ideas around the project's name)."""
+
+    model_config = {"extra": "forbid"}
+
+    query: str = Field("", max_length=200)
+
+
 class PostDevServersRequest(BaseModel):
     """POST /agent/dev-servers body: what to do to the project's dev servers."""
 
