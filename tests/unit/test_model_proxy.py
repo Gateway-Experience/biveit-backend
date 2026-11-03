@@ -24,7 +24,11 @@ async def test_the_model_proxy_forwards_only_model_calls_with_our_key(monkeypatc
     headers = {"Authorization": "Bearer session-token", "anthropic-version": "2023-06-01", "Host": "10.213.0.1"}
     await model_proxy.open_model_request("POST", "v1/messages", "beta=true", headers, b"{}")
     assert sent["url"] == "https://api.deepseek.com/anthropic/v1/messages?beta=true"
-    assert sent["headers"] == {"anthropic-version": "2023-06-01", "Authorization": "Bearer sk-ds-real"}
+    assert sent["headers"] == {
+        "anthropic-version": "2023-06-01",
+        "Accept-Encoding": "identity",  # uncompressed, so its usage can be read on the way through
+        "Authorization": "Bearer sk-ds-real",
+    }
     with pytest.raises(model_proxy.ModelPathRefused):  # with our key, a provider's other endpoints are off limits
         await model_proxy.open_model_request("GET", "v1/files", "", headers, b"")
 

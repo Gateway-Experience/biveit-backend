@@ -16,6 +16,9 @@ from src.utils import http
 # Not passed on: the caller's own credentials (replaced by ours), hop-by-hop ones, and accept-encoding --
 # the answer streams back as is, so the endpoint mustn't compress it for us.
 _DROPPED_HEADERS = {"authorization", "x-api-key", "host", "content-length", "connection", "accept-encoding"}
+# ...and we say so: with no Accept-Encoding, aiohttp asks for gzip on its own, and a compressed answer can't be
+# read for its usage (usage.meter_model_stream) on its way through.
+_UNCOMPRESSED = {"Accept-Encoding": "identity"}
 
 
 class ModelUnavailable(Exception):
@@ -41,7 +44,7 @@ async def open_model_request(method: str, path: str, query: str, headers: dict, 
             method,
             f"{base_url}/{path}" + (f"?{query}" if query else ""),
             data=body,
-            headers={**forwarded, **_to_auth_headers()},
+            headers={**forwarded, **_UNCOMPRESSED, **_to_auth_headers()},
             auto_decompress=False,
             timeout=aiohttp.ClientTimeout(total=None, sock_read=MODEL_PROXY_READ_TIMEOUT_SECONDS),
         )
