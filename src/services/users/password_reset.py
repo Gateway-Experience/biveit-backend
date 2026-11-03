@@ -10,7 +10,7 @@
 # account -- same response, and the email goes out in the background so timing doesn't tell either.
 # Accounts without a password (Google-only) get nothing: they have no password to reset.
 #
-# References: services/users/users.py (hashing, issue_session), utils/aws/ses.py (delivery).
+# References: services/users/users.py (hashing, issue_session), utils/email.py (delivery).
 
 import hashlib
 import hmac
@@ -30,8 +30,8 @@ from src.constants import (
 from src.repositories import users as users_repo
 from src.services.users.users import UserNotFound, hash_password, issue_session
 from src.utils import redis
-from src.utils.aws import ses
 from src.utils.common import spawn, utc_now
+from src.utils.email import send_email
 
 _log = logging.getLogger(__name__)
 
@@ -105,12 +105,12 @@ def _render_email(language: str, link: str) -> dict:
 
 async def _send_reset_email(email: str, language: str, link: str) -> None:
     """Deliver the reset link. With no sender configured on a local machine, print the link instead, so
-    the flow can be tried without SES. Anywhere else a missing sender raises (and spawn logs it)."""
-    if not settings.email_from and settings.env == "local":
-        _log.warning("password reset link for %s (EMAIL_FROM not set, so not emailed): %s", email, link)
+    the flow can be tried without an email account. Anywhere else a missing sender raises (and spawn logs it)."""
+    if not (settings.email_from and settings.resend_api_key) and settings.env == "local":
+        _log.warning("password reset link for %s (no email sender set, so not emailed): %s", email, link)
         return
     rendered = _render_email(language, link)
-    await ses.send_email(email, rendered["subject"], rendered["text"], rendered["html"])
+    await send_email(email, rendered["subject"], rendered["text"], rendered["html"])
 
 
 async def request_password_reset(email: str) -> None:

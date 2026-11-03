@@ -91,6 +91,11 @@ AVATAR_DIR = "profile"  # inside the user's storage folder
 # A user's first / last name: the columns' varchar limit (migrations/0001_users.sql).
 USER_NAME_MAX_LENGTH = 100
 
+# Resend's API, what outgoing email goes through (utils/email).
+RESEND_API_URL = "https://api.resend.com"
+# Where a reply to our email goes: it's sent from a noreply address, so without this a reply goes nowhere.
+EMAIL_REPLY_TO = "support@biveit.com"
+
 # Password rules + reset. The FE mirrors MIN_PASSWORD_LENGTH (biveit-frontend authForm.ts).
 MIN_PASSWORD_LENGTH = 8
 PASSWORD_RESET_TOKEN_TTL_SECONDS = 30 * 60

@@ -61,17 +61,18 @@ class Settings(BaseSettings):
     # acceptable prod value) disables it. Never set this in a deployed env.
     master_password: str = ""
 
-    # AWS -- S3 uploads (utils/aws/s3) and email (utils/aws/ses). Prefer an IAM role on AWS compute: leave the keys EMPTY and
+    # AWS -- S3 uploads (utils/aws/s3). Prefer an IAM role on AWS compute: leave the keys EMPTY and
     # boto3's default credential chain (instance profile / task role) takes over. Set explicit keys
     # only when running off-AWS.
     aws_region: str = "us-east-1"
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     s3_bucket: str = ""
-    # Email -- the From address for outgoing mail (utils/aws/ses), e.g. "biveit <no-reply@example.com>". It (or its
-    # domain) must be verified in SES. Empty -> nothing is sent; locally, the password-reset link is printed to
-    # the log instead so the flow can still be tried.
+    # Email, sent through Resend (utils/email): the From address, e.g. "biveit <no-reply@mail.biveit.com>" -- its
+    # domain must be verified in Resend -- and the API key. Either empty -> nothing is sent; locally, the
+    # password-reset link is printed to the log instead so the flow can still be tried.
     email_from: str = ""
+    resend_api_key: str = ""
 
     # The SPA's origin. Google login redirects back here (with the session cookie set, or with
     # /login?error=<code>), and it's the default CORS origin.
