@@ -14,14 +14,15 @@
 #                                       Read-only, all three: the agent can tell the user about plans and domains,
 #                                       never buy anything (that's the user's, in the Deploy tab).
 #   /agent/model/{path}      the model API, with OUR key (services/agent/model_proxy): an agent's Claude Code
-#                            never holds the key
+#                            never holds the key. Every answer's usage is metered, and past the hard AI limit
+#                            calls are refused (403, in the model API's error shape) -- services/agent/usage
 # Only the agent listener (src/app.py, on the containers' gateway) serves these, never the public API -- so
 # a session token copied out of a container can't spend on our account from outside.
 # Starting the Building stage and signing it off aren't the agent's to call: the user approves them in the chat
 # (services/agent/stages).
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.dto.ai_conversations import (
@@ -148,6 +149,15 @@ async def post_launch_domain_discount(
 @router.api_route("/agent/model/{path:path}", methods=["GET", "POST"])
 async def proxy_model(path: str, request: Request, conversation_id: int = Depends(get_session_conversation_id)):
     try:
+        await agent_service.check_hard_limits(conversation_id)
+    except agent_service.AiLimitReached as limit:
+        # In the model API's own error shape, so Claude Code reports it. A permission error, not a rate limit:
+        # Claude Code retries 429s, and retrying won't help until the day's over.
+        message = f"Daily AI limit reached ({limit.scope}); it resets at {limit.resets_at.isoformat()}."
+        return JSONResponse(
+            status_code=403, content={"type": "error", "error": {"type": "permission_error", "message": message}}
+        )
+    try:
         upstream = await agent_service.open_model_request(
             request.method, path, request.url.query, dict(request.headers), await request.body()
         )
@@ -159,7 +169,7 @@ async def proxy_model(path: str, request: Request, conversation_id: int = Depend
 
     async def _stream():
         try:
-            async for chunk in upstream.content.iter_any():
+            async for chunk in agent_service.meter_model_stream(conversation_id, upstream.content.iter_any()):
                 yield chunk
         finally:
             upstream.release()

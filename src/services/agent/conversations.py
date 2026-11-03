@@ -36,7 +36,7 @@ from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
 from src.services import activity
-from src.services.agent import mock, sessions, signals, stages, storage, wakeups
+from src.services.agent import mock, sessions, signals, stages, storage, usage, wakeups
 from src.services.agent.interactions import (
     InvalidSubmission,
     find_pending_interactions,
@@ -253,10 +253,16 @@ def _describe_attachment(project: Project, conversation_id: int, relative_path: 
     return storage.describe_file(relative_path, file_stat)
 
 
-async def post_user_message(conversation: AiConversation, body: dict[str, Any]) -> AiMessage:
+async def post_user_message(
+    conversation: AiConversation, body: dict[str, Any], client_ip: str | None = None
+) -> AiMessage:
     """Take a message from the user -- {"type": "text", text, attachments} or {"type": "submission",
     interaction_id, results} -- check it, store it, and return it. The reply arrives separately, through
-    watch_messages.
+    watch_messages. `client_ip` is where it was sent from: kept in the message's meta, it's the IP the agent's
+    model calls are counted against until the next message (usage).
+
+    Text starts a turn, so it's refused once the user or their IP has used up a daily AI limit
+    (usage.AiLimitReached). Answers aren't: they carry on a turn that's already going.
 
     Attachments are paths from upload_files; each becomes an `attachment` block ({path, name, mime, size},
     re-described from disk rather than trusting the client), placed before the text.
@@ -275,13 +281,14 @@ async def post_user_message(conversation: AiConversation, body: dict[str, Any]) 
     if body["type"] == "text":
         if pending:
             raise InteractionPending(f"{len(pending)} pending", {"interaction_ids": pydash.map_(pending, "id")})
+        await usage.check_daily_limits(conversation["user_id"], usage.to_ip_group(client_ip))
         project = await get_conversation_project(conversation)
         attachment_blocks = [
             {"type": "attachment", **_describe_attachment(project, conversation["id"], path)}
             for path in body["attachments"]
         ]
         text_blocks = [{"type": "text", "text": body["text"]}] if body["text"].strip() else []
-        return await _append_user(conversation, [*attachment_blocks, *text_blocks])
+        return await _append_user(conversation, [*attachment_blocks, *text_blocks], {"client_ip": client_ip})
 
     results_by_id = {answer["interaction_id"]: answer["results"] for answer in body["answers"]}
     unknown_ids = [
@@ -301,6 +308,7 @@ async def post_user_message(conversation: AiConversation, body: dict[str, Any]) 
         conversation["id"],
         AiMessageRole.USER,
         [to_tool_result_block(tool_use["id"], results) for tool_use, results in answered],
+        {"client_ip": client_ip},
     )
     approved_actions = get_approved_actions(answered)
     if approved_actions:
@@ -328,9 +336,9 @@ async def resend_last_user_message(conversation: AiConversation) -> AiMessage:
     return latest
 
 
-async def _append_user(conversation: AiConversation, content: list[dict]) -> AiMessage:
+async def _append_user(conversation: AiConversation, content: list[dict], meta: dict | None = None) -> AiMessage:
     """Store an (already checked) user message, then hand it to whoever answers (_deliver)."""
-    user_message = await _append(conversation["id"], AiMessageRole.USER, content)
+    user_message = await _append(conversation["id"], AiMessageRole.USER, content, meta)
     await _deliver(conversation, user_message)
     return user_message
 

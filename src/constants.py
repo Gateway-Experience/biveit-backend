@@ -128,7 +128,18 @@ class ConfigStatus(StrEnum):
 class ConfigName(StrEnum):
     """The keys that live in the system_configurations table. Declare each one here rather than
     scattering raw strings at the call sites, so there's one list of what's tunable at runtime.
-    Empty in the boilerplate -- add yours as the app grows."""
+    Each falls back to its code default (named next to it) when its row is absent or disabled."""
+
+    # The agents' daily AI spend limits, in USD (services/agent/usage): per user, and per IP group (a user rotating
+    # accounts). Defaults AI_DAILY_LIMIT_USD_PER_USER / _PER_IP.
+    AI_DAILY_LIMIT_USD_PER_USER = "AI_DAILY_LIMIT_USD_PER_USER"
+    AI_DAILY_LIMIT_USD_PER_IP = "AI_DAILY_LIMIT_USD_PER_IP"
+    # How far past a daily limit the model proxy cuts calls off (a multiplier). Default AI_HARD_LIMIT_FACTOR.
+    AI_HARD_LIMIT_FACTOR = "AI_HARD_LIMIT_FACTOR"
+    # What the models cost us, USD per million tokens, as {model: {input, output, cache_read, cache_write}}, and what
+    # a model not in it costs. Defaults AI_MODEL_PRICES / AI_UNKNOWN_MODEL_PRICE.
+    AI_MODEL_PRICES = "AI_MODEL_PRICES"
+    AI_UNKNOWN_MODEL_PRICE = "AI_UNKNOWN_MODEL_PRICE"
 
 
 # --- The agent's runners: the Claude Agent SDK runtime (services/agent + the biveit-session-runner repo) ---
@@ -147,6 +158,27 @@ AGENT_LISTENER_PORT = 3002
 # paths it forwards, and how long it waits for the next bit of a streamed answer.
 MODEL_PROXY_DEFAULT_BASE_URL = "https://api.anthropic.com"
 MODEL_PROXY_PATHS = ["v1/messages", "v1/messages/count_tokens"]
+# The daily AI spend limits (services/agent/usage) -- these and the prices below are only the defaults: the live
+# values are system config (ConfigName, seeded by migrations/0014_ai_limits_config.sql). A user can't
+# start a new turn once they -- or their IP group -- have spent this much since 00:00 UTC. A turn already going
+# finishes, so they can go a little over; past AI_HARD_LIMIT_FACTOR times the limit the model proxy refuses calls
+# outright (a runaway loop).
+AI_DAILY_LIMIT_USD_PER_USER = 2.0
+AI_DAILY_LIMIT_USD_PER_IP = 6.0
+AI_HARD_LIMIT_FACTOR = 1.2
+# What the models cost us, USD per million tokens. A model is priced by the longest key its name starts with
+# ("claude-sonnet-5-5" -> "claude-sonnet"; DeepSeek answers with the name we asked for, "deepseek-flash"); anything
+# else by AI_UNKNOWN_MODEL_PRICE, priced high on purpose so an unexpected model can't run up a bill below the
+# limit. DeepSeek charges nothing extra for writing its cache: a cache write is priced as plain input.
+# References: https://api-docs.deepseek.com/quick_start/pricing (V4 Flash / V4 Pro), Anthropic's for claude-*.
+AI_MODEL_PRICES = {
+    "deepseek-flash": {"input": 0.14, "output": 0.28, "cache_read": 0.0028, "cache_write": 0.14},
+    "deepseek-pro": {"input": 0.435, "output": 0.87, "cache_read": 0.003625, "cache_write": 0.435},
+    "claude-haiku": {"input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25},
+    "claude-sonnet": {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75},
+    "claude-opus": {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25},
+}
+AI_UNKNOWN_MODEL_PRICE = {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25}
 MODEL_PROXY_READ_TIMEOUT_SECONDS = 600
 # How long the backend waits on any one request to a runner (they all answer right away) before calling it hung.
 RUNNER_REQUEST_TIMEOUT_SECONDS = 10

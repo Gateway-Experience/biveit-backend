@@ -74,6 +74,19 @@ async def find_before(conversation_id: int, before_seq: int | None, limit: int) 
     return cast("list[AiMessage]", await postgres.fetch(_FIND_BEFORE, params))
 
 
+async def get_latest(conversation_id: int, role: str) -> AiMessage | None:
+    """A conversation's newest message from `role` (user | assistant). Walks the (conversation_id, seq) unique
+    index backwards."""
+    sql = f"""
+        SELECT {_COLUMNS} FROM ai_messages
+        WHERE conversation_id = $conversation_id AND role = $role
+        ORDER BY seq DESC
+        LIMIT 1
+    """
+    row = await postgres.fetchrow(sql, {"conversation_id": conversation_id, "role": role})
+    return cast("AiMessage | None", row)
+
+
 async def insert(data: dict[str, Any]) -> AiMessage:
     """Append a message to its conversation as the next seq, and return it.
 

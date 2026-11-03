@@ -16,6 +16,7 @@
 #                     requests, and its status for the user's preview screen
 #   tokens.py         the token a session calls back into us with -- good for its own conversation only
 #   mock.py           a stand-in agent, used while AGENT_MOCK_REPLIES is on
+#   usage.py          what agents spend on the model (metered at the proxy) and the daily AI limits on it
 #
 # Callers import THIS package (`from src.services import agent as agent_service`), not the files. The
 # exports below are exactly what something outside the package uses -- add to them only when a new
@@ -53,8 +54,10 @@ from src.services.agent.model_proxy import ModelPathRefused, ModelUnavailable, o
 from src.services.agent.sessions import SessionUnavailable, ensure_introduced, ensure_session, stop_session
 from src.services.agent.storage import FileNotAvailable
 from src.services.agent.tokens import get_token_conversation_id
+from src.services.agent.usage import AiLimitReached, check_hard_limits, meter_model_stream
 
 __all__ = [
+    "AiLimitReached",
     "BuildingNotStarted",
     "ConversationNotFound",
     "FileNotAvailable",
@@ -69,6 +72,7 @@ __all__ = [
     "SessionUnavailable",
     "SignalNotAllowed",
     "UploadRejected",
+    "check_hard_limits",
     "control_dev_servers",
     "ensure_introduced",
     "ensure_session",
@@ -79,6 +83,7 @@ __all__ = [
     "get_project_from_conv_id",
     "get_token_conversation_id",
     "list_artifacts",
+    "meter_model_stream",
     "open_model_request",
     "post_user_message",
     "receive_session_message",

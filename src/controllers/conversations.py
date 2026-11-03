@@ -1,7 +1,9 @@
 # Intentions: the browser's side of the agent chat.
 #   GET  /projects/{project_id}/conversation          (auth)  the project's current conversation (created on first use)
 #   GET  /conversations/{conversation_id}/messages    (auth)  a page of messages (see list_messages)
-#   POST /conversations/{conversation_id}/messages    (auth)  send text, or answer/abort a pending interaction
+#   POST /conversations/{conversation_id}/messages    (auth)  send text, or answer/abort a pending interaction. 429
+#                                                             {detail: AI_DAILY_LIMIT, scope: user | ip, resets_at}
+#                                                             for text once a daily AI limit is used up
 #   GET  /conversations/{conversation_id}/events      (auth)  SSE stream of new messages
 #   POST /conversations/{conversation_id}/uploads     (auth)  store attached files (multipart `files`), before sending
 #   GET  /conversations/{conversation_id}/files       (auth)  download a file: ?path=uploads/... or artifacts/...
@@ -21,7 +23,7 @@ import os
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from src.constants import (
@@ -85,16 +87,22 @@ async def list_messages(
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
 
 
-@router.post("/conversations/{conversation_id}/messages", status_code=201)
+@router.post("/conversations/{conversation_id}/messages", status_code=201, response_model=AiMessage)
 async def post_message(
     conversation_id: int, body: PostUserMessageRequest, request: Request, user: User = Depends(get_current_user)
-) -> AiMessage:
+) -> AiMessage | JSONResponse:
     """Returns the user's own stored message. The agent's reply comes through the events stream."""
     try:
         conversation = await agent_service.get_owned_conversation(conversation_id, user["id"])
-        return await agent_service.post_user_message(conversation, body.model_dump())
+        client_ip = request.client.host if request.client else None
+        return await agent_service.post_user_message(conversation, body.model_dump(), client_ip)
     except agent_service.ConversationNotFound as error:
         raise HTTPException(status_code=404, detail="CONVERSATION_NOT_FOUND") from error
+    except agent_service.AiLimitReached as limit:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "AI_DAILY_LIMIT", "scope": limit.scope, "resets_at": limit.resets_at.isoformat()},
+        )
     except agent_service.InteractionPending as error:
         raise HTTPException(status_code=409, detail="INTERACTION_PENDING") from error
     except agent_service.InteractionNotFound as error:

@@ -14,9 +14,11 @@ from src.app import create_app, create_listener_app
 from src.config import settings
 from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
+from src.repositories import ai_usage as ai_usage_repo
 from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
 from src.services import devenv as conversations_devenv
+from src.services import system_config
 from src.services.agent import conversations, mock, sessions, tokens, wakeups
 from src.utils import redis
 from src.utils.auth import get_current_user
@@ -104,6 +106,9 @@ def db(monkeypatch):
     monkeypatch.setattr(ai_messages_repo, "find_before", find_messages_before)
     monkeypatch.setattr(redis, "publish", publish)
     monkeypatch.setattr(redis, "lock", lock)
+    # Nothing spent today, and every setting at its code default (the AI limits).
+    monkeypatch.setattr(ai_usage_repo, "find_totals", lambda since, user_id=None, ip_group=None: _resolved([]))
+    monkeypatch.setattr(system_config, "get", lambda name, default=None: _resolved(default))
     # The mock replies in the background after a pause: capture the background job instead, with no
     # pause, and let each test run it (_settle) when it wants the reply stored.
     monkeypatch.setattr(conversations, "spawn", lambda job: state["spawned"].append(job))
@@ -115,6 +120,10 @@ def db(monkeypatch):
     # warns they were never awaited.
     for job in state["spawned"]:
         job.close()
+
+
+async def _resolved(value):
+    return value
 
 
 @pytest.fixture(autouse=True)
