@@ -25,12 +25,15 @@
 # That dict (exc.args[1]) travels with the exception. Intermediate layers extend it with
 # extend_error(exc, {...}) as it bubbles, and log_error() lifts it automatically.
 
+import asyncio
 import functools
 import inspect
 import json
 import logging
 import sys
 import time
+
+import pydash
 
 from src.config import settings
 
@@ -111,6 +114,20 @@ class _JsonFormatter(logging.Formatter):
         return json.dumps(entry, default=str)
 
 
+def _downgrade_shutdown_cancels(record: logging.LogRecord) -> logging.LogRecord:
+    """[Pure] A filter for uvicorn's error logger: on a restart, connections still open past
+    SERVER_GRACEFUL_SHUTDOWN_SECONDS (the chat's SSE streams, mostly) get cancelled, and uvicorn reports that as
+    two ERRORs -- "Cancel N running task(s)..." and "Exception in ASGI application" with a CancelledError. That's
+    the shutdown cap working as intended (the browser just reconnects), so they come out as warnings instead, and
+    the error log keeps meaning something is broken. Everything else passes through untouched."""
+    is_shutdown_cancel = str(record.msg).startswith("Cancel %s running task(s)") or isinstance(
+        pydash.get(record, "exc_info.1"), asyncio.CancelledError
+    )
+    if not is_shutdown_cancel:
+        return record
+    return logging.makeLogRecord({**record.__dict__, "levelno": logging.WARNING, "levelname": "WARNING"})
+
+
 def configure_logging() -> None:
     """Install a root StreamHandler at INFO so our own `logging.getLogger(...)` lines actually print.
     Without any config, Python's last-resort handler is WARNING-only, so every log.info (the worker's
@@ -124,6 +141,7 @@ def configure_logging() -> None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.handlers = [handler]  # replace any last-resort/default handler; we own root formatting
+    logging.getLogger("uvicorn.error").addFilter(_downgrade_shutdown_cancels)
 
 
 # --- Profiling (dev/diagnostic) -------------------------------------------------------------------
