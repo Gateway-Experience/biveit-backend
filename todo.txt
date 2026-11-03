@@ -1,13 +1,57 @@
-User onboard flow:
-- Are you experienced in tech/website building: yes/no/somewhat
+[v] Design a security system so claude sessions are contained and cant be exploited.
+- Suggestion: create a new linux system user for each platform user, and it only has access to the user's directory, nothing else (<root directory>/<user hash>). The user's claude sessions will be started under their corresponding system user.
+- Also take care of guard rails against prompt engineering.
+- Also ask claude to do a system-wide pentest after everything is done.
 
-Some building process questions:
+[v] User onboarding flow (asking basic info (or maybe skip them), if the user has any experience with web building - this info can make its way into the instruction prompt).
+- Also make them feel welcomed/hype them up?
+
+[v] Deployment flow (domain name, prod deploy), including techincal and business flow design.
+- Also maintenance flow, how users move forward with the site once it's deployed, regarding fixing bugs and making update, and redeploying.
+
+[v] Proper user profile section, and potential email verification.
+
+[v] Payment gateway.
+- Let's go with polar.sh for now.
+
+[v] Proper terms/policy/any other documentation.
+
+[v] Decide on the branding and then get the domain.
+- Also brand visual identity (logo, color scheme, website aesthetic)
+
+[v] Setup google login.
+
+[v] Landing page
+- Being coherent with the main app.
+- SEO
+
+[v] LLM provider
+- Might go with deepseek right now. This would also resolve the window limit issue.
+
+[v] Some building process questions:
 - What you absolutely dont want to have
 - What's a website to use as reference (and in what aspects? UI/styling, or user flow)
 
-Learning about the user's temperment and communication style through conversations (noting things down about the user?)
+[v] Dont let user download code from the prompt.
 
-Security implementation and review.
+[v] Include admin page building/questions into the building flow.
 
-Loading data (after deployment).
-- Can tell them we only accept csv upload for loading data for now (we can adapt the schema). If data is too complex or big, tell them to contact admin to help with this.
+[v] Include data import handling/questions into the building flow and provide the mechanism. Can give users the option to ask for human support.
+
+Analysis later:
+- Learning about the user's temperment and communication style through conversations (noting things down about the user?)
+- Feedback/feature requests
+- If users are concerned with security/privacy, e.g. AI accessing their data might scare them off.
+- If there's any attack or exploitation attempts
+
+User experience when building their website (comfort, guidance, encouragement, engagement)
+- Might in the form of tips/help messages, agent-based encouragement or sweet talking, sensibe building flow, or good UX.
+
+Stress-testing the site (especially session starting and it being robust)
+Setup logging and alarm, and a workflow for us to check system's health.
+
+AI usage limit.
+
+Billing/invoice management, payment method management.
+
+Backup payment method (paypal?).
