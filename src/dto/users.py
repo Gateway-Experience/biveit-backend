@@ -136,7 +136,7 @@ class UpdateMeRequest(BaseModel):
 
 
 class SetSandboxModeRequest(BaseModel):
-    """PUT /admin/sandbox-mode: whether the calling admin's own purchases happen in sandbox mode (test payments,
-    sandbox domains)."""
+    """PUT /admin/sandbox-mode: the calling admin's own mode -- true sandbox (test payments, sandbox domains), false
+    live, null back to the server's default."""
 
-    sandbox: bool
+    sandbox: bool | None

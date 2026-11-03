@@ -196,17 +196,20 @@ def test_a_status_we_dont_know_fails_loudly():
 @pytest.mark.parametrize(
     ("server_sandbox", "user", "provider"),
     [
+        # No choice of their own: the server's default.
         (False, {"role": None, "meta": {}}, "polar"),
         (False, {"role": "ADMIN", "meta": {}}, "polar"),
+        (True, {"role": None, "meta": {}}, "polar_sandbox"),
+        (True, {"role": "ADMIN", "meta": {"sandbox_mode": None}}, "polar_sandbox"),  # reset to the default
+        # An admin's own choice wins, either way.
         (False, {"role": "ADMIN", "meta": {"sandbox_mode": True}}, "polar_sandbox"),
+        (True, {"role": "ADMIN", "meta": {"sandbox_mode": False}}, "polar"),
         # A user can write their own meta: the flag means nothing without the role.
         (False, {"role": None, "meta": {"sandbox_mode": True}}, "polar"),
-        # A sandbox server is sandbox for everyone, whatever their switch says.
-        (True, {"role": None, "meta": {}}, "polar_sandbox"),
-        (True, {"role": "ADMIN", "meta": {"sandbox_mode": False}}, "polar_sandbox"),
+        (True, {"role": None, "meta": {"sandbox_mode": False}}, "polar_sandbox"),
     ],
 )
-def test_only_an_admin_can_switch_their_own_purchases_to_sandbox(monkeypatch, server_sandbox, user, provider):
+def test_an_admin_picks_their_own_mode_and_everyone_else_gets_the_servers(monkeypatch, server_sandbox, user, provider):
     monkeypatch.setattr(settings, "sandbox_mode", server_sandbox)
     assert payments.get_payment_provider(user) == provider
     assert payments.is_sandbox(user) == (provider == "polar_sandbox")

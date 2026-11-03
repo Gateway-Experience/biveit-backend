@@ -136,8 +136,9 @@ async def deploy_project(project_id: int, body: SetDomainsRequest, request: Requ
 
 @router.get("/admin/sandbox-mode")
 async def get_sandbox_mode(request: Request, user: User = Depends(require_admin)) -> dict:
-    """The calling admin's own sandbox mode: {sandbox (their switch), effective (whether their purchases are in
-    sandbox mode now: test payments, sandbox domains), server_sandbox (the server's mode, everyone else's)}."""
+    """The calling admin's own sandbox mode: {sandbox (their own choice: true / false, null = the server's default),
+    effective (whether their purchases are in sandbox mode now: test payments, sandbox domains), server_sandbox (the
+    server's default, which everyone without a choice of their own gets)}."""
     try:
         return _to_sandbox_mode(user)
     except Exception as error:
@@ -147,9 +148,9 @@ async def get_sandbox_mode(request: Request, user: User = Depends(require_admin)
 
 @router.put("/admin/sandbox-mode")
 async def set_sandbox_mode(body: SetSandboxModeRequest, request: Request, user: User = Depends(require_admin)) -> dict:
-    """Switch the calling admin's own purchases in or out of sandbox mode (users.meta.sandbox_mode) -- payments and
-    domains together. Only their purchases from now on: ones already made stay where they were made. Returns GET's
-    shape."""
+    """Set the calling admin's own mode (users.meta.sandbox_mode) -- sandbox, live, or null to follow the server's
+    default again -- payments and domains together. Only their purchases from now on: ones already made stay where
+    they were made. Returns GET's shape."""
     try:
         updated = await users_repo.update(user["id"], {"meta": {"sandbox_mode": body.sandbox}})
         return _to_sandbox_mode(updated or user)
@@ -159,8 +160,9 @@ async def set_sandbox_mode(body: SetSandboxModeRequest, request: Request, user: 
 
 
 def _to_sandbox_mode(user: User) -> dict:
+    own_choice = pydash.get(user, "meta.sandbox_mode")
     return {
-        "sandbox": bool((user.get("meta") or {}).get("sandbox_mode")),
+        "sandbox": own_choice if isinstance(own_choice, bool) else None,
         "effective": payments.is_sandbox(user),
         "server_sandbox": settings.sandbox_mode,
     }

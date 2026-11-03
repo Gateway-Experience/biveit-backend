@@ -18,11 +18,14 @@ from src.repositories import events as events_repo
 
 def is_sandbox(user: User) -> bool:
     """[Pure-ish] Whether this user's purchases happen in sandbox mode -- test payments, and domains on the
-    registrar's sandbox (one switch for both, see settings.sandbox_mode): the server's mode, or an admin who's
-    switched their own purchases to sandbox (users.meta.sandbox_mode, set from the admin page). Anyone else's meta
-    flag means nothing -- a user can write their own meta, so the role is what counts."""
-    is_admin_sandbox = user.get("role") == UserRole.ADMIN and bool((user.get("meta") or {}).get("sandbox_mode"))
-    return settings.sandbox_mode or is_admin_sandbox
+    registrar's sandbox (one switch for both). An admin who's chosen a mode for their own purchases
+    (users.meta.sandbox_mode true / false, set from the admin page) gets it, either way; everyone else -- every other
+    user, and an admin who hasn't chosen (null or absent) -- gets the server's default, settings.sandbox_mode. Anyone
+    else's meta flag means nothing: a user can write their own meta, so the role is what counts."""
+    own_choice = (user.get("meta") or {}).get("sandbox_mode")
+    if user.get("role") == UserRole.ADMIN and isinstance(own_choice, bool):
+        return own_choice
+    return settings.sandbox_mode
 
 
 def get_payment_provider(user: User) -> Provider:
