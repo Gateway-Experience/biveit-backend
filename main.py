@@ -23,6 +23,10 @@ def main() -> None:
         # (GET /conversations/{id}/events) stay open for up to SSE_MAX_AGE_SECONDS, so the server would
         # hang half-restarted. Past the cap they're closed; EventSource reconnects and resumes on its own.
         timeout_graceful_shutdown=SERVER_GRACEFUL_SHUTDOWN_SECONDS,
+        # Leave logging alone: by default uvicorn installs its own plain-text handlers, so its access/error
+        # lines skip our JSON formatter and the log collector can't parse them. With None they propagate to
+        # the root handler configure_logging set up.
+        log_config=None,
     )
 
 

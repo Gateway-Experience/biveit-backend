@@ -115,9 +115,8 @@ def configure_logging() -> None:
     Without any config, Python's last-resort handler is WARNING-only, so every log.info (the worker's
     startup line, the consumer's, and the amz.request access log) was silently dropped. FORMAT is chosen
     by env: `local` -> human text (colour on a TTY); any deployed env (prod/canary/dev/...) -> pure JSON
-    lines for the Loki collector. In the api role uvicorn also configures its own uvicorn* loggers; those
-    don't propagate to root, so there's no double-print. Call once at process startup (all roles, via
-    main)."""
+    lines for the Loki collector. uvicorn's own loggers flow through here too, since main runs it with
+    log_config=None. Call once at process startup (main)."""
     formatter = _TextFormatter(use_color=sys.stderr.isatty()) if settings.env == "local" else _JsonFormatter()
     handler = logging.StreamHandler()
     handler.setFormatter(formatter)
