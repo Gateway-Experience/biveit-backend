@@ -4,7 +4,16 @@
 
 import pydash
 
-from src.modules.payments.constants import DOMAIN_PRICE_POINTS, PLANS, PRODUCT_IDS, Plan, Product, Provider
+from src.modules.payments.constants import (
+    DOMAIN_BLEND_FIRST_TERM_WEIGHT,
+    DOMAIN_BLEND_MAX_RENEWAL_USD,
+    DOMAIN_PRICE_POINTS,
+    PLANS,
+    PRODUCT_IDS,
+    Plan,
+    Product,
+    Provider,
+)
 
 
 def get_plans() -> list[dict]:
@@ -16,8 +25,7 @@ def to_domain_offer(registrar_quote: dict) -> dict:
     """[Pure] What we'd charge for a domain, from the registrar's quote ({price_usd, renewal_price_usd, min_years,
     premium, available} -- domains.check_domains' shape): {price_per_year, discountable, sold}. Not sold
     when it's taken, premium, needs more than a year up front, or costs more than our last price point."""
-    yearly_cost = max(registrar_quote.get("price_usd") or 0, registrar_quote.get("renewal_price_usd") or 0)
-    price_point = _get_price_point(yearly_cost)
+    price_point = _get_price_point(_get_yearly_cost(registrar_quote))
     sold = bool(
         registrar_quote.get("available")
         and not registrar_quote.get("premium")
@@ -58,6 +66,16 @@ def describe_product(provider: Provider, product_id: str) -> dict | None:
     if price_point:
         return {"product": Product.DOMAIN, "price_per_year": price_point["price_usd"]}
     return None
+
+
+def _get_yearly_cost(registrar_quote: dict) -> float:
+    """[Pure] What a domain costs us a year on average (DOMAIN_BLEND_*). A quote missing one of its two prices counts
+    the other for both; 0 with neither."""
+    first_term = registrar_quote.get("price_usd") or registrar_quote.get("renewal_price_usd") or 0
+    renewal = registrar_quote.get("renewal_price_usd") or first_term
+    if renewal >= DOMAIN_BLEND_MAX_RENEWAL_USD:
+        return renewal
+    return DOMAIN_BLEND_FIRST_TERM_WEIGHT * first_term + (1 - DOMAIN_BLEND_FIRST_TERM_WEIGHT) * renewal
 
 
 def _get_price_point(yearly_cost: float) -> dict | None:

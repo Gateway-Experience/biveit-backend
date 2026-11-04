@@ -28,9 +28,13 @@ _NOW = datetime(2026, 10, 28, 12, tzinfo=UTC)
 @pytest.mark.parametrize(
     ("quote", "expected"),
     [
-        # Priced off the dearer of registering and renewing: a cheap first year doesn't hide a dear renewal.
-        ({"price_usd": 8.9, "renewal_price_usd": 12.9}, {"price_per_year": 15, "discountable": True}),
-        ({"price_usd": 2.0, "renewal_price_usd": 35.0}, {"price_per_year": 40, "discountable": False}),
+        # Priced off 60% first term + 40% renewal: a promo first year lowers it some, not all the way.
+        ({"price_usd": 8.9, "renewal_price_usd": 12.9}, {"price_per_year": 15, "discountable": True}),  # 10.50
+        ({"price_usd": 2.0, "renewal_price_usd": 35.0}, {"price_per_year": 20, "discountable": True}),  # 15.20
+        ({"price_usd": 2.99, "renewal_price_usd": 49.99}, {"price_per_year": 30, "discountable": False}),  # 21.79
+        # A renewal of $100 or more counts alone, however cheap the first year.
+        ({"price_usd": 5.0, "renewal_price_usd": 100.0}, {"price_per_year": None, "sold": False}),
+        ({"price_usd": 30.0}, {"price_per_year": 30}),  # no renewal price: the first term counts for both
         ({"price_usd": 10.0, "renewal_price_usd": 10.0}, {"price_per_year": 10, "discountable": True}),
         ({"price_usd": 41.0, "renewal_price_usd": 41.0}, {"price_per_year": None, "sold": False}),
         ({"price_usd": 12.0, "renewal_price_usd": 12.0, "premium": True}, {"sold": False}),

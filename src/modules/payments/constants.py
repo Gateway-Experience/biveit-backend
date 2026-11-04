@@ -84,12 +84,18 @@ PLANS = {
 }  # fmt: skip
 
 # What we charge for a domain, per year: the cheapest point at or above what the registrar charges us for a year
-# (the higher of its registration and renewal price). Above the last one, premium, or a TLD that needs more than
-# a year up front: not sold. `discountable`: can get the domain discount (with the yearly plan).
+# on average (DOMAIN_BLEND_*). Above the last one, premium, or a TLD that needs more than a year up front: not
+# sold. `discountable`: can get the domain discount (with the yearly plan).
 # What the domain discount is, as a domain checkout records it (its `discount.terms`). One kind for now: the first
 # year free, sold as a trial on the domain's own product (a year's trial set on its checkout -- no charge today,
 # then the normal yearly price).
 DOMAIN_DISCOUNT_TERMS = "first_year_free"
+
+# A domain's average yearly cost to us, which picks its price point: with a renewal under DOMAIN_BLEND_MAX_RENEWAL_USD,
+# DOMAIN_BLEND_FIRST_TERM_WEIGHT of the first term plus the rest of the renewal -- a promo first year (a $2.99 .site
+# renewing at $49.99) lowers it some, as most domains are kept a few years; from that renewal up, the renewal alone.
+DOMAIN_BLEND_MAX_RENEWAL_USD = 100
+DOMAIN_BLEND_FIRST_TERM_WEIGHT = 0.6
 
 DOMAIN_PRICE_POINTS = [
     {"price_usd": 10, "max_registrar_usd": 10, "discountable": True, "product_key": "domain-10"},
