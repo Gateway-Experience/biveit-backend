@@ -22,6 +22,7 @@ import pydash
 from src.constants import AnalyticsEvent
 from src.modules.payments.constants import (
     CHECKOUT_CATCH_UP_DAYS,
+    PAYMENT_PROVIDERS,
     PURCHASE_STALE_SECONDS,
     RUNNING_STATUSES,
     Billing,
@@ -114,7 +115,7 @@ async def _save_purchase(row: dict) -> dict:
     changes (renewals, cancels) aren't purchases. Polar sends several webhooks per purchase and the catch-up re-reads
     too, so the event carries a fixed uuid: should two racing reads both see it as new, PostHog keeps one."""
     key = pydash.pick(row, "provider", "provider_object", "provider_ref")
-    previous = pydash.head(await subscriptions_repo.find(key))
+    previous = pydash.head(await subscriptions_repo.find(key, include_deleted=True))
     saved = await subscriptions_repo.upsert(row)
     is_just_paid = saved["status"] in _PAID_STATUSES and (
         not previous or previous["status"] == SubscriptionStatus.PENDING
@@ -138,14 +139,14 @@ async def _save_purchase(row: dict) -> dict:
 async def catch_up_purchases(now: datetime | None = None) -> list[dict]:
     """Bring in what the webhooks missed (see the top of this file), in two parts:
       1. every unsettled row whose updated_at (when we last read it from Polar) is older than PURCHASE_STALE_SECONDS
-         is read again -- a webhook refreshes a row whenever it changes, so only the quiet ones are asked about
+         is read again (Polar's rows only: an admin's has nothing at Polar to read; a soft-deleted one is left alone) -- a webhook refreshes a row whenever it changes, so only the quiet ones are asked about
       2. every checkout of the last CHECKOUT_CATCH_UP_DAYS without a row is looked up by its orders (they carry its
          checkout_id): a paid one brings its subscription / order in
     One that fails is logged and left for the next round; the rest still go. Returns the rows refreshed. `now`: for
     tests. [I/O]"""
     current = now or datetime.now(UTC)
     stale_rows = await subscriptions_repo.find_stale(
-        _UNSETTLED_STATUSES, current - timedelta(seconds=PURCHASE_STALE_SECONDS)
+        _UNSETTLED_STATUSES, current - timedelta(seconds=PURCHASE_STALE_SECONDS), PAYMENT_PROVIDERS
     )
     checkouts = await events_repo.find(
         {"type": PaymentEvent.CHECKOUT_CREATED}, created_after=current - timedelta(days=CHECKOUT_CATCH_UP_DAYS)

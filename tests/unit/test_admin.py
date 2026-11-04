@@ -140,3 +140,35 @@ def test_a_domain_another_project_has_is_refused(deploying, monkeypatch):
     response = _client_as(_ADMIN).post("/api/admin/projects/16/deployments", json={"domains": ["shop.example.com"]})
     assert response.status_code == 409 and response.json()["detail"] == "DOMAIN_TAKEN"
     assert deploying["deployed"] == []
+
+
+def test_setting_a_plan_says_why_it_was_refused_and_fulfils_the_project(services, monkeypatch):
+    fulfilled = []
+
+    async def create_admin_plan(project, plan, starts_at, ends_at, admin_id):
+        if ends_at <= starts_at:
+            raise admin.payments.InvalidPlanPeriod()
+        return {"id": 5, "provider": "admin", "plan": plan, "created_at": starts_at, "ends_at": ends_at}
+
+    async def update_admin_plan(project_id, plan, starts_at, ends_at):
+        raise admin.payments.PlanNotEditable(project_id)
+
+    async def fulfil(project_id):
+        fulfilled.append(project_id)
+
+    monkeypatch.setattr(admin.payments, "create_admin_plan", create_admin_plan)
+    monkeypatch.setattr(admin.payments, "update_admin_plan", update_admin_plan)
+    monkeypatch.setattr(admin.fulfilment, "fulfil", fulfil)
+    client = _client_as(_ADMIN)
+    body = {"plan": "yearly", "starts_at": "2026-11-04T00:00:00Z", "ends_at": "2027-11-04T00:00:00Z"}
+
+    created = client.post("/api/admin/projects/16/plan", json=body)
+    assert created.status_code == 201 and created.json()["plan"]["provider"] == "admin"
+    assert fulfilled == [16]
+    backwards = client.post("/api/admin/projects/16/plan", json={**body, "ends_at": "2026-11-01T00:00:00Z"})
+    assert backwards.status_code == 400 and backwards.json()["detail"] == "INVALID_PERIOD"
+    assert client.put("/api/admin/projects/16/plan", json=body).json()["detail"] == "PLAN_NOT_EDITABLE"
+    # No timezone: refused, rather than guessed.
+    assert (
+        client.post("/api/admin/projects/16/plan", json={**body, "starts_at": "2026-11-04T00:00:00"}).status_code == 422
+    )

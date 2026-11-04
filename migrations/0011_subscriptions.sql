@@ -21,7 +21,7 @@
 CREATE TABLE IF NOT EXISTS subscriptions
 (
     id              BIGSERIAL PRIMARY KEY,
-    provider        varchar(32)  NOT NULL,                -- polar | polar_sandbox (which Polar world)
+    provider        varchar(32)  NOT NULL,                -- polar | polar_sandbox (which Polar world) | admin (set by hand)
     provider_object varchar(16)  NOT NULL,                -- subscription | order
     provider_ref    varchar(64)  NOT NULL,                -- the provider's id for it
     billing         varchar(16)  NOT NULL,                -- recurring | lifetime
@@ -37,8 +37,13 @@ CREATE TABLE IF NOT EXISTS subscriptions
     trial_ends_at   TIMESTAMPTZ,                          -- a free first year runs as a trial
     custom_data     jsonb        NOT NULL DEFAULT '{}',
     snapshot        jsonb        NOT NULL DEFAULT '{}',
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),  -- a lifetime one: when it was paid (the provider's)
-    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),  -- a lifetime one: when it was paid (the provider's); an
+                                                          -- admin-set one: when it starts
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    -- Soft delete: an admin took the project's plan away. Left out of every read, kept for the record. Polar's
+    -- webhooks never write it, so it sticks even while Polar keeps sending updates for that purchase.
+    -- Added after the table: ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+    deleted_at      TIMESTAMPTZ
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_subscriptions_provider_ref ON subscriptions (provider, provider_object, provider_ref);

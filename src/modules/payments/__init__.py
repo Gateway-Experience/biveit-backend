@@ -6,7 +6,8 @@
 #
 # The provider is the source of truth; our rows follow it through webhooks (each re-fetches the object). Polar has two
 # worlds, live and the sandbox (test cards): everyone pays on the server's default one, except admins who switch
-# their own payments to the sandbox; each purchase stays in the world it was made in (constants.Provider).
+# their own payments to the sandbox; each purchase stays in the world it was made in (constants.Provider). An admin
+# can also set a project's plan by hand (services/subscriptions: provider ADMIN rows, which count like bought ones).
 # What we sell and for how much: constants.py. The business rules: docs/launchflow.txt.
 # Callers import THIS package (`from src.modules import payments`), not the files.
 
@@ -36,7 +37,18 @@ from src.modules.payments.services.checkouts import (
 )
 from src.modules.payments.services.polar import ProviderError
 from src.modules.payments.services.purchases import catch_up_purchases
-from src.modules.payments.services.subscriptions import refund_latest_payment, revoke_subscription
+from src.modules.payments.services.subscriptions import (
+    InvalidPlanPeriod,
+    NoPlan,
+    PlanExists,
+    PlanNotEditable,
+    create_admin_plan,
+    delete_project_plan,
+    get_project_plan,
+    refund_latest_payment,
+    revoke_subscription,
+    update_admin_plan,
+)
 from src.modules.payments.services.webhooks import InvalidSignature, handle_webhook
 
 __all__ = [
@@ -44,8 +56,12 @@ __all__ = [
     "DOMAIN_PRICE_POINTS",
     "PLANS",
     "Billing",
+    "InvalidPlanPeriod",
     "InvalidSignature",
+    "NoPlan",
     "Plan",
+    "PlanExists",
+    "PlanNotEditable",
     "Product",
     "Provider",
     "ProviderError",
@@ -54,14 +70,17 @@ __all__ = [
     "TargetType",
     "catch_up_purchases",
     "change_plan",
+    "create_admin_plan",
     "create_domain_checkout",
     "create_plan_checkout",
+    "delete_project_plan",
     "describe_product",
     "find_subscriptions",
     "get_billing_portal_url",
     "get_payment_provider",
     "get_plans",
     "get_project_access",
+    "get_project_plan",
     "get_recorded_checkout",
     "handle_webhook",
     "is_in_grace",
@@ -71,4 +90,5 @@ __all__ = [
     "revoke_subscription",
     "to_access",
     "to_domain_offer",
+    "update_admin_plan",
 ]

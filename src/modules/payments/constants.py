@@ -12,6 +12,13 @@ class Provider(StrEnum):
 
     POLAR = "polar"  # live
     POLAR_SANDBOX = "polar_sandbox"
+    # Set by hand by an admin (the admin project page): no payment and nothing at any provider behind it. Counts for
+    # access like any other row; only the code that calls a provider leaves it out.
+    ADMIN = "admin"
+
+
+# The providers that are real payment providers -- the ones with an API to ask about a purchase.
+PAYMENT_PROVIDERS = [Provider.POLAR, Provider.POLAR_SANDBOX]
 
 
 class Product(StrEnum):

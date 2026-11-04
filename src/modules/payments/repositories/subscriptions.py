@@ -1,5 +1,6 @@
 # Intentions: data access for `subscriptions` -- our copy of each purchase at the payment provider (plans and domains,
-# recurring; the one-time purchase, lifetime). Schema: migrations/0011_subscriptions.sql.
+# recurring; the one-time purchase, lifetime), plus the ones an admin set by hand (provider 'admin'). Schema:
+# migrations/0011_subscriptions.sql, 0015 (deleted_at: soft-deleted rows are left out of every read unless asked for).
 
 from collections.abc import Sequence
 from datetime import datetime
@@ -11,7 +12,7 @@ from src.utils import postgres
 
 _COLUMNS = """
     id, provider, provider_object, provider_ref, billing, user_id, target_type, target_id, product, plan,
-    product_data, status, renews_at, ends_at, trial_ends_at, custom_data, snapshot, created_at, updated_at
+    product_data, status, renews_at, ends_at, trial_ends_at, custom_data, snapshot, created_at, updated_at, deleted_at
 """
 _WRITABLE_COLUMNS = [
     "provider", "provider_object", "provider_ref", "billing", "user_id", "target_type", "target_id", "product", "plan",
@@ -21,18 +22,27 @@ _WRITABLE_COLUMNS = [
 _FIXED_COLUMNS = {"provider", "provider_object", "provider_ref", "billing", "user_id", "target_type", "target_id"}
 
 
-async def find(criteria: dict[str, Any]) -> list[dict]:
+async def find(criteria: dict[str, Any], include_deleted: bool = False) -> list[dict]:
     """Subscriptions matching `criteria` (column = value, ANDed), oldest first. A target's ({"target_type": ..,
     "target_id": ..}) rides idx_subscriptions_target."""
     where = pydash.pick(criteria, "id", *_WRITABLE_COLUMNS)
-    sql = f"SELECT {_COLUMNS} FROM subscriptions WHERE {postgres.to_where_clause(where)} ORDER BY created_at, id"
+    not_deleted = "" if include_deleted else " AND deleted_at IS NULL"
+    sql = f"SELECT {_COLUMNS} FROM subscriptions WHERE {postgres.to_where_clause(where)}{not_deleted} ORDER BY created_at, id"
     return await postgres.fetch(sql, where)
 
 
-async def find_stale(statuses: Sequence[str], updated_before: datetime) -> list[dict]:
-    """Subscriptions in one of `statuses` last written before `updated_before`, oldest write first."""
-    sql = f"SELECT {_COLUMNS} FROM subscriptions WHERE status = ANY($statuses) AND updated_at < $updated_before ORDER BY updated_at"
-    return await postgres.fetch(sql, {"statuses": list(statuses), "updated_before": updated_before})
+async def find_stale(statuses: Sequence[str], updated_before: datetime, providers: Sequence[str]) -> list[dict]:
+    """Not-deleted subscriptions from one of `providers`, in one of `statuses`, last written before `updated_before`,
+    oldest write first."""
+    sql = f"""
+        SELECT {_COLUMNS} FROM subscriptions
+        WHERE status = ANY($statuses) AND updated_at < $updated_before AND provider = ANY($providers)
+            AND deleted_at IS NULL
+        ORDER BY updated_at
+    """
+    return await postgres.fetch(
+        sql, {"statuses": list(statuses), "updated_before": updated_before, "providers": list(providers)}
+    )
 
 
 async def find_by_checkout_ids(checkout_ids: list[str]) -> list[dict]:
@@ -66,3 +76,31 @@ async def upsert(row: dict[str, Any]) -> dict:
     upserted = await postgres.fetchrow(sql, values)
     assert upserted is not None  # an upsert always returns its row
     return upserted
+
+
+async def insert(row: dict[str, Any]) -> dict:
+    """Insert a subscription we made ourselves (an admin's), not one a provider told us about (upsert)."""
+    values = pydash.pick(row, *_WRITABLE_COLUMNS)
+    inserted = await postgres.fetchrow(
+        f"INSERT INTO subscriptions {postgres.to_insert_clause(values)} RETURNING {_COLUMNS}", values
+    )
+    assert inserted is not None  # an insert always returns its row
+    return inserted
+
+
+async def update_one(subscription_id: int, changes: dict[str, Any]) -> dict | None:
+    """Overwrite some of a subscription's columns. None if there's no such row."""
+    values = pydash.pick(changes, *_WRITABLE_COLUMNS)
+    sql = f"""
+        UPDATE subscriptions SET {postgres.to_set_clause(values)}, updated_at = now()
+        WHERE id = $subscription_id RETURNING {_COLUMNS}
+    """
+    return await postgres.fetchrow(sql, {**values, "subscription_id": subscription_id})
+
+
+async def delete(subscription_id: int) -> None:
+    """Soft-delete a subscription: it's kept, with deleted_at set, and every read leaves it out from then on."""
+    await postgres.execute(
+        "UPDATE subscriptions SET deleted_at = now(), updated_at = now() WHERE id = $subscription_id AND deleted_at IS NULL",
+        {"subscription_id": subscription_id},
+    )

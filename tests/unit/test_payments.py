@@ -244,7 +244,7 @@ def stores(monkeypatch):
     memory. `pay(checkout)` makes what paying would: a subscription (+ its first order), or an order."""
     state = {"subscriptions": {}, "events": [], "polar": {}, "checkouts": [], "calls": []}
 
-    async def find(criteria):
+    async def find(criteria, include_deleted=False):
         return [row for row in state["subscriptions"].values() if all(row.get(k) == v for k, v in criteria.items())]
 
     async def upsert(row):
@@ -259,9 +259,13 @@ def stores(monkeypatch):
         state["subscriptions"] = {**state["subscriptions"], key: merged}
         return merged
 
-    async def find_stale(statuses, updated_before):
+    async def find_stale(statuses, updated_before, providers):
         rows = state["subscriptions"].values()
-        return [row for row in rows if row["status"] in statuses and row["updated_at"] < updated_before]
+        return [
+            row
+            for row in rows
+            if row["status"] in statuses and row["updated_at"] < updated_before and row["provider"] in providers
+        ]
 
     async def find_by_checkout_ids(checkout_ids):
         rows = state["subscriptions"].values()
@@ -610,3 +614,80 @@ def test_the_billing_portal_is_the_one_of_the_world_the_user_pays_in(meta, url):
     app = create_app()
     app.dependency_overrides[get_current_user] = lambda: {"id": 1, "role": "ADMIN", "meta": meta}
     assert TestClient(app).get("/api/payments/portal").json() == {"url": url}
+
+
+# --- plans set by an admin ---
+
+
+def test_nothing_counts_before_it_starts():
+    later = _subscription(created_at=_NOW + timedelta(days=3), status="cancelled", ends_at=_NOW + timedelta(days=40))
+    access = payments.to_access([later], _NOW)
+    assert not (access["can_host"] or access["can_download"] or access["has_had_plan"])
+    assert not payments.is_running(later, _NOW) and not payments.is_in_grace(later, _NOW)
+
+
+def test_an_admin_one_time_purchase_gives_edits_until_its_end():
+    one_time = {**_one_time(_NOW - timedelta(days=50)), "ends_at": _NOW + timedelta(days=5)}
+    access = payments.to_access([one_time], _NOW)
+    assert access["can_edit"] and access["edit_until"] == _NOW + timedelta(days=5) and not access["can_host"]
+
+
+@pytest.fixture
+def plan_rows(monkeypatch):
+    """subscriptions_repo for the admin plan functions, in memory: {id: row}."""
+    rows = {}
+
+    async def find(criteria, include_deleted=False):
+        matching = [row for row in rows.values() if all(row.get(k) == v for k, v in criteria.items())]
+        return [row for row in matching if include_deleted or not row.get("deleted_at")]
+
+    async def insert(row):
+        saved = {**row, "id": len(rows) + 1, "deleted_at": None}
+        rows[saved["id"]] = saved
+        return saved
+
+    async def update_one(subscription_id, changes):
+        rows[subscription_id] = {**rows[subscription_id], **changes}
+        return rows[subscription_id]
+
+    async def delete(subscription_id):
+        rows[subscription_id] = {**rows[subscription_id], "deleted_at": _NOW}
+
+    for name, fake in {"find": find, "insert": insert, "update_one": update_one, "delete": delete}.items():
+        monkeypatch.setattr(subscriptions.subscriptions_repo, name, fake)
+    return rows
+
+
+_GRANTED_PROJECT = {"id": 7, "user_id": 3}
+
+
+async def test_an_admin_plan_runs_its_period_then_has_the_usual_grace(plan_rows):
+    plan = await payments.create_admin_plan(_GRANTED_PROJECT, payments.Plan.YEARLY, _NOW, _NOW + timedelta(days=365), 1)
+    assert (plan["provider"], plan["status"], plan["product"]) == ("admin", "cancelled", "plan")
+    assert payments.to_access([plan], _NOW + timedelta(days=100))["plan_subscription"]["plan"] == "yearly"
+    after = payments.to_access([plan], _NOW + timedelta(days=370))
+    assert after["can_host"] and after["plan_subscription"] is None  # grace
+
+
+async def test_a_project_gets_one_plan_and_its_period_has_to_move_forward(plan_rows):
+    await payments.create_admin_plan(_GRANTED_PROJECT, payments.Plan.MONTHLY, _NOW, _NOW + timedelta(days=30), 1)
+    with pytest.raises(payments.PlanExists):
+        await payments.create_admin_plan(_GRANTED_PROJECT, payments.Plan.YEARLY, _NOW, _NOW + timedelta(days=365), 1)
+    with pytest.raises(payments.InvalidPlanPeriod):
+        await payments.update_admin_plan(_GRANTED_PROJECT["id"], payments.Plan.YEARLY, _NOW, _NOW)
+    upgraded = await payments.update_admin_plan(
+        _GRANTED_PROJECT["id"], payments.Plan.ONE_TIME, _NOW, _NOW + timedelta(days=9)
+    )
+    assert (upgraded["product"], upgraded["billing"], upgraded["status"]) == ("one_time", "lifetime", "active")
+
+
+async def test_a_bought_plan_can_be_deleted_but_not_edited_and_then_a_new_one_set(plan_rows):
+    plan_rows[1] = {"id": 1, "provider": "polar", "product": "plan", "target_type": "PROJECT", "target_id": 7,
+                    "created_at": _NOW, "deleted_at": None}  # fmt: skip
+    with pytest.raises(payments.PlanNotEditable):
+        await payments.update_admin_plan(_GRANTED_PROJECT["id"], payments.Plan.YEARLY, _NOW, _NOW + timedelta(days=1))
+    await payments.delete_project_plan(_GRANTED_PROJECT["id"])
+    assert await payments.get_project_plan(_GRANTED_PROJECT["id"]) is None
+    await payments.create_admin_plan(_GRANTED_PROJECT, payments.Plan.MONTHLY, _NOW, _NOW + timedelta(days=30), 1)
+    with pytest.raises(payments.NoPlan):
+        await payments.delete_project_plan(99)

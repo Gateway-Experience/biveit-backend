@@ -2,9 +2,9 @@
 #  - The Project INTERFACE (TypedDict) over the projects-row dict the repo returns.
 #  - The request CONTRACTS (Pydantic) validating untrusted HTTP bodies.
 
-from typing import Annotated, Any, NotRequired, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
-from pydantic import BaseModel, Field, StringConstraints, model_validator
+from pydantic import AwareDatetime, BaseModel, Field, StringConstraints, model_validator
 
 
 class Project(TypedDict):
@@ -117,3 +117,14 @@ class SetDomainsRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
     domains: Annotated[list[Annotated[str, StringConstraints(max_length=253)]], Field(max_length=20)]
+
+
+class ProjectPlanRequest(BaseModel):
+    """POST / PUT /admin/projects/{id}/plan body -- the plan an admin sets for a project, and when it runs:
+    [starts_at, ends_at), both with a timezone (stored as UTC). ends_at has to be after starts_at."""
+
+    model_config = {"extra": "forbid"}
+
+    plan: Literal["monthly", "yearly", "one_time"]
+    starts_at: AwareDatetime
+    ends_at: AwareDatetime

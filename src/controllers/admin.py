@@ -13,6 +13,15 @@
 #                                     <hash>.<PROD_DOMAIN> -- then deploy, as its owner would; 202 {run_id, commit}.
 #                                     409 NOTHING_TO_DEPLOY / DEPLOYMENT_IN_PROGRESS / DOMAIN_TAKEN, 400
 #                                     INVALID_DOMAIN / NO_DOMAIN
+#   GET    /admin/projects/{id}/plan  {plan}: the project's plan (payments.get_project_plan: its latest plan or
+#                                     one-time row that isn't deleted, expired or not), or null
+#   POST   /admin/projects/{id}/plan  {plan, starts_at, ends_at}: give it one by hand. 409 PLAN_EXISTS
+#   PUT    /admin/projects/{id}/plan  the same body: change the admin-set one. 404 NO_PLAN, 409 PLAN_NOT_EDITABLE (a
+#                                     bought one: Polar's, delete only)
+#   DELETE /admin/projects/{id}/plan  soft-delete it, bought or not (a bought one keeps billing: cancel it in Polar).
+#                                     404 NO_PLAN
+#     POST/PUT: 400 INVALID_PERIOD when ends_at isn't after starts_at. Each change kicks off the launch fulfilment, so
+#     hosting follows right away rather than at the next sweep.
 #   GET  /admin/sandbox-mode          the calling admin's own sandbox mode {sandbox, effective, server_sandbox}
 #   PUT  /admin/sandbox-mode          {sandbox}: switch their own purchases (payments + domains) to sandbox or back
 #   GET  /admin/ai-usage?since=&until=   what the agents cost in [since, until) (ISO datetimes): {total_usd, users,
@@ -26,10 +35,10 @@ import asyncio
 from datetime import datetime, timedelta
 
 import pydash
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
 from src.config import settings
-from src.dto.projects import Project, SetDomainsRequest
+from src.dto.projects import Project, ProjectPlanRequest, SetDomainsRequest
 from src.dto.users import SetSandboxModeRequest, User
 from src.modules import deployments, payments
 from src.repositories import projects as projects_repo
@@ -37,6 +46,7 @@ from src.repositories import users as users_repo
 from src.services import agent as agent_service
 from src.services import platform_status
 from src.services import projects as projects_service
+from src.services.launch import fulfilment
 from src.utils.auth import require_admin
 from src.utils.logging import log_http_error
 
@@ -129,6 +139,78 @@ async def deploy_project(project_id: int, body: SetDomainsRequest, request: Requ
         raise HTTPException(status_code=409, detail="NOTHING_TO_DEPLOY") from error
     except deployments.DeploymentInProgress as error:
         raise HTTPException(status_code=409, detail="DEPLOYMENT_IN_PROGRESS") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+_PLAN_FIELDS = ["id", "provider", "product", "plan", "status", "created_at", "ends_at", "renews_at"]
+
+
+@router.get("/admin/projects/{project_id}/plan")
+async def get_project_plan(project_id: int, request: Request) -> dict:
+    await _get_project(project_id)
+    try:
+        plan = await payments.get_project_plan(project_id)
+        return {"plan": pydash.pick(plan, *_PLAN_FIELDS) if plan else None}
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.post("/admin/projects/{project_id}/plan", status_code=201)
+async def create_project_plan(
+    project_id: int,
+    body: ProjectPlanRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(require_admin),
+) -> dict:
+    project = await _get_project(project_id)
+    try:
+        plan = await payments.create_admin_plan(
+            project, payments.Plan(body.plan), body.starts_at, body.ends_at, user["id"]
+        )
+        background_tasks.add_task(fulfilment.fulfil, project_id)
+        return {"plan": pydash.pick(plan, *_PLAN_FIELDS)}
+    except payments.PlanExists as error:
+        raise HTTPException(status_code=409, detail="PLAN_EXISTS") from error
+    except payments.InvalidPlanPeriod as error:
+        raise HTTPException(status_code=400, detail="INVALID_PERIOD") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.put("/admin/projects/{project_id}/plan")
+async def update_project_plan(
+    project_id: int, body: ProjectPlanRequest, request: Request, background_tasks: BackgroundTasks
+) -> dict:
+    await _get_project(project_id)
+    try:
+        plan = await payments.update_admin_plan(project_id, payments.Plan(body.plan), body.starts_at, body.ends_at)
+        background_tasks.add_task(fulfilment.fulfil, project_id)
+        return {"plan": pydash.pick(plan, *_PLAN_FIELDS)}
+    except payments.NoPlan as error:
+        raise HTTPException(status_code=404, detail="NO_PLAN") from error
+    except payments.PlanNotEditable as error:
+        raise HTTPException(status_code=409, detail="PLAN_NOT_EDITABLE") from error
+    except payments.InvalidPlanPeriod as error:
+        raise HTTPException(status_code=400, detail="INVALID_PERIOD") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.delete("/admin/projects/{project_id}/plan")
+async def delete_project_plan(project_id: int, request: Request, background_tasks: BackgroundTasks) -> dict:
+    await _get_project(project_id)
+    try:
+        await payments.delete_project_plan(project_id)
+        background_tasks.add_task(fulfilment.fulfil, project_id)
+        return {"plan": None}
+    except payments.NoPlan as error:
+        raise HTTPException(status_code=404, detail="NO_PLAN") from error
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error

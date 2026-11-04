@@ -112,7 +112,7 @@ def _purchase(status):
     ],
 )
 async def test_a_payment_is_sent_once_when_it_gets_paid(monkeypatch, captured, previous_status, status, is_sent):
-    async def find(criteria):
+    async def find(criteria, include_deleted=False):
         assert criteria == {
             "provider": Provider.POLAR_SANDBOX,
             "provider_object": "subscription",
@@ -139,7 +139,7 @@ async def test_a_payment_is_sent_once_when_it_gets_paid(monkeypatch, captured, p
 
 
 async def test_a_payment_event_has_the_same_uuid_however_often_its_sent(monkeypatch, captured):
-    async def find(criteria):
+    async def find(criteria, include_deleted=False):
         return []
 
     async def upsert(row):
