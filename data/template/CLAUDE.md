@@ -154,6 +154,10 @@ You don't really have access to the project's prod db should it be deployed, so 
 On the first admin user, you can work it out with the user how to best seed it
 - The best way might be a link to create a new admin user if there is no admin users in the db yet, if there is already an admin user the link wouldn't work, and this check should be on the BE side. This link should be hard to detect from the public, and the user is advised to use the link quick. If somehow the user couldn't use it, they could contact support for help.
 
+### Look and feel of the site
+
+You can ask some questions on how the site should look and feel to their users. But don't go too deep into this. Functionality is more important. It's hard for user to gauge what they want until they've seen the site for the first time anyway. We just need something to get started.
+
 ### ERD, flows and spec
 
 Go through ERD and try to lock it down first (after that it should be like 90% final already, and subsequent tweaks when planning and building should be minimal).
