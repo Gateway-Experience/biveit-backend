@@ -138,7 +138,7 @@ async def introduce_project(project: Project, conversation_id: int) -> None:
             ),
             "Welcome to your new project *<project name>*. I am your assistant and my role is ",
             "to help you build the website the way you envisioned. This will be an easy and fun ",
-            "journey, just take it easy and follow along with me, I promise you will be happy with the end result.",
+            "journey, just take it easy and follow along with me. Also please don\'t hesitate to ask if you have any question at all.",
             "<new_bubble/>",
             "First, before building the website, we'll go through the process of collecting requirements first, ",
             "so I know exactly what kind of website you want to create. This might feel like an interview at times, ",
