@@ -33,6 +33,12 @@ def get_payment_provider(user: User) -> Provider:
     return Provider.POLAR_SANDBOX if is_sandbox(user) else Provider.POLAR
 
 
+def get_billing_portal_url(user: User) -> str:
+    """[Pure-ish] Where this user manages their subscriptions, invoices and payment method: the portal of the Polar
+    world they pay in (get_payment_provider)."""
+    return polar.get_portal_url(get_payment_provider(user))
+
+
 def get_origin() -> str:
     """[Pure-ish] Which deployment of ours this is, as checkouts record it (see the top of this file)."""
     return settings.frontend_url

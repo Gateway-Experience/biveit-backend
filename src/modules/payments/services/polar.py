@@ -26,6 +26,12 @@ from src.modules.payments.constants import WEBHOOK_TOLERANCE_SECONDS, Provider, 
 from src.utils import http
 
 _API_URLS = {Provider.POLAR: "https://api.polar.sh/v1", Provider.POLAR_SANDBOX: "https://sandbox-api.polar.sh/v1"}
+# Each org's customer portal: customers sign in with the email they paid with (Polar emails a code) and manage their
+# subscriptions, invoices and payment method there. Our org slugs: "biveit" live, "biveit-sandbox" in the sandbox.
+_PORTAL_URLS = {
+    Provider.POLAR: "https://polar.sh/biveit/portal",
+    Provider.POLAR_SANDBOX: "https://sandbox.polar.sh/biveit-sandbox/portal",
+}
 
 # Their order statuses in ours (constants.SubscriptionStatus). A partly refunded order still paid for the purchase.
 _ORDER_STATUSES = {
@@ -61,6 +67,11 @@ async def create_checkout(provider: Provider, product_id: str, checkout_data: di
     """A checkout for one product. `checkout_data`: the rest of Polar's checkout fields (customer_email, metadata,
     success_url, trial_interval...). Returns Polar's checkout ({id, url, ...}). [I/O]"""
     return await _call_api(provider, "POST", "checkouts/", {"products": [product_id], **checkout_data})
+
+
+def get_portal_url(provider: Provider) -> str:
+    """[Pure] Where a customer manages what they bought in that Polar world -- the org's customer portal."""
+    return _PORTAL_URLS[provider]
 
 
 async def get_subscription(provider: Provider, subscription_ref: str) -> dict:

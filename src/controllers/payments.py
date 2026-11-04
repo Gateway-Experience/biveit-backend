@@ -4,11 +4,16 @@
 #   POST /payments/webhook/sandbox    the Polar sandbox
 # Signed (Standard Webhooks headers), no login. 401 on a bad signature; 200 once taken in (the project it's about is
 # then fulfilled -- services/launch/fulfilment); 500 makes Polar retry.
+# And for the signed-in user:
+#   GET  /payments/portal  (auth)  {url}: Polar's customer portal for them (live, or the sandbox in sandbox mode) --
+#                                  where they manage or cancel their subscriptions; the profile page links to it.
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
+from src.dto.users import User
 from src.modules import payments
 from src.services.launch import fulfilment
+from src.utils.auth import get_current_user
 from src.utils.logging import log_http_error
 
 router = APIRouter()
@@ -35,3 +40,8 @@ async def receive_webhook(request: Request) -> dict:
 @router.post("/payments/webhook/sandbox")
 async def receive_sandbox_webhook(request: Request) -> dict:
     return await _receive_webhook(payments.Provider.POLAR_SANDBOX, request)
+
+
+@router.get("/payments/portal")
+async def get_portal(user: User = Depends(get_current_user)) -> dict:
+    return {"url": payments.get_billing_portal_url(user)}

@@ -11,10 +11,13 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from fastapi.testclient import TestClient
 
+from src.app import create_app
 from src.config import settings
 from src.modules import payments
 from src.modules.payments.services import catalog, checkouts, polar, purchases, subscriptions
+from src.utils.auth import get_current_user
 
 _NOW = datetime(2026, 10, 28, 12, tzinfo=UTC)
 
@@ -594,3 +597,16 @@ def test_a_domain_needs_a_plan_ever_paid_not_a_running_one():
     ended_plan = _subscription(status="ended", ends_at=_NOW - timedelta(days=90))
     assert payments.to_access([ended_plan], _NOW)["has_had_plan"]
     assert not payments.to_access([_one_time(_NOW - timedelta(days=1))], _NOW)["has_had_plan"]
+
+
+@pytest.mark.parametrize(
+    ("meta", "url"),
+    [
+        ({"sandbox_mode": False}, "https://polar.sh/biveit/portal"),
+        ({"sandbox_mode": True}, "https://sandbox.polar.sh/biveit-sandbox/portal"),
+    ],
+)
+def test_the_billing_portal_is_the_one_of_the_world_the_user_pays_in(meta, url):
+    app = create_app()
+    app.dependency_overrides[get_current_user] = lambda: {"id": 1, "role": "ADMIN", "meta": meta}
+    assert TestClient(app).get("/api/payments/portal").json() == {"url": url}
