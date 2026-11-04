@@ -1,6 +1,8 @@
 # The domains module (modules/domains): what a Name.com call sends and how its failures surface, and how a
 # search reads what the user typed, and the admin test bench's gates (admins only, sandbox only).
 
+import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -188,7 +190,21 @@ def test_a_registrar_refusal_reaches_the_test_bench_with_its_status_and_message(
     )
 
 
-async def test_suggestions_leave_out_what_the_exact_search_already_shows(monkeypatch):
+@pytest.fixture
+def memory_cache(monkeypatch):
+    """cache.with_cache over a dict instead of Redis; returns the dict (key -> value)."""
+    stored = {}
+
+    async def fake_with_cache(key, expires_in, func):
+        if key not in stored:
+            stored[key] = await func()
+        return stored[key]
+
+    monkeypatch.setattr(domains.services.domains.cache, "with_cache", fake_with_cache)
+    return stored
+
+
+async def test_suggestions_leave_out_what_the_exact_search_already_shows(monkeypatch, memory_cache):
     async def fake_check_domains(query, sandbox):
         return [{"domain": "foo.com", "available": True}, {"domain": "foo.ai", "available": False}]
 
@@ -295,3 +311,78 @@ async def test_a_held_domain_is_managed_where_the_caller_says_it_lives(inet_sell
     monkeypatch.setattr(namecom, "get_domain", fake_get_domain)
     # Routing would send a .vn to inet, but this one was registered at namecom -- so that's where it's read.
     assert (await domains.get_domain("myshop.vn", registrar="namecom"))["at"] == "namecom"
+
+
+async def test_a_repeated_search_is_answered_from_the_cache(monkeypatch, memory_cache):
+    calls = {"check": 0}
+
+    async def fake_check_domains(query, sandbox):
+        calls["check"] += 1
+        return [{"domain": "foo.com", "available": False}]
+
+    async def fake_suggest_domains(query, sandbox):
+        return []
+
+    monkeypatch.setattr(domains.services.domains, "check_domains", fake_check_domains)
+    monkeypatch.setattr(domains.services.domains, "suggest_domains", fake_suggest_domains)
+    first = await domains.search_domains("Foo ")
+    assert await domains.search_domains("foo") == first
+    assert calls["check"] == 1
+    # The sandbox is a different world: asked separately.
+    await domains.search_domains("foo", sandbox=True)
+    assert calls["check"] == 2
+
+
+async def test_the_shortest_term_is_looked_up_once_per_tld(monkeypatch, memory_cache):
+    asked = {"domains": []}
+
+    async def fake_check_domains(query, sandbox):
+        return [{"domain": "foo.shop", "available": True}, {"domain": "foo.ai", "available": True}]
+
+    async def fake_suggest_domains(query, sandbox):
+        return [{"domain": "myfoo.shop", "available": True}, {"domain": "foohq.shop", "available": True}]
+
+    async def fake_get_min_years(domain_name, sandbox):
+        asked["domains"] = [*asked["domains"], domain_name]
+        return 2 if domain_name.endswith(".ai") else 1
+
+    monkeypatch.setattr(domains.services.domains, "check_domains", fake_check_domains)
+    monkeypatch.setattr(domains.services.domains, "suggest_domains", fake_suggest_domains)
+    monkeypatch.setattr(domains.services.domains, "get_min_years", fake_get_min_years)
+    result = await domains.search_domains("foo")
+    assert sorted(asked["domains"]) == ["foo.ai", "foo.shop"]
+    assert [offer["min_years"] for offer in result["exact"] + result["suggestions"]] == [1, 2, 1, 1]
+
+
+async def test_a_failed_term_lookup_leaves_out_only_that_tlds_offers(monkeypatch, memory_cache):
+    async def fake_check_domains(query, sandbox):
+        return [{"domain": "foo.com", "available": True}, {"domain": "foo.io", "available": False}]
+
+    async def fake_suggest_domains(query, sandbox):
+        return [{"domain": "foo.shop", "available": True}, {"domain": "foohq.com", "available": True}]
+
+    async def fake_get_min_years(domain_name, sandbox):
+        if domain_name.endswith(".shop"):
+            raise namecom.RegistrarError("namecom", 429, "Rate Limit Exceeded")
+        return 1
+
+    monkeypatch.setattr(domains.services.domains, "check_domains", fake_check_domains)
+    monkeypatch.setattr(domains.services.domains, "suggest_domains", fake_suggest_domains)
+    monkeypatch.setattr(domains.services.domains, "get_min_years", fake_get_min_years)
+    result = await domains.search_domains("foo")
+    assert [offer["domain"] for offer in result["exact"]] == ["foo.com", "foo.io"]
+    assert [offer["domain"] for offer in result["suggestions"]] == ["foohq.com"]
+
+
+async def test_namecom_calls_are_spaced_out_under_their_rate_limit(monkeypatch):
+    started = {"at": []}
+
+    async def fake_request(method, url, json=None, headers=None):
+        started["at"] = [*started["at"], time.monotonic()]
+        return 200, {"balance": 1.0}, {}
+
+    monkeypatch.setattr(namecom.http, "request", fake_request)
+    monkeypatch.setattr(namecom, "_MAX_REQUESTS_PER_SECOND", 50)
+    await asyncio.gather(*[namecom.get_balance(True) for _ in range(5)])
+    gaps = [later - earlier for earlier, later in zip(started["at"], started["at"][1:], strict=False)]
+    assert len(gaps) == 4 and all(gap >= 0.018 for gap in gaps)

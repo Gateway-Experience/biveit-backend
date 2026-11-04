@@ -21,8 +21,9 @@
 #                                                         get_domain_switch's shape. 404 if it isn't this project's
 # Errors: 404 PROJECT_NOT_FOUND (not the caller's); the launch's own refusals as {code} with their status (409
 # ALREADY_SUBSCRIBED, PRICE_CHANGED (+ price_per_year), DOMAIN_TAKEN..., see services/launch/checkouts.py); 502
-# REGISTRAR_ERROR when the registrar can't be asked.
+# REGISTRAR_ERROR when the registrar can't be asked; 503 REGISTRAR_BUSY when it's rate-limiting us (try again later).
 
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -36,6 +37,8 @@ from src.repositories import projects as projects_repo
 from src.services.launch import checkouts, offers, status, subdomains
 from src.utils.auth import get_current_user
 from src.utils.logging import log_http_error
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -75,6 +78,11 @@ async def search_domains(
     except domains.InvalidDomainQuery:
         return []
     except domains.RegistrarError as error:
+        # The registrar's rate limit: a passing busy spell, not a bug -- a warning, and a status the frontend
+        # knows not to retry right away.
+        if error.status == 429:
+            _log.warning("the registrar rate-limited a domain search", extra={"meta": {"url": str(request.url)}})
+            raise HTTPException(status_code=503, detail="REGISTRAR_BUSY") from error
         log_http_error(error, request)
         raise HTTPException(status_code=502, detail="REGISTRAR_ERROR") from error
     except Exception as error:

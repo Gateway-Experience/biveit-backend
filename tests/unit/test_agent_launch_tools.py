@@ -145,3 +145,17 @@ def test_the_domain_discount_says_whether_the_project_gets_it(client, monkeypatc
     assert body["discount"]["terms"] == "first_year_free"
     assert body["discount"]["discountable_prices_per_year"] == [10, 15, 20]
     assert body["discount"]["rule"]
+
+
+def test_a_rate_limited_registrar_is_a_503_busy(client, monkeypatch):
+    async def fake_search(query, sandbox):
+        raise domains.RegistrarError("namecom", 429, "Rate Limit Exceeded")
+
+    async def get_user(user_id):
+        return {"id": user_id, "role": "user", "meta": {}}
+
+    monkeypatch.setattr(domains, "search_domains", fake_search)
+    monkeypatch.setattr(users_repo, "get", get_user)
+
+    response = client.post("/api/agent/launch/domains", json={"query": "bikes"}, headers=_session())
+    assert response.status_code == 503 and response.json()["detail"] == "REGISTRAR_BUSY"

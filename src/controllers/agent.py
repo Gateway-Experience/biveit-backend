@@ -9,7 +9,8 @@
 #   POST /agent/launch/plans            {plans_on_sale (the catalog), this_site (what the project has bought)}
 #                                       (services/launch/status.get_plans_overview)
 #   POST /agent/launch/domains          {query}: domains to buy, with our price (the launch flow's domain search;
-#                                       an empty query gives ideas around the project's name). 502 REGISTRAR_ERROR
+#                                       an empty query gives ideas around the project's name). 502 REGISTRAR_ERROR,
+#                                       503 REGISTRAR_BUSY (rate-limited: try again in a minute)
 #   POST /agent/launch/domain-discount  {discount (how it works), this_site ({eligible}: would it get it now)}
 #                                       Read-only, all three: the agent can tell the user about plans and domains,
 #                                       never buy anything (that's the user's, in the Deploy tab).
@@ -20,6 +21,8 @@
 # a session token copied out of a container can't spend on our account from outside.
 # Starting the Building stage and signing it off aren't the agent's to call: the user approves them in the chat
 # (services/agent/stages).
+
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -38,6 +41,8 @@ from src.services import activity
 from src.services import agent as agent_service
 from src.services.launch import offers, status
 from src.utils.logging import log_http_error
+
+_log = logging.getLogger(__name__)
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -126,6 +131,11 @@ async def post_launch_domains(
     except domains.InvalidDomainQuery:
         return {"domains": []}
     except domains.RegistrarError as error:
+        # The registrar's rate limit: a passing busy spell, not a bug -- a warning, and a status the frontend
+        # knows not to retry right away.
+        if error.status == 429:
+            _log.warning("the registrar rate-limited a domain search", extra={"meta": {"url": str(request.url)}})
+            raise HTTPException(status_code=503, detail="REGISTRAR_BUSY") from error
         log_http_error(error, request)
         raise HTTPException(status_code=502, detail="REGISTRAR_ERROR") from error
     except Exception as error:

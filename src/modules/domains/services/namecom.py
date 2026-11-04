@@ -29,11 +29,14 @@ import pydash as _
 
 from src.config import settings
 from src.modules.domains.services.registrars import LiveSpendRefused, RegistrarError
-from src.utils import http
+from src.utils import http, rate_limit
 
 _REGISTRAR = "namecom"
 # Their two worlds, by `sandbox`: live (real domains, real money) and the sandbox (OTE).
 _API_URLS = {False: "https://api.name.com", True: "https://api.dev.name.com"}
+# How many calls a second we let start, per account. Their cap is 20; half of it leaves room for bursts landing
+# on the same second and for the sandbox's limits, which may be tighter than the documented ones.
+_MAX_REQUESTS_PER_SECOND = 10
 
 
 async def check_availability(sandbox: bool, domain_names: list[str]) -> list[dict]:
@@ -236,6 +239,7 @@ async def _call_api(
     if not account["username"] or not account["token"]:
         raise RegistrarError(_REGISTRAR, 401, f"no Name.com {'sandbox' if sandbox else 'live'} credentials configured")
     credentials = base64.b64encode(f"{account['username']}:{account['token']}".encode()).decode()
+    await rate_limit.wait_for_turn(f"{_REGISTRAR}:{'sandbox' if sandbox else 'live'}", _MAX_REQUESTS_PER_SECOND)
     status, response, _headers = await http.request(
         method,
         f"{_API_URLS[sandbox]}/core/v1/{path}",

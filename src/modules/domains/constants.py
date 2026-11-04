@@ -9,6 +9,11 @@ SEARCH_TLDS = ["com", "net", "org", "io", "co", "dev", "app", "ai", "xyz"]
 # these about never; a week keeps cold searches rare without pinning a wrong answer for long.
 MIN_TERM_CACHE_SECONDS = 7 * 24 * 3600
 
+# How long a whole search's answer (availability + prices + ideas) is reused for the same query. Repeats, retries
+# and the agent asking again then cost no registrar calls -- the registrar caps how often we may ask. Safe to be a
+# bit stale: buying re-checks the chosen domain live first (launch's quote_domain).
+SEARCH_CACHE_SECONDS = 10 * 60
+
 # Which registrar sells which TLD: a TLD missing here goes to DEFAULT_REGISTRAR. A key can be a full TLD ("com.vn")
 # or its last label ("vn", covering every *.vn). Only decides where NEW registrations go -- a domain we hold is
 # managed at the registrar that registered it. E.g. "vn": "inet" once there's an iNET client.

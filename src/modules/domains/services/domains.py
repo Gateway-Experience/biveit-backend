@@ -14,10 +14,17 @@ from types import ModuleType, SimpleNamespace
 
 import pydash as _
 
-from src.modules.domains.constants import DEFAULT_REGISTRAR, MIN_TERM_CACHE_SECONDS, REGISTRAR_BY_TLD, SEARCH_TLDS
+from src.modules.domains.constants import (
+    DEFAULT_REGISTRAR,
+    MIN_TERM_CACHE_SECONDS,
+    REGISTRAR_BY_TLD,
+    SEARCH_CACHE_SECONDS,
+    SEARCH_TLDS,
+)
 from src.modules.domains.services import namecom
 from src.modules.domains.services.registrars import RegistrarError
 from src.utils import cache
+from src.utils.logging import log_error
 
 # What every registrar client offers (registrars.py's contract) -- each takes the world (`sandbox`) first.
 _CLIENT_CALLS = [
@@ -58,24 +65,58 @@ async def search_domains(query: str, sandbox: bool = False) -> dict:
     """What a domain search shows: {"exact": the name as typed across our TLDs (check_domains), "suggestions":
     buyable ideas around it (suggest_domains)}. The registrar's ideas often include the exact domains again, so
     those are dropped from suggestions. Available offers also get `min_years`, the term their price is for
-    (None on taken ones). [I/O]"""
+    (None on taken ones). The answer is reused for the same query for SEARCH_CACHE_SECONDS. [I/O]"""
+    return await cache.with_cache(
+        f"domains:search:{'sandbox' if sandbox else 'live'}:{query.strip().lower()}",
+        SEARCH_CACHE_SECONDS,
+        lambda: _search_registrars(query, sandbox),
+    )
+
+
+async def _search_registrars(query: str, sandbox: bool) -> dict:
+    """search_domains without the cache. The shortest term is looked up once per TLD among the available offers
+    (a TLD is often on several of them), and an offer whose TLD lookup fails is left out rather than failing the
+    whole search -- a rate-limited lookup would otherwise sink every search until the limit lifts, since nothing
+    gets cached in between. [I/O]"""
     exact, suggestions = await asyncio.gather(
         check_domains(query, sandbox=sandbox), suggest_domains(query, sandbox=sandbox)
     )
     exact_domains = {offer["domain"] for offer in exact}
     new_suggestions = [offer for offer in suggestions if offer["domain"] not in exact_domains]
-    available_domains = [offer["domain"] for offer in exact + new_suggestions if offer["available"]]
-    min_years_by_domain = dict(
+    domain_per_tld = _.uniq_by([offer["domain"] for offer in exact + new_suggestions if offer["available"]], _get_tld)
+    min_years_by_tld = dict(
         zip(
-            available_domains,
-            await asyncio.gather(*[get_min_years(domain, sandbox) for domain in available_domains]),
+            map(_get_tld, domain_per_tld),
+            await asyncio.gather(*[_get_min_years_or_none(domain, sandbox) for domain in domain_per_tld]),
             strict=True,
         )
     )
-    return {
-        "exact": [{**offer, "min_years": min_years_by_domain.get(offer["domain"])} for offer in exact],
-        "suggestions": [{**offer, "min_years": min_years_by_domain.get(offer["domain"])} for offer in new_suggestions],
-    }
+
+    def add_min_years(offers: list[dict]) -> list[dict]:
+        offers_with_terms = [
+            {**offer, "min_years": min_years_by_tld.get(_get_tld(offer["domain"])) if offer["available"] else None}
+            for offer in offers
+        ]
+        # An available offer whose term couldn't be found is left out.
+        return [offer for offer in offers_with_terms if not offer["available"] or offer["min_years"] is not None]
+
+    return {"exact": add_min_years(exact), "suggestions": add_min_years(new_suggestions)}
+
+
+async def _get_min_years_or_none(domain_name: str, sandbox: bool) -> int | None:
+    """get_min_years, or None when the registrar fails it (logged; nothing is cached, so the next search asks
+    again). [I/O]"""
+    try:
+        return await get_min_years(domain_name, sandbox)
+    except RegistrarError as error:
+        log_error(
+            error, "a TLD's shortest term couldn't be looked up; its offers are left out", {"domain": domain_name}
+        )
+        return None
+
+
+def _get_tld(domain_name: str) -> str:
+    return domain_name.partition(".")[2]
 
 
 async def get_min_years(domain_name: str, sandbox: bool = False) -> int:
