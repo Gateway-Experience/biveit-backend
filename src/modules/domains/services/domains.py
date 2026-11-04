@@ -74,16 +74,43 @@ async def search_domains(query: str, sandbox: bool = False) -> dict:
 
 
 async def _search_registrars(query: str, sandbox: bool) -> dict:
-    """search_domains without the cache. The shortest term is looked up once per TLD among the available offers
-    (a TLD is often on several of them), and an offer whose TLD lookup fails is left out rather than failing the
-    whole search -- a rate-limited lookup would otherwise sink every search until the limit lifts, since nothing
-    gets cached in between. [I/O]"""
+    """search_domains without the cache. [I/O]"""
     exact, suggestions = await asyncio.gather(
         check_domains(query, sandbox=sandbox), suggest_domains(query, sandbox=sandbox)
     )
     exact_domains = {offer["domain"] for offer in exact}
     new_suggestions = [offer for offer in suggestions if offer["domain"] not in exact_domains]
-    domain_per_tld = _.uniq_by([offer["domain"] for offer in exact + new_suggestions if offer["available"]], _get_tld)
+    with_terms = await _add_min_years(exact + new_suggestions, sandbox)
+    return {
+        "exact": [offer for offer in with_terms if offer["domain"] in exact_domains],
+        "suggestions": [offer for offer in with_terms if offer["domain"] not in exact_domains],
+    }
+
+
+async def check_domain_names(names: list[str], sandbox: bool = False) -> list[dict]:
+    """Many names at once, as offers with `min_years` like search_domains', in the order asked: a full domain
+    ("hanoibikes.io") as it is, a bare name ("hanoibikes") across SEARCH_TLDS. A name with nothing usable in it is
+    skipped. For checking name ideas in bulk -- one availability call (per 50 domains) instead of a search per
+    idea. [I/O]"""
+    domain_names = _.uniq(_.flatten([_to_domain_names(name) for name in names]))
+    return await _add_min_years(await _check_availability(domain_names, sandbox), sandbox)
+
+
+def _to_domain_names(name: str) -> list[str]:
+    """[Pure] The domains one name stands for (see check_domain_names)."""
+    try:
+        base, tld = _split_domain(name)
+    except InvalidDomainQuery:
+        return []
+    return [f"{base}.{tld}"] if tld else [f"{base}.{search_tld}" for search_tld in SEARCH_TLDS]
+
+
+async def _add_min_years(offers: list[dict], sandbox: bool) -> list[dict]:
+    """The offers with `min_years` (None on taken ones). It's looked up once per TLD among the available offers (a TLD
+    is often on several of them), and an available offer whose TLD lookup fails is left out rather than failing the
+    whole answer -- a rate-limited lookup would otherwise sink every search until the limit lifts, since nothing gets
+    cached in between. [I/O]"""
+    domain_per_tld = _.uniq_by([offer["domain"] for offer in offers if offer["available"]], _get_tld)
     min_years_by_tld = dict(
         zip(
             map(_get_tld, domain_per_tld),
@@ -91,16 +118,11 @@ async def _search_registrars(query: str, sandbox: bool) -> dict:
             strict=True,
         )
     )
-
-    def add_min_years(offers: list[dict]) -> list[dict]:
-        offers_with_terms = [
-            {**offer, "min_years": min_years_by_tld.get(_get_tld(offer["domain"])) if offer["available"] else None}
-            for offer in offers
-        ]
-        # An available offer whose term couldn't be found is left out.
-        return [offer for offer in offers_with_terms if not offer["available"] or offer["min_years"] is not None]
-
-    return {"exact": add_min_years(exact), "suggestions": add_min_years(new_suggestions)}
+    offers_with_terms = [
+        {**offer, "min_years": min_years_by_tld.get(_get_tld(offer["domain"])) if offer["available"] else None}
+        for offer in offers
+    ]
+    return [offer for offer in offers_with_terms if not offer["available"] or offer["min_years"] is not None]
 
 
 async def _get_min_years_or_none(domain_name: str, sandbox: bool) -> int | None:
@@ -135,8 +157,11 @@ async def check_domains(query: str, tlds: list[str] = SEARCH_TLDS, sandbox: bool
     """The exact name the user typed, across `tlds` in that order, as offers (_to_offer). A full domain ("Foo.io",
     "https://www.foo.io/about") puts its own TLD first. [I/O]"""
     name, typed_tld = _split_domain(query)
-    domain_names = [f"{name}.{tld}" for tld in _.uniq(_.compact([typed_tld, *tlds]))]
-    # Each registrar checks the TLDs it sells; the answers are put back in the order asked.
+    return await _check_availability([f"{name}.{tld}" for tld in _.uniq(_.compact([typed_tld, *tlds]))], sandbox)
+
+
+async def _check_availability(domain_names: list[str], sandbox: bool) -> list[dict]:
+    """Exact domains as offers (_to_offer), in the order given. Each registrar checks the TLDs it sells. [I/O]"""
     names_by_registrar = _.group_by(domain_names, lambda domain_name: get_registrar(domain_name, sandbox))
     results = await asyncio.gather(
         *[_REGISTRARS[registrar].check_availability(names) for registrar, names in names_by_registrar.items()]

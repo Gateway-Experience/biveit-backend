@@ -386,3 +386,37 @@ async def test_namecom_calls_are_spaced_out_under_their_rate_limit(monkeypatch):
     await asyncio.gather(*[namecom.get_balance(True) for _ in range(5)])
     gaps = [later - earlier for earlier, later in zip(started["at"], started["at"][1:], strict=False)]
     assert len(gaps) == 4 and all(gap >= 0.018 for gap in gaps)
+
+
+async def test_names_are_checked_in_one_go_full_domains_as_they_are_bare_names_across_our_tlds(monkeypatch):
+    checked = {"calls": []}
+
+    async def fake_check_availability(sandbox, domain_names):
+        checked["calls"] = [*checked["calls"], domain_names]
+        return [{"domainName": name, "purchasable": True, "purchaseType": "registration"} for name in domain_names]
+
+    async def fake_get_min_years(domain_name, sandbox):
+        return 1
+
+    monkeypatch.setattr(namecom, "check_availability", fake_check_availability)
+    monkeypatch.setattr(domains.services.domains, "get_min_years", fake_get_min_years)
+    offers = await domains.check_domain_names(["HanoiBikes.io", "hanoiride", "!!!", "hanoibikes.io"])
+    assert len(checked["calls"]) == 1
+    assert [offer["domain"] for offer in offers] == [
+        "hanoibikes.io",
+        *[f"hanoiride.{tld}" for tld in domains.services.domains.SEARCH_TLDS],
+    ]
+    assert all(offer["min_years"] == 1 for offer in offers)
+
+
+async def test_an_availability_check_over_50_domains_goes_in_several_calls(monkeypatch):
+    sent = {"sizes": []}
+
+    async def fake_request(method, url, json=None, headers=None):
+        sent["sizes"] = [*sent["sizes"], len(json["domainNames"])]
+        return 200, {"results": [{"domainName": name} for name in json["domainNames"]]}, {}
+
+    monkeypatch.setattr(namecom.http, "request", fake_request)
+    monkeypatch.setattr(namecom, "_MAX_REQUESTS_PER_SECOND", 1000)
+    results = await namecom.check_availability(True, [f"name{index}.com" for index in range(120)])
+    assert sorted(sent["sizes"]) == [20, 50, 50] and len(results) == 120

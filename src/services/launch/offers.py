@@ -20,6 +20,13 @@ async def search_offers(project: Project, query: str, sandbox: bool) -> list[dic
     return pydash.sort_by(offers, lambda offer: not offer["sold"])
 
 
+async def check_offers(names: list[str], sandbox: bool) -> list[dict]:
+    """Many names at once (domains.check_domain_names: a full domain as is, a bare name across our TLDs), in the
+    same shape as search_offers' entries and in the order asked -- what the agent uses to check its own name ideas
+    in one go. [I/O]"""
+    return [_to_offer(quote) for quote in await domains.check_domain_names(names, sandbox)]
+
+
 async def quote_domain(domain_name: str, sandbox: bool) -> dict:
     """One exact domain, priced live (the same shape as search_offers' entries), at the registrar or its sandbox.
     [I/O]"""

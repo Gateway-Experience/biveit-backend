@@ -159,3 +159,27 @@ def test_a_rate_limited_registrar_is_a_503_busy(client, monkeypatch):
 
     response = client.post("/api/agent/launch/domains", json={"query": "bikes"}, headers=_session())
     assert response.status_code == 503 and response.json()["detail"] == "REGISTRAR_BUSY"
+
+
+def test_the_agent_checks_a_list_of_names_in_one_go(client, monkeypatch):
+    checked = []
+
+    async def fake_check_domain_names(names, sandbox):
+        checked.append(names)
+        return [{"domain": "bikes.io", "available": True, "price_usd": 4, "renewal_price_usd": 9, "min_years": 1}]
+
+    async def fake_search(query, sandbox):
+        raise AssertionError("names given: no search")
+
+    async def get_user(user_id):
+        return {"id": user_id, "role": "user", "meta": {}}
+
+    monkeypatch.setattr(domains, "check_domain_names", fake_check_domain_names)
+    monkeypatch.setattr(domains, "search_domains", fake_search)
+    monkeypatch.setattr(users_repo, "get", get_user)
+
+    response = client.post("/api/agent/launch/domains", json={"names": ["bikes.io", "bikes"]}, headers=_session())
+    assert response.status_code == 200 and checked == [["bikes.io", "bikes"]]
+    assert response.json()["domains"][0]["domain"] == "bikes.io"
+    too_many = client.post("/api/agent/launch/domains", json={"names": ["x"] * 21}, headers=_session())
+    assert too_many.status_code == 422

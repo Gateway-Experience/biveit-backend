@@ -9,6 +9,7 @@
 from src.modules.domains.services.domains import (
     DomainUnavailable,
     InvalidDomainQuery,
+    check_domain_names,
     check_domains,
     create_record,
     delete_record,
@@ -39,6 +40,7 @@ __all__ = [
     "InvalidDomainQuery",
     "LiveSpendRefused",
     "RegistrarError",
+    "check_domain_names",
     "check_domains",
     "create_record",
     "delete_record",

@@ -8,8 +8,9 @@
 #   POST /agent/dev-servers  {action}: status / start / restart / stop the project's dev servers
 #   POST /agent/launch/plans            {plans_on_sale (the catalog), this_site (what the project has bought)}
 #                                       (services/launch/status.get_plans_overview)
-#   POST /agent/launch/domains          {query}: domains to buy, with our price (the launch flow's domain search;
-#                                       an empty query gives ideas around the project's name). 502 REGISTRAR_ERROR,
+#   POST /agent/launch/domains          {query} | {names}: domains to buy, with our price -- query: the launch flow's
+#                                       domain search (empty: ideas around the project's name); names: up to 20 names
+#                                       checked in one go (full domains, or bare names across our TLDs). 502 REGISTRAR_ERROR,
 #                                       503 REGISTRAR_BUSY (rate-limited: try again in a minute)
 #   POST /agent/launch/domain-discount  {discount (how it works), this_site ({eligible}: would it get it now)}
 #                                       Read-only, all three: the agent can tell the user about plans and domains,
@@ -125,7 +126,10 @@ async def post_launch_domains(
         project = await agent_service.get_project_from_conv_id(conversation_id)
         # The owner's sandbox mode decides which registrar is asked, the same as their own domain step.
         owner = await users_repo.get(project["user_id"])
-        return {"domains": await offers.search_offers(project, body.query, payments.is_sandbox(owner or {}))}
+        sandbox = payments.is_sandbox(owner or {})
+        if body.names:
+            return {"domains": await offers.check_offers(body.names, sandbox)}
+        return {"domains": await offers.search_offers(project, body.query, sandbox)}
     except agent_service.ConversationNotFound as error:
         raise HTTPException(status_code=404, detail="CONVERSATION_NOT_FOUND") from error
     except domains.InvalidDomainQuery:

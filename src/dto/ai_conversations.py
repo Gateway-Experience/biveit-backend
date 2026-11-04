@@ -64,11 +64,14 @@ class PostAgentSignalRequest(BaseModel):
 
 
 class FindDomainsRequest(BaseModel):
-    """POST /agent/launch/domains body: what to search for (empty: ideas around the project's name)."""
+    """POST /agent/launch/domains body: either `names` -- names to check, each a full domain or a bare name (checked
+    across our TLDs), all in one go -- or else `query`: a search, with the registrar's ideas (empty: ideas around the
+    project's name). `names` wins when both are given."""
 
     model_config = {"extra": "forbid"}
 
     query: str = Field("", max_length=200)
+    names: list[Annotated[str, Field(max_length=253)]] = Field(default_factory=list, max_length=20)
 
 
 class PostDevServersRequest(BaseModel):

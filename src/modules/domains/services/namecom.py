@@ -21,6 +21,7 @@
 #   dev box holding live credentials can read but never buy.
 # References: registrars.py (the contract), src/config (namecom_*).
 
+import asyncio
 import base64
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -37,15 +38,22 @@ _API_URLS = {False: "https://api.name.com", True: "https://api.dev.name.com"}
 # How many calls a second we let start, per account. Their cap is 20; half of it leaves room for bursts landing
 # on the same second and for the sandbox's limits, which may be tighter than the documented ones.
 _MAX_REQUESTS_PER_SECOND = 10
+# The most domains one availability check takes.
+_CHECK_MAX_DOMAINS = 50
 
 
 async def check_availability(sandbox: bool, domain_names: list[str]) -> list[dict]:
-    """Whether each exact domain (max 50) can be bought, and for how much: [{"domainName": "foo.io", "purchasable":
-    True, "purchasePrice": 53.99, "renewalPrice": 79.99, "purchaseType": "registration", "premium": ...}, ...].
-    Taken domains come back with purchasable False and no prices. purchasePrice is the total for the TLD's
-    minimum term (2 years for .ai). [I/O]"""
-    body = await _call_api(sandbox, "POST", "domains:checkAvailability", {"domainNames": domain_names})
-    return _.get(body, "results", [])
+    """Whether each exact domain can be bought, and for how much: [{"domainName": "foo.io", "purchasable": True,
+    "purchasePrice": 53.99, "renewalPrice": 79.99, "purchaseType": "registration", "premium": ...}, ...]. Taken
+    domains come back with purchasable False and no prices. purchasePrice is the total for the TLD's minimum term
+    (2 years for .ai). They take at most _CHECK_MAX_DOMAINS a call, so more go in several. [I/O]"""
+    bodies = await asyncio.gather(
+        *[
+            _call_api(sandbox, "POST", "domains:checkAvailability", {"domainNames": chunk})
+            for chunk in _.chunk(domain_names, _CHECK_MAX_DOMAINS)
+        ]
+    )
+    return _.flatten([_.get(body, "results", []) for body in bodies])
 
 
 async def search(
