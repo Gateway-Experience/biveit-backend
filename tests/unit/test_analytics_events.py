@@ -157,14 +157,29 @@ async def test_a_payment_event_has_the_same_uuid_however_often_its_sent(monkeypa
 
 
 def test_an_email_signup_is_sent_with_the_browsers_session(monkeypatch, captured):
-    async def register(username, password, user_data):
+    async def register(username, password, user_data, signup_source=None):
+        assert signup_source == {
+            "utm_source": "facebook",
+            "utm_medium": None,
+            "utm_campaign": None,
+            "utm_term": None,
+            "utm_content": None,
+            "referring_domain": "l.facebook.com",
+            "gclid": None,
+            "fbclid": "fb-1",
+        }
         return {"user": {"id": 3, "username": username}, "token": "tok"}
 
     monkeypatch.setattr(user_service, "register", register)
     client = TestClient(create_app())
     response = client.post(
         "/api/user/register",
-        json={"username": "a@b.c", "password": "long-enough-1", "first_name": "A"},
+        json={
+            "username": "a@b.c",
+            "password": "long-enough-1",
+            "first_name": "A",
+            "signup_source": {"utm_source": "facebook", "referring_domain": "l.facebook.com", "fbclid": "fb-1"},
+        },
         headers={"X-POSTHOG-SESSION-ID": "s-1"},
     )
     assert response.status_code == 200
@@ -176,9 +191,32 @@ def test_an_email_signup_is_sent_with_the_browsers_session(monkeypatch, captured
                 "properties": {
                     "method": "email",
                     "was_guest": False,
+                    "utm_source": "facebook",
+                    "referring_domain": "l.facebook.com",
+                    "fbclid": "fb-1",
                     "$session_id": "s-1",
-                    "$set_once": {"signup_method": "email"},
+                    "$set_once": {
+                        "signup_method": "email",
+                        "first_utm_source": "facebook",
+                        "first_referring_domain": "l.facebook.com",
+                        "first_fbclid": "fb-1",
+                    },
                 },
             },
         )
     ]
+
+
+# --- the source on the account ---
+
+
+def test_the_source_is_kept_in_meta_next_to_the_profiles_extras():
+    columns = user_service.users.to_signup_columns(
+        {"first_name": "A", "plan_hint": "x"}, {"utm_source": "facebook", "gclid": None}
+    )
+    assert columns["first_name"] == "A"
+    assert columns["meta"] == {"plan_hint": "x", "signup_source": {"utm_source": "facebook"}}
+
+
+def test_no_source_writes_no_source():
+    assert "meta" not in user_service.users.to_signup_columns({"first_name": "A"}, {"utm_source": None})

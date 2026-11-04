@@ -185,13 +185,18 @@ def _with_names(body: RegisterRequest | PromoteRequest) -> dict:
 async def register(body: RegisterRequest, request: Request, response: Response) -> dict:
     """Sign up with a username and password; returns the user and a token."""
     try:
-        result = await user_service.register(body.username, body.password, _with_names(body))
+        signup_source = body.signup_source.model_dump() if body.signup_source else None
+        result = await user_service.register(body.username, body.password, _with_names(body), signup_source)
     except user_service.DuplicateUser as error:
         raise HTTPException(status_code=400, detail="DUPLICATE_USERNAME") from error
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
-    _capture_signup(result["user"], request, was_guest=False)
+    user_service.capture_signup(
+        result["user"],
+        "email",
+        {"signup_source": signup_source, "session_id": analytics.read_session_id(request.headers)},
+    )
     set_access_cookie(response, result["token"])
     return result
 
@@ -233,7 +238,8 @@ async def promote(
     """Promote the CALLING guest to a credentialed user, keeping their id and everything attached to it.
     Which guest comes from the session, never the body -- ids are guessable."""
     try:
-        result = await user_service.promote_guest(user, body.username, body.password, _with_names(body))
+        signup_source = body.signup_source.model_dump() if body.signup_source else None
+        result = await user_service.promote_guest(user, body.username, body.password, _with_names(body), signup_source)
     except user_service.NotAGuest as error:
         raise HTTPException(status_code=409, detail="NOT_A_GUEST") from error
     except user_service.UserNotFound as error:
@@ -243,20 +249,13 @@ async def promote(
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
-    _capture_signup(result["user"], request, was_guest=True)
+    user_service.capture_signup(
+        result["user"],
+        "email",
+        {"was_guest": True, "signup_source": signup_source, "session_id": analytics.read_session_id(request.headers)},
+    )
     set_access_cookie(response, result["token"])
     return result
-
-
-def _capture_signup(user: User, request: Request, was_guest: bool) -> None:
-    """Analytics for an email signup -- a new account, or a guest promoted in place (same id). The Google one is
-    sent from controllers/auth."""
-    analytics.capture(
-        user["id"],
-        AnalyticsEvent.USER_SIGNED_UP,
-        {"method": "email", "was_guest": was_guest},
-        {"session_id": analytics.read_session_id(request.headers), "set_once": {"signup_method": "email"}},
-    )
 
 
 @router.post("/user/forgot-password", status_code=204)

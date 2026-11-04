@@ -8,7 +8,13 @@ from typing import Annotated, Any, TypedDict
 
 from pydantic import BaseModel, Field, StringConstraints, field_validator
 
-from src.constants import JOURNEY_STEP_MAX_LENGTH, MIN_PASSWORD_LENGTH, USER_NAME_MAX_LENGTH, UserLanguage
+from src.constants import (
+    JOURNEY_STEP_MAX_LENGTH,
+    MIN_PASSWORD_LENGTH,
+    SIGNUP_SOURCE_VALUE_MAX_LENGTH,
+    USER_NAME_MAX_LENGTH,
+    UserLanguage,
+)
 
 
 class User(TypedDict):
@@ -51,6 +57,27 @@ _FirstName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=
 _LastName = Annotated[str, StringConstraints(strip_whitespace=True, max_length=USER_NAME_MAX_LENGTH)]
 
 
+_SignupSourceValue = Annotated[str, StringConstraints(strip_whitespace=True, max_length=SIGNUP_SOURCE_VALUE_MAX_LENGTH)]
+
+
+class SignupSource(BaseModel):
+    """Where a new account's visitor came from, as the FE read it when they arrived (biveit-frontend
+    services/arrivalSource): an ad's utm_* tags, the site that linked to us, and an ad platform's click id (gclid:
+    Google Ads, fbclid: Facebook). Every field is optional -- a typed-in visit has none. Unknown keys are dropped.
+    Kept on the user as meta.signup_source, and sent with the user_signed_up event."""
+
+    model_config = {"extra": "ignore"}
+
+    utm_source: _SignupSourceValue | None = None
+    utm_medium: _SignupSourceValue | None = None
+    utm_campaign: _SignupSourceValue | None = None
+    utm_term: _SignupSourceValue | None = None
+    utm_content: _SignupSourceValue | None = None
+    referring_domain: _SignupSourceValue | None = None
+    gclid: _SignupSourceValue | None = None
+    fbclid: _SignupSourceValue | None = None
+
+
 class RegisterRequest(BaseModel):
     """POST /user/register body. `user_data` is the free-form profile blob the FE sends alongside the
     credentials. Only the profile columns (services/users.to_profile) are written as such; anything else
@@ -61,6 +88,7 @@ class RegisterRequest(BaseModel):
     first_name: _FirstName
     last_name: _LastName = ""
     user_data: dict[str, Any] = {}
+    signup_source: SignupSource | None = None
 
 
 class AuthenticateRequest(BaseModel):
@@ -91,6 +119,7 @@ class PromoteRequest(BaseModel):
     first_name: _FirstName
     last_name: _LastName = ""
     user_data: dict[str, Any] = {}
+    signup_source: SignupSource | None = None
 
 
 class ChangePasswordRequest(BaseModel):

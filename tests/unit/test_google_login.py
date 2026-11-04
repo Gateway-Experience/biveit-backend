@@ -40,9 +40,10 @@ def google(monkeypatch, configure):
     async def fake_authorize_access_token(request):
         return {"userinfo": _CLAIMS}
 
-    async def fake_signin_google(claims, guest_id=None):
+    async def fake_signin_google(claims, guest_id=None, signup_source=None):
         calls["claims"] = claims
         calls["guest_id"] = guest_id
+        calls["signup_source"] = signup_source
         return {"user": {"id": 1}, "token": "minted-token", "is_new": True}
 
     monkeypatch.setattr(oauth.google, "authorize_redirect", fake_authorize_redirect)
@@ -113,6 +114,21 @@ def test_guest_id_comes_from_the_session(google):
     assert google["guest_id"] == 5
 
 
+def test_the_visitors_source_rides_the_session_to_the_signin(google):
+    client = _client()
+    client.get("/api/auth/google/login", params={"utm_source": "facebook", "gclid": "g-1", "unknown": "x"})
+    client.get("/api/auth/google/callback", params={"code": "c", "state": "s"})
+    assert google["signup_source"] == {"utm_source": "facebook", "gclid": "g-1"}
+
+
+def test_a_malformed_source_is_dropped_not_a_failed_login(google):
+    client = _client()
+    response = client.get("/api/auth/google/login", params={"utm_source": "x" * 10_000})
+    assert response.status_code == 302 and "accounts.google.com" in response.headers["location"]
+    client.get("/api/auth/google/callback", params={"code": "c", "state": "s"})
+    assert google["signup_source"] == {}
+
+
 def test_guest_id_query_param_is_ignored(google):
     client = _client()
     client.get("/api/auth/google/login", params={"guest_id": 99})
@@ -150,7 +166,7 @@ def test_user_cancelling_on_google(configure):
 
 
 def test_unverified_email(monkeypatch, google):
-    async def raise_unverified(claims, guest_id=None):
+    async def raise_unverified(claims, guest_id=None, signup_source=None):
         raise user_service.GoogleEmailNotVerified("nope")
 
     monkeypatch.setattr(user_service, "signin_google", raise_unverified)
@@ -162,7 +178,7 @@ def test_unverified_email(monkeypatch, google):
 
 
 def test_registered_email(monkeypatch, google):
-    async def raise_taken(claims, guest_id=None):
+    async def raise_taken(claims, guest_id=None, signup_source=None):
         raise user_service.GoogleEmailTaken("taken")
 
     monkeypatch.setattr(user_service, "signin_google", raise_taken)
@@ -174,7 +190,7 @@ def test_registered_email(monkeypatch, google):
 
 
 def test_unexpected_failure_still_redirects(monkeypatch, google):
-    async def explode(claims, guest_id=None):
+    async def explode(claims, guest_id=None, signup_source=None):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(user_service, "signin_google", explode)

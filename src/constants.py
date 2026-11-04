@@ -347,6 +347,10 @@ class AnalyticsEvent(StrEnum):
     JOURNEY_STEP = "journey_step"  # {journey, step} -- a copy of each user_journey_steps row
 
 
+# A signup's source (dto/users.SignupSource): the longest value kept for any one of its fields. Click ids run to a
+# couple of hundred characters; anything longer isn't one.
+SIGNUP_SOURCE_VALUE_MAX_LENGTH = 500
+
 # site_domains.kind (modules/deployments SiteDomainKind) in the words the FE's launch events use for a domain choice,
 # so the same breakdown works across both sides' events.
 ANALYTICS_DOMAIN_KINDS = {"purchased": "buy", "external": "own", "subdomain": "subdomain", "admin": "admin"}

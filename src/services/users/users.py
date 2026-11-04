@@ -16,10 +16,11 @@ import bcrypt
 import pydash
 
 from src.config import settings
-from src.constants import UserPlatform, UserType
+from src.constants import AnalyticsEvent, UserPlatform, UserType
 from src.dto.users import User
 from src.repositories import users as users_repo
 from src.repositories.users import DuplicateUser
+from src.utils import analytics
 from src.utils.auth import mint_access_token
 
 __all__ = [
@@ -75,6 +76,39 @@ def to_profile(user_data: dict[str, Any] | None) -> dict[str, Any]:
     return {**pydash.pick(user_data or {}, *_CLIENT_PROFILE_FIELDS), **({"meta": extras} if extras else {})}
 
 
+def to_signup_columns(user_data: dict[str, Any] | None, signup_source: dict[str, Any] | None) -> dict[str, Any]:
+    """[Pure] What a new account is written with from the FE: its profile (to_profile), plus where the visitor came
+    from (dto/users.SignupSource) as meta.signup_source -- written once, here, when the account is made, and never
+    touched after. Empty fields are left out; no source at all writes none."""
+    profile = to_profile(user_data)
+    source = pydash.omit_by(signup_source or {}, pydash.is_none)
+    if not source:
+        return profile
+    return {**profile, "meta": {**profile.get("meta", {}), "signup_source": source}}
+
+
+def capture_signup(user: User, method: str, options: dict[str, Any] | None = None) -> None:
+    """Analytics: a new account (or a guest just promoted -- same id). The source rides on the event as properties,
+    and is set once on the person (first_*) in the same go, so a chart of signups by source never depends on the
+    browser's own events arriving first. method: email | google.
+
+    options:
+      - was_guest: a guest promoted in place, rather than a brand-new row.
+      - signup_source: dto/users.SignupSource as a dict.
+      - session_id: the browser session the request came from (utils/analytics.read_session_id)."""
+    opts = options or {}
+    source = pydash.omit_by(opts.get("signup_source") or {}, pydash.is_none)
+    analytics.capture(
+        user["id"],
+        AnalyticsEvent.USER_SIGNED_UP,
+        {"method": method, "was_guest": bool(opts.get("was_guest")), **source},
+        {
+            "session_id": opts.get("session_id"),
+            "set_once": {"signup_method": method, **{f"first_{key}": value for key, value in source.items()}},
+        },
+    )
+
+
 async def hash_password(password: str) -> str:
     hashed = await asyncio.to_thread(bcrypt.hashpw, password.encode(), bcrypt.gensalt())
     return hashed.decode()
@@ -91,11 +125,13 @@ def _to_web_identity(username: str) -> dict[str, Any]:
     return {"username": username, "platform": UserPlatform.WEB, "platform_id": username}
 
 
-async def register(username: str, password: str, user_data: dict[str, Any] | None = None) -> dict:
+async def register(
+    username: str, password: str, user_data: dict[str, Any] | None = None, signup_source: dict[str, Any] | None = None
+) -> dict:
     """Create a credentialed USER and sign them in. Raises DuplicateUser if the username is taken."""
     user = await users_repo.insert(
         {
-            **to_profile(user_data),
+            **to_signup_columns(user_data, signup_source),
             **_to_web_identity(username),
             "password_hash": await hash_password(password),
             "user_type": UserType.USER,
@@ -112,7 +148,13 @@ async def register_guest(user_data: dict[str, Any] | None = None) -> dict:
     return issue_session(user)
 
 
-async def promote_guest(guest: User, username: str, password: str, user_data: dict[str, Any] | None = None) -> dict:
+async def promote_guest(
+    guest: User,
+    username: str,
+    password: str,
+    user_data: dict[str, Any] | None = None,
+    signup_source: dict[str, Any] | None = None,
+) -> dict:
     """Turn the caller's own GUEST account into a credentialed USER in place -- same row, so everything
     already attached to them survives. Raises NotAGuest if they're already a USER, UserNotFound if the
     row vanished mid-request, DuplicateUser if the username is taken."""
@@ -121,7 +163,7 @@ async def promote_guest(guest: User, username: str, password: str, user_data: di
     user = await users_repo.update(
         guest["id"],
         {
-            **to_profile(user_data),
+            **to_signup_columns(user_data, signup_source),
             **_to_web_identity(username),
             "password_hash": await hash_password(password),
             "user_type": UserType.USER,

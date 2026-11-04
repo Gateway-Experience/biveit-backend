@@ -19,15 +19,16 @@
 
 from urllib.parse import urlencode
 
+import pydash
 from authlib.integrations.starlette_client import OAuthError
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import RedirectResponse
+from pydantic import ValidationError
 
 from src.config import settings
-from src.constants import AnalyticsEvent, GoogleLoginError, UserType
-from src.dto.users import User
+from src.constants import GoogleLoginError, UserType
+from src.dto.users import SignupSource, User
 from src.services import users as user_service
-from src.utils import analytics
 from src.utils.auth import clear_access_cookie, get_current_user_optional, set_access_cookie
 from src.utils.logging import log_http_error
 from src.utils.oauth import oauth
@@ -64,20 +65,32 @@ def _redirect_to_frontend_error(code: GoogleLoginError) -> RedirectResponse:
     return RedirectResponse(f"{settings.frontend_url}/login?{urlencode({'error': code})}", status_code=302)
 
 
+def _read_signup_source(request: Request) -> dict:
+    """[Pure-ish] The visitor's source from the login link's query (see login_google), empty fields left out. A
+    malformed one (a hand-edited link) is just dropped: it's analytics, never a reason to fail a sign-in."""
+    try:
+        return pydash.omit_by(SignupSource.model_validate(dict(request.query_params)).model_dump(), pydash.is_none)
+    except ValidationError:
+        return {}
+
+
 @router.get("/auth/google/login")
 async def login_google(
     request: Request,
     next_path: str | None = Query(None, alias="next"),
     user: User | None = Depends(get_current_user_optional),
 ) -> Response:
-    """Start Google login: remember where to land and which guest (if the caller is one) to promote,
-    then redirect to Google's consent screen."""
+    """Start Google login: remember where to land, which guest (if the caller is one) to promote, and where the
+    visitor came from (dto/users.SignupSource, as plain query params -- this is a full-page redirect, so there's no
+    body), then redirect to Google's consent screen. The source is only used if this turns out to be a signup."""
+    signup_source = _read_signup_source(request)
     if not settings.is_google_login_enabled():
         return _redirect_to_frontend_error(GoogleLoginError.DISABLED)
     try:
         request.session[_LOGIN_STATE_KEY] = {
             "next": _to_safe_next(next_path),
             "guest_id": user["id"] if user and user["user_type"] == UserType.GUEST else None,
+            "signup_source": signup_source,
         }
         # redirect_uri passed explicitly: it must match the registered URI byte for byte, and deriving it
         # from the request breaks behind a TLS-terminating proxy (http vs https).
@@ -98,7 +111,9 @@ async def google_callback(request: Request) -> Response:
     login_state = request.session.pop(_LOGIN_STATE_KEY, None) or {}
     try:
         token = await oauth.google.authorize_access_token(request)
-        result = await user_service.signin_google(token["userinfo"], login_state.get("guest_id"))
+        result = await user_service.signin_google(
+            token["userinfo"], login_state.get("guest_id"), login_state.get("signup_source")
+        )
     except OAuthError as error:
         expected_code = _EXPECTED_OAUTH_ERRORS.get(error.error)
         if expected_code is None:
@@ -115,11 +130,13 @@ async def google_callback(request: Request) -> Response:
     # A full-page redirect from Google, so no PostHog headers to tie it to a browser session -- it lands on the person.
     # A promoted guest keeps their id, which is how it's told apart from a brand-new account.
     if result["is_new"]:
-        analytics.capture(
-            result["user"]["id"],
-            AnalyticsEvent.USER_SIGNED_UP,
-            {"method": "google", "was_guest": result["user"]["id"] == login_state.get("guest_id")},
-            {"set_once": {"signup_method": "google"}},
+        user_service.capture_signup(
+            result["user"],
+            "google",
+            {
+                "was_guest": result["user"]["id"] == login_state.get("guest_id"),
+                "signup_source": login_state.get("signup_source"),
+            },
         )
 
     # `next` was vetted at /login; re-vet anyway, since the session is the only thing standing between
