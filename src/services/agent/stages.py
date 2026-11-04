@@ -12,12 +12,13 @@
 
 from datetime import UTC, datetime
 
-from src.constants import AgentAction, AiSignal, ProjectStage
+from src.constants import AgentAction, AiSignal, AnalyticsEvent, ProjectStage
 from src.dto.projects import Project
 from src.repositories import projects as projects_repo
 from src.services import devenv
 from src.services.agent import sessions, signals
 from src.services.agent.wakeups import publish_devenv_changed
+from src.utils import analytics
 from src.utils.common import spawn
 from src.utils.logging import log_error
 
@@ -48,6 +49,7 @@ async def start_building(project: Project, conversation_id: int) -> None:
         )
         if moved:
             await signals.append_signal(conversation_id, AiSignal.PLAN_APPROVED)
+            analytics.capture(project["user_id"], AnalyticsEvent.PLAN_APPROVED, {"project_id": project["id"]})
         await publish_devenv_changed(conversation_id)
     spawn(_set_up_and_report(project, conversation_id))
 
@@ -103,6 +105,8 @@ async def approve_build(project: Project, conversation_id: int) -> None:
     wakes the FE, which starts offering payment/deployment."""
     if not project["build_approved_at"]:
         await projects_repo.update(project["id"], {"build_approved_at": datetime.now(UTC)})
+        # The milestone, so the first sign-off only. Not a compare-and-set: two racing sign-offs could both send it.
+        analytics.capture(project["user_id"], AnalyticsEvent.BUILD_APPROVED, {"project_id": project["id"]})
     await signals.append_signal(conversation_id, AiSignal.BUILD_APPROVED)
     await signals.end_open_build(conversation_id, "The user signed off the site")
     await publish_devenv_changed(conversation_id)

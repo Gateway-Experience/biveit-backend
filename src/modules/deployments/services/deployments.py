@@ -27,6 +27,7 @@ from uuid import UUID
 
 import pydash
 
+from src.constants import ANALYTICS_DOMAIN_KINDS, AnalyticsEvent
 from src.dto.projects import Project
 from src.modules import long_running_ops
 from src.modules.deployments.constants import (
@@ -43,7 +44,7 @@ from src.modules.deployments.repositories import site_domains as site_domains_re
 from src.modules.deployments.services import containers, environment, images, sites, sources
 from src.repositories import events as events_repo
 from src.services import devenv
-from src.utils import redis
+from src.utils import analytics, redis
 from src.utils.common import spawn
 from src.utils.logging import log_error
 
@@ -327,12 +328,17 @@ async def _release_or_roll_back(
         await _ensure_release_retrying(project, conversation_id, run_id, commit, new_domain or active_domain)
         if new_domain:
             await site_domains_repo.activate(project["id"], new_domain)
+            await _capture_went_live(project, new_domain, is_first=not previous_commit)
         await _record(DeploymentEvent.SUCCEEDED, project, run_id, commit)
         await images.prune_images(project["id"], images.get_image_tag(project["id"], commit))
         return
     except Exception as error:
         log_error(error, f"deploying project {project['id']} failed", {"run_id": run_id, "commit": commit})
         failure = error
+    if new_domain:
+        _capture_launch_failed(
+            project, new_domain, failure, is_rolled_back=bool(previous_commit and previous_commit != commit)
+        )
     if not previous_commit or previous_commit == commit:
         await _record(DeploymentEvent.FAILED, project, run_id, commit, _to_failure_value(failure))
         return
@@ -342,6 +348,39 @@ async def _release_or_roll_back(
     except Exception as rollback_error:
         log_error(rollback_error, f"rolling project {project['id']} back failed", {"run_id": run_id})
         await _record(DeploymentEvent.FAILED, project, run_id, previous_commit, _to_failure_value(rollback_error))
+
+
+async def _capture_went_live(project: Project, domain: str, is_first: bool) -> None:
+    """Analytics: the site is up on a domain it wasn't on before -- a launch. `is_first`: nothing was ever released
+    before (the very first launch), as opposed to a site coming back on a new domain. Redeploys on the same domain
+    aren't launches, and switching a live site's domain goes through _switch_domain, not here."""
+    site_domain = pydash.head(await site_domains_repo.find({"project_id": project["id"], "domain": domain})) or {}
+    analytics.capture(
+        project["user_id"],
+        AnalyticsEvent.SITE_WENT_LIVE,
+        {
+            "project_id": project["id"],
+            "domain_kind": ANALYTICS_DOMAIN_KINDS.get(site_domain.get("kind")),
+            "is_first": is_first,
+        },
+    )
+
+
+def _capture_launch_failed(project: Project, domain: str, failure: Exception, is_rolled_back: bool) -> None:
+    """Analytics: launching on `domain` failed for good (the retries ran out). stage is the failure's cause (dns,
+    certificate, release); is_rolled_back: the site that was live before is put back, so it's still up somewhere.
+    The domain name isn't sent -- it's the user's."""
+    failure_value = _to_failure_value(failure)
+    analytics.capture(
+        project["user_id"],
+        AnalyticsEvent.LAUNCH_FAILED,
+        {
+            "project_id": project["id"],
+            "stage": failure_value["cause"],
+            "error": failure_value["error"],
+            "is_rolled_back": is_rolled_back,
+        },
+    )
 
 
 async def _ensure_release_retrying(

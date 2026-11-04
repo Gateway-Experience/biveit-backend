@@ -15,9 +15,11 @@
 # References: migrations/0011_subscriptions.sql (the table), services/polar.py (the objects' shapes).
 
 from datetime import UTC, datetime, timedelta
+from uuid import NAMESPACE_URL, uuid5
 
 import pydash
 
+from src.constants import AnalyticsEvent
 from src.modules.payments.constants import (
     CHECKOUT_CATCH_UP_DAYS,
     PURCHASE_STALE_SECONDS,
@@ -34,11 +36,14 @@ from src.modules.payments.repositories import subscriptions as subscriptions_rep
 from src.modules.payments.services import catalog, polar
 from src.modules.payments.services.checkouts import get_origin
 from src.repositories import events as events_repo
+from src.utils import analytics
 from src.utils.logging import log_error
 
 # What still needs Polar's word now and then: running ones (a cancelled one runs until its ends_at), and orders not
 # paid yet.
 _UNSETTLED_STATUSES = [*RUNNING_STATUSES, SubscriptionStatus.CANCELLED, SubscriptionStatus.PENDING]
+# Bought: paid, or in a free first period (see _save_purchase).
+_PAID_STATUSES = {SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING}
 
 
 async def refresh_subscription(provider: Provider, subscription_ref: str) -> dict | None:
@@ -49,7 +54,7 @@ async def refresh_subscription(provider: Provider, subscription_ref: str) -> dic
         return None
     item = catalog.describe_product(provider, fresh.get("product_id") or "") or {}
     status = polar.to_subscription_status(fresh)
-    return await subscriptions_repo.upsert(
+    return await _save_purchase(
         {
             "provider": provider,
             "provider_object": ProviderObject.SUBSCRIPTION,
@@ -82,7 +87,7 @@ async def refresh_order(provider: Provider, order_ref: str) -> dict | None:
     item = catalog.describe_product(provider, fresh.get("product_id") or "") or {}
     if not _is_ours(owner) or item.get("product") != Product.ONE_TIME:
         return None
-    return await subscriptions_repo.upsert(
+    return await _save_purchase(
         {
             "provider": provider,
             "provider_object": ProviderObject.ORDER,
@@ -101,6 +106,33 @@ async def refresh_order(provider: Provider, order_ref: str) -> dict | None:
             **pydash.omit_by({"created_at": _to_datetime(fresh.get("created_at"))}, pydash.is_none),
         }
     )
+
+
+async def _save_purchase(row: dict) -> dict:
+    """Upsert a purchase row, and tell analytics when this is the moment it got paid for: it's new, or was only
+    pending, and now it's active (paid) or trialing (a domain's free first year -- bought, nothing charged yet). Later
+    changes (renewals, cancels) aren't purchases. Polar sends several webhooks per purchase and the catch-up re-reads
+    too, so the event carries a fixed uuid: should two racing reads both see it as new, PostHog keeps one."""
+    key = pydash.pick(row, "provider", "provider_object", "provider_ref")
+    previous = pydash.head(await subscriptions_repo.find(key))
+    saved = await subscriptions_repo.upsert(row)
+    is_just_paid = saved["status"] in _PAID_STATUSES and (
+        not previous or previous["status"] == SubscriptionStatus.PENDING
+    )
+    if is_just_paid:
+        analytics.capture(
+            saved["user_id"],
+            AnalyticsEvent.PAYMENT_SUCCEEDED,
+            {
+                "project_id": saved["target_id"],
+                "product": saved["product"],
+                "plan": saved["plan"],
+                "status": saved["status"],
+                "sandbox": saved["provider"] == Provider.POLAR_SANDBOX,
+            },
+            {"uuid": str(uuid5(NAMESPACE_URL, f"payment_succeeded:{saved['provider']}:{saved['provider_ref']}"))},
+        )
+    return saved
 
 
 async def catch_up_purchases(now: datetime | None = None) -> list[dict]:

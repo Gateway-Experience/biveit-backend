@@ -26,7 +26,7 @@ import pydash
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 
-from src.constants import AVATAR_MAX_BYTES, UserJourney, UserType
+from src.constants import AVATAR_MAX_BYTES, AnalyticsEvent, UserJourney, UserType
 from src.dto.users import (
     AddJourneyStepRequest,
     AuthenticateRequest,
@@ -41,6 +41,7 @@ from src.dto.users import (
 )
 from src.repositories import user_journey_steps as user_journey_steps_repo
 from src.services import users as user_service
+from src.utils import analytics
 from src.utils.auth import clear_signed_in_cookie, get_current_user, set_access_cookie, set_signed_in_cookie
 from src.utils.logging import log_http_error
 
@@ -110,10 +111,19 @@ async def add_journey_step(
     """The caller took a step in one of the FE's journeys (e.g. step "finished" once they're
     through it, or skipped it); returns the step. An unknown journey is a 422."""
     try:
-        return await user_journey_steps_repo.insert({"user_id": user["id"], "journey": journey, **body.model_dump()})
+        step = await user_journey_steps_repo.insert({"user_id": user["id"], "journey": journey, **body.model_dump()})
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+    # A copy for analytics; the table stays the record. `data` is the FE's own small structured values (e.g. the
+    # experience answer), never free text.
+    analytics.capture(
+        user["id"],
+        AnalyticsEvent.JOURNEY_STEP,
+        {"journey": journey, "step": step["step"], "data": step["data"]},
+        {"session_id": analytics.read_session_id(request.headers)},
+    )
+    return step
 
 
 @router.put("/me/avatar")
@@ -181,6 +191,7 @@ async def register(body: RegisterRequest, request: Request, response: Response) 
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+    _capture_signup(result["user"], request, was_guest=False)
     set_access_cookie(response, result["token"])
     return result
 
@@ -232,8 +243,20 @@ async def promote(
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+    _capture_signup(result["user"], request, was_guest=True)
     set_access_cookie(response, result["token"])
     return result
+
+
+def _capture_signup(user: User, request: Request, was_guest: bool) -> None:
+    """Analytics for an email signup -- a new account, or a guest promoted in place (same id). The Google one is
+    sent from controllers/auth."""
+    analytics.capture(
+        user["id"],
+        AnalyticsEvent.USER_SIGNED_UP,
+        {"method": "email", "was_guest": was_guest},
+        {"session_id": analytics.read_session_id(request.headers), "set_once": {"signup_method": "email"}},
+    )
 
 
 @router.post("/user/forgot-password", status_code=204)

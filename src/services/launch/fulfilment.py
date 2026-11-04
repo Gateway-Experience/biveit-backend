@@ -30,7 +30,7 @@ from datetime import UTC, datetime, timedelta
 import pydash
 
 from src.config import settings
-from src.constants import PURCHASED_DOMAIN_DNS_WAIT_SECONDS
+from src.constants import PURCHASED_DOMAIN_DNS_WAIT_SECONDS, AnalyticsEvent
 from src.dto.projects import Project
 from src.modules import deployments, domains, payments
 from src.modules.domains import DomainUnavailable, RegistrarError
@@ -38,7 +38,7 @@ from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
 from src.services.launch import access as launch_access
 from src.services.launch import domain_events
-from src.utils import redis
+from src.utils import analytics, redis
 from src.utils.logging import log_error
 
 # One fulfilment per project at a time; the TTL only covers a backend that died mid-way.
@@ -123,6 +123,11 @@ async def _ensure_purchased_domain(project: Project, subscription: dict) -> None
         await payments.refund_latest_payment(subscription)
         await domain_events.record_domain_failure(
             project["id"], checkout["checkout_id"], subscription_ref, domain, "unavailable"
+        )
+        analytics.capture(
+            project["user_id"],
+            AnalyticsEvent.LAUNCH_FAILED,
+            {"project_id": project["id"], "stage": "registration", "error": "unavailable", "is_rolled_back": False},
         )
         return
     await _ensure_a_record(domain, domains.get_registrar(domain, sandbox))

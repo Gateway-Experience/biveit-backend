@@ -70,6 +70,10 @@ def db(monkeypatch):
     async def find_messages_before(conversation_id, before_seq, limit):
         return state["messages"][-limit:]
 
+    async def get_first_said(conversation_id, role):
+        # Analytics' first-reply check (tests/unit/test_analytics_events covers it); nothing to find here.
+        return None
+
     async def publish(channel, payload=""):
         pass
 
@@ -82,6 +86,7 @@ def db(monkeypatch):
     monkeypatch.setattr(projects_repo, "find", find_projects)
     monkeypatch.setattr(ai_messages_repo, "insert", insert_message)
     monkeypatch.setattr(ai_messages_repo, "find_before", find_messages_before)
+    monkeypatch.setattr(ai_messages_repo, "get_first_said", get_first_said)
     monkeypatch.setattr(agent_service.conversations.redis, "publish", publish)
     return state
 

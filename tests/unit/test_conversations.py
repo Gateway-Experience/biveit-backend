@@ -76,6 +76,10 @@ def db(monkeypatch):
         ]
         return older[-limit:]
 
+    async def get_first_said(conversation_id, role):
+        # Analytics' first-reply check (tests/unit/test_analytics_events covers it); nothing to find here.
+        return None
+
     async def insert_message(data):
         seq = len([m for m in state["messages"] if m["conversation_id"] == data["conversation_id"]]) + 1
         message = {
@@ -104,6 +108,7 @@ def db(monkeypatch):
     monkeypatch.setattr(ai_messages_repo, "find", find_messages)
     monkeypatch.setattr(ai_messages_repo, "insert", insert_message)
     monkeypatch.setattr(ai_messages_repo, "find_before", find_messages_before)
+    monkeypatch.setattr(ai_messages_repo, "get_first_said", get_first_said)
     monkeypatch.setattr(redis, "publish", publish)
     monkeypatch.setattr(redis, "lock", lock)
     # Nothing spent today, and every setting at its code default (the AI limits).

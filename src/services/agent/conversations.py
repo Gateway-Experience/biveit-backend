@@ -28,6 +28,7 @@ from src.constants import (
     UPLOAD_MAX_FILES,
     AiMessageRole,
     AiSignal,
+    AnalyticsEvent,
     ProjectStage,
 )
 from src.dto.ai_conversations import AiConversation, AiMessage
@@ -46,7 +47,7 @@ from src.services.agent.interactions import (
     validate_session_content,
 )
 from src.services.devenv import previews as site_previews
-from src.utils import redis
+from src.utils import analytics, redis
 from src.utils.common import spawn
 
 
@@ -200,7 +201,25 @@ async def receive_session_message(conversation_id: int, content: list[dict[str, 
     validate_session_content(content, project["stage"])
     message = await _append(conversation["id"], AiMessageRole.ASSISTANT, sessions.to_stored_content(content), {})
     _refresh_site_preview(project)
+    await _capture_if_first_reply(project, message)
     return message
+
+
+async def _capture_if_first_reply(project: Project, message: AiMessage) -> None:
+    """Analytics' "agent_first_replied": the first thing the agent ever said in this conversation -- the moment the
+    product shows it works, so the activation funnel hangs on it. Read back from the log rather than tracked, so a
+    reintroduced agent (sessions.ensure_introduced) doesn't count twice. The mock's replies never come through here."""
+    first_said = await ai_messages_repo.get_first_said(message["conversation_id"], AiMessageRole.ASSISTANT)
+    if not first_said or first_said["id"] != message["id"]:
+        return
+    analytics.capture(
+        project["user_id"],
+        AnalyticsEvent.AGENT_FIRST_REPLIED,
+        {
+            "project_id": project["id"],
+            "seconds_since_created": round((message["created_at"] - project["created_at"]).total_seconds()),
+        },
+    )
 
 
 async def receive_session_signal(

@@ -194,6 +194,11 @@ class Settings(BaseSettings):
     # own domain must point at to be served (the launch flow, modules/deployments).
     server_public_ip: str = ""
 
+    # PostHog, product analytics (utils/analytics): the project API key (phc_..., the same one the FE uses) and the
+    # ingestion host of the region the project lives in. Empty key -> no events are sent.
+    posthog_key: str = ""
+    posthog_host: str = "https://eu.i.posthog.com"
+
     # CORS -- comma-separated allowed browser origins. Empty falls back to frontend_url. No wildcard:
     # auth rides an httpOnly cookie, so CORS runs WITH credentials, and browsers reject "*" + credentials.
     cors_allowed_origins: str = ""

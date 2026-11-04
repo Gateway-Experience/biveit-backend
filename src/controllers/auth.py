@@ -24,9 +24,10 @@ from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import RedirectResponse
 
 from src.config import settings
-from src.constants import GoogleLoginError, UserType
+from src.constants import AnalyticsEvent, GoogleLoginError, UserType
 from src.dto.users import User
 from src.services import users as user_service
+from src.utils import analytics
 from src.utils.auth import clear_access_cookie, get_current_user_optional, set_access_cookie
 from src.utils.logging import log_http_error
 from src.utils.oauth import oauth
@@ -110,6 +111,16 @@ async def google_callback(request: Request) -> Response:
     except Exception as error:
         log_http_error(error, request)
         return _redirect_to_frontend_error(GoogleLoginError.INTERNAL_ERROR)
+
+    # A full-page redirect from Google, so no PostHog headers to tie it to a browser session -- it lands on the person.
+    # A promoted guest keeps their id, which is how it's told apart from a brand-new account.
+    if result["is_new"]:
+        analytics.capture(
+            result["user"]["id"],
+            AnalyticsEvent.USER_SIGNED_UP,
+            {"method": "google", "was_guest": result["user"]["id"] == login_state.get("guest_id")},
+            {"set_once": {"signup_method": "google"}},
+        )
 
     # `next` was vetted at /login; re-vet anyway, since the session is the only thing standing between
     # a tampered value and an open redirect.

@@ -7,7 +7,7 @@ from typing import Any, cast
 import asyncpg
 import pydash
 
-from src.constants import AI_MESSAGE_SEQ_ATTEMPTS
+from src.constants import AI_MESSAGE_SEQ_ATTEMPTS, SIGNAL_BLOCK_TYPE
 from src.dto.ai_conversations import AiMessage
 from src.utils import postgres
 from src.utils.common import with_retries
@@ -85,6 +85,21 @@ async def get_latest(conversation_id: int, role: str) -> AiMessage | None:
     """
     row = await postgres.fetchrow(sql, {"conversation_id": conversation_id, "role": role})
     return cast("AiMessage | None", row)
+
+
+async def get_first_said(conversation_id: int, role: str) -> AiMessage | None:
+    """A conversation's first message from `role` that was actually said -- signals skipped (a message made of
+    signal blocks only; see services/agent/signals.is_signal_message). Walks the (conversation_id, seq) index
+    forwards and stops at the first hit, so it stays cheap on long conversations."""
+    sql = f"""
+        SELECT {_COLUMNS} FROM ai_messages
+        WHERE conversation_id = $conversation_id AND role = $role
+          AND EXISTS (SELECT 1 FROM jsonb_array_elements(content) AS block WHERE block->>'type' <> $signal_type)
+        ORDER BY seq
+        LIMIT 1
+    """
+    params = {"conversation_id": conversation_id, "role": role, "signal_type": SIGNAL_BLOCK_TYPE}
+    return cast("AiMessage | None", await postgres.fetchrow(sql, params))
 
 
 async def insert(data: dict[str, Any]) -> AiMessage:

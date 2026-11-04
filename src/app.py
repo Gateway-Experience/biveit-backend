@@ -42,7 +42,7 @@ from src.modules import payments
 from src.services import devenv, system_config
 from src.services import projects as projects_service
 from src.services.launch import fulfilment
-from src.utils import http, postgres, redis
+from src.utils import analytics, http, postgres, redis
 from src.utils.logging import configure_logging, log_error
 
 # Every route lives under /api so a host nginx has a single rule (/api/ -> this container) and nothing
@@ -61,6 +61,7 @@ async def lifespan(app: FastAPI):
 
     await postgres.connect()
     await http.connect()
+    analytics.connect()
 
     try:
         await redis.connect()
@@ -94,6 +95,7 @@ async def lifespan(app: FastAPI):
         agent_listener.should_exit = True
         await agent_listener.shutdown()
     await http.close()
+    analytics.close()
     await redis.close()
     await postgres.close()
 

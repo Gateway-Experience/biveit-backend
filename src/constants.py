@@ -332,6 +332,26 @@ class DomainEvent(StrEnum):
     FAILED = "domain.failed"  # couldn't be registered after all; its subscription cancelled and refunded
 
 
+class AnalyticsEvent(StrEnum):
+    """The product analytics events the backend sends (utils/analytics): the milestones only the backend knows
+    for sure -- a closed browser tab can't drop them from a funnel. The FE sends the rest (intent, UI choices,
+    errors shown); an event is only ever sent from one side. References: biveit-frontend types/analytics."""
+
+    USER_SIGNED_UP = "user_signed_up"  # {method: email|google, was_guest}
+    AGENT_FIRST_REPLIED = "agent_first_replied"  # {project_id, seconds_since_created}
+    PLAN_APPROVED = "plan_approved"  # {project_id}
+    BUILD_APPROVED = "build_approved"  # {project_id} -- the first sign-off only
+    PAYMENT_SUCCEEDED = "payment_succeeded"  # {project_id, product, plan, status, sandbox}
+    SITE_WENT_LIVE = "site_went_live"  # {project_id, domain_kind, is_first}
+    LAUNCH_FAILED = "launch_failed"  # {project_id, stage: registration|dns|certificate|release, error, ...}
+    JOURNEY_STEP = "journey_step"  # {journey, step} -- a copy of each user_journey_steps row
+
+
+# site_domains.kind (modules/deployments SiteDomainKind) in the words the FE's launch events use for a domain choice,
+# so the same breakdown works across both sides' events.
+ANALYTICS_DOMAIN_KINDS = {"purchased": "buy", "external": "own", "subdomain": "subdomain", "admin": "admin"}
+
+
 class ProjectStage(StrEnum):
     """projects.stage -- where a project is in the website creation process: Describing (the starting
     form, the FE's alone: a project only exists once that's submitted) -> PLANNING -> BUILDING ->

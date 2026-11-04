@@ -26,6 +26,7 @@ dependencies = [
     "biveit-session-runner",
     "psutil>=7.2.2",
     "dnspython>=2.8",
+    "posthog>=7.83.1",
 ]
 
 # The session runner (its own repo, a sibling checkout): the backend starts it, and takes the protocol between
