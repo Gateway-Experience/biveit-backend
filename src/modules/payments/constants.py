@@ -95,7 +95,7 @@ DOMAIN_DISCOUNT_TERMS = "first_year_free"
 # DOMAIN_BLEND_FIRST_TERM_WEIGHT of the first term plus the rest of the renewal -- a promo first year (a $2.99 .site
 # renewing at $49.99) lowers it some, as most domains are kept a few years; from that renewal up, the renewal alone.
 DOMAIN_BLEND_MAX_RENEWAL_USD = 100
-DOMAIN_BLEND_FIRST_TERM_WEIGHT = 0.6
+DOMAIN_BLEND_FIRST_TERM_WEIGHT = 0.7
 
 DOMAIN_PRICE_POINTS = [
     {"price_usd": 10, "max_registrar_usd": 10, "discountable": True, "product_key": "domain-10"},
