@@ -140,6 +140,10 @@ class ConfigName(StrEnum):
     # a model not in it costs. Defaults AI_MODEL_PRICES / AI_UNKNOWN_MODEL_PRICE.
     AI_MODEL_PRICES = "AI_MODEL_PRICES"
     AI_UNKNOWN_MODEL_PRICE = "AI_UNKNOWN_MODEL_PRICE"
+    # PUBLIC, read by the FE only: where to reach us to pay by something other than card (the launch dialog's
+    # "Can't pay by card?" panel), as {whatsapp, zalo, email}. A missing/null one isn't shown; no row at all means
+    # the FE falls back to its support email.
+    PAYMENT_CONTACTS = "PAYMENT_CONTACTS"
 
 
 # --- The agent's runners: the Claude Agent SDK runtime (services/agent + the biveit-session-runner repo) ---
