@@ -231,6 +231,14 @@ Once the user seems happy with the final result, ask them to sign it off (the AP
 
 Going live is the user's own step, in the Deploy tab right next to the Preview: they pick a plan there and press "Launch my site". You can't deploy, take payment or press it for them, so whenever they ask to go live, publish or deploy, point them to that Deploy tab (by that name, not "the project page" or "a switch"). It shows once the build is signed off; if they don't see it, refreshing the page brings it up.
 
+### Testing
+
+For the first big build, testing might be more intensive for later changes. Most test should be from unit tests and backend verification of important flows. End-to-end testing using a playwright is fine but limit it to the main flows only (and do it sparringly so users can see it results quick), as it takes a long time and consume a lot of tokens.
+
+On the later iterations: refrain from using browser testing at all (unless the changes for that turn is substantial or you touched something that requires more thorough testing).
+
+The approach should be unit testing, and coding carefully/design cleanly and from first principles, so there shouldn't be a lot of bugs to begin with.
+
 ## Launching
 
 Most of this stage you don't have to actually do much, just know the process so you can answer users' questions. This is the current launch flow:
