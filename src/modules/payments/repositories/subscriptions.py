@@ -1,6 +1,6 @@
 # Intentions: data access for `subscriptions` -- our copy of each purchase at the payment provider (plans and domains,
 # recurring; the one-time purchase, lifetime), plus the ones an admin set by hand (provider 'admin'). Schema:
-# migrations/0011_subscriptions.sql, 0015 (deleted_at: soft-deleted rows are left out of every read unless asked for).
+# migrations/0011_subscriptions.sql (deleted_at: soft-deleted rows are left out of every read unless asked for).
 
 from collections.abc import Sequence
 from datetime import datetime

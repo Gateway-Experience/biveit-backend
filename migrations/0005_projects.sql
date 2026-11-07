@@ -7,6 +7,12 @@
 -- project list (and can't be opened) but can be restored as it was -- name, pin and folder all kept.
 -- Deleting for good (deleted_at) only happens from Trash. Added after the table first shipped: an
 -- existing DB needs `ALTER TABLE projects ADD COLUMN IF NOT EXISTS trashed_at TIMESTAMPTZ;` by hand.
+-- archived_at: when the user archived the project; NULL = not archived. For a site that went live and whose
+-- plan has since stopped: it can't go to Trash (services/projects), so archiving is how it leaves the project
+-- list. Like Trash, an archived project drops out of the list and can't be opened until it's taken back out --
+-- name, pin and folder all kept. Archiving only tidies the list: it doesn't touch the production site or
+-- anything bought. Added after the table first shipped: an existing DB needs
+-- `ALTER TABLE projects ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;` by hand.
 -- (users are soft-deleted too, so the user_id FK never needs an ON DELETE rule -- it just guarantees
 -- the owner exists.)
 -- hash: a random, unguessable public handle (16 hex chars, filled in by the DB on insert). It names the
@@ -50,6 +56,7 @@ CREATE TABLE IF NOT EXISTS projects
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
     trashed_at  TIMESTAMPTZ,                                   -- NULL = not in Trash
+    archived_at TIMESTAMPTZ,                                   -- NULL = not archived
     deleted_at  TIMESTAMPTZ                                    -- NULL = live
 );
 
