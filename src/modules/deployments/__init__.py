@@ -28,6 +28,7 @@ from src.modules.deployments.services.sites import (
     attach_domain,
     check_external_domain,
     detach_domain,
+    find_projects_with_active_domain,
     find_taken_domains,
     get_active_domain,
     get_default_domain,
@@ -36,6 +37,7 @@ from src.modules.deployments.services.sites import (
     is_servable,
     normalize_domain,
     set_domains,
+    to_site_urls,
 )
 from src.modules.deployments.services.sources import NothingToDownload, archive_workspace
 
@@ -54,6 +56,7 @@ __all__ = [
     "check_external_domain",
     "deploy",
     "detach_domain",
+    "find_projects_with_active_domain",
     "find_taken_domains",
     "get_activation",
     "get_active_domain",
@@ -66,4 +69,5 @@ __all__ = [
     "list_deployments",
     "normalize_domain",
     "set_domains",
+    "to_site_urls",
 ]

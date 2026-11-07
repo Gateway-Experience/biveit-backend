@@ -24,6 +24,7 @@ from src.modules.payments.constants import (
     TargetType,
 )
 from src.modules.payments.repositories.subscriptions import find as find_subscriptions
+from src.modules.payments.repositories.subscriptions import find_by_targets as find_subscriptions_by_targets
 from src.modules.payments.services.access import get_project_access, is_in_grace, is_running, to_access
 from src.modules.payments.services.catalog import describe_product, get_plans, to_domain_offer
 from src.modules.payments.services.checkouts import (
@@ -76,6 +77,7 @@ __all__ = [
     "delete_project_plan",
     "describe_product",
     "find_subscriptions",
+    "find_subscriptions_by_targets",
     "get_billing_portal_url",
     "get_payment_provider",
     "get_plans",

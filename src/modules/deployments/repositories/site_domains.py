@@ -31,6 +31,14 @@ async def find_by_domains(domains: list[str]) -> list[dict]:
     return await postgres.fetch(sql, {"domains": domains})
 
 
+async def find_active(project_ids: list[int]) -> list[dict]:
+    """The active domains of any of these projects (at most one each). Rides uq_site_domains_active."""
+    if not project_ids:
+        return []
+    sql = f"SELECT {_COLUMNS} FROM site_domains WHERE project_id = ANY($project_ids) AND activated_at IS NOT NULL"
+    return await postgres.fetch(sql, {"project_ids": project_ids})
+
+
 async def attach(project_id: int, domain: str, kind: str) -> dict:
     """Attach a domain to the project (not active), or return its row if it's already the project's (kind kept).
     Raises DomainTaken when it's another project's."""

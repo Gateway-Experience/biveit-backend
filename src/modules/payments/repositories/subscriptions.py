@@ -31,6 +31,18 @@ async def find(criteria: dict[str, Any], include_deleted: bool = False) -> list[
     return await postgres.fetch(sql, where)
 
 
+async def find_by_targets(target_type: str, target_ids: list[int]) -> list[dict]:
+    """The not-deleted subscriptions of any of these targets, oldest first. Rides idx_subscriptions_target."""
+    if not target_ids:
+        return []
+    sql = f"""
+        SELECT {_COLUMNS} FROM subscriptions
+        WHERE target_type = $target_type AND target_id = ANY($target_ids) AND deleted_at IS NULL
+        ORDER BY created_at, id
+    """
+    return await postgres.fetch(sql, {"target_type": target_type, "target_ids": target_ids})
+
+
 async def find_stale(statuses: Sequence[str], updated_before: datetime, providers: Sequence[str]) -> list[dict]:
     """Not-deleted subscriptions from one of `providers`, in one of `statuses`, last written before `updated_before`,
     oldest write first."""

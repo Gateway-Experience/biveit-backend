@@ -12,6 +12,7 @@ from src.repositories import project_folders as project_folders_repo
 from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
 from src.services import projects as project_service
+from src.services.launch import access as launch_access
 from src.utils.auth import get_current_user
 
 _CALLER = {"id": 7, "username": "alice", "user_type": "USER"}
@@ -34,9 +35,20 @@ def _project(**overrides):
         "created_at": "2026-10-01T00:00:00Z",
         "updated_at": "2026-10-02T00:00:00Z",
         "trashed_at": None,
+        "archived_at": None,
         "deleted_at": None,
         **overrides,
     }
+
+
+@pytest.fixture(autouse=True)
+def nothing_bought(monkeypatch):
+    """No db here, and most tests don't care: every project is free to go to Trash, unless a test says otherwise."""
+
+    async def get_removal_options(project_ids):
+        return {project_id: {"can_trash": True, "can_archive": False} for project_id in project_ids}
+
+    monkeypatch.setattr(launch_access, "get_removal_options", get_removal_options)
 
 
 @pytest.fixture
@@ -422,3 +434,91 @@ def test_no_code_download_before_anything_is_paid_for(monkeypatch, client):
     monkeypatch.setattr(payments, "get_project_access", get_project_access)
     response = client.get("/api/projects/1/code")
     assert response.status_code == 402 and response.json()["detail"] == "PURCHASE_REQUIRED"
+
+
+def _given_removal_options(monkeypatch, **options):
+    async def get_removal_options(project_ids):
+        return {project_id: options for project_id in project_ids}
+
+    monkeypatch.setattr(launch_access, "get_removal_options", get_removal_options)
+
+
+def test_the_list_says_how_each_project_can_leave_it(monkeypatch, client):
+    async def fake_find(criteria):
+        return [_project()]
+
+    monkeypatch.setattr(projects_repo, "find", fake_find)
+    _given_removal_options(monkeypatch, can_trash=False, can_archive=True)
+
+    listed = client.get("/api/projects").json()[0]
+    assert (listed["can_trash"], listed["can_archive"]) == (False, True)
+
+
+@pytest.mark.parametrize("path", ["trash", "archive"])
+def test_a_project_kept_by_what_was_bought_is_refused(monkeypatch, client, path):
+    async def fake_find(criteria):
+        return [_project()]
+
+    monkeypatch.setattr(projects_repo, "find", fake_find)
+    _given_removal_options(monkeypatch, can_trash=False, can_archive=False)
+
+    response = client.post(f"/api/projects/1/{path}")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "PROJECT_CANT_BE_REMOVED"
+
+
+def test_deleting_a_paid_project_from_trash_is_refused(monkeypatch, client):
+    async def fake_find_trashed(criteria):
+        return [_project(trashed_at="2026-10-03T00:00:00Z")]
+
+    monkeypatch.setattr(projects_repo, "find_trashed", fake_find_trashed)
+    _given_removal_options(monkeypatch, can_trash=False, can_archive=False)
+
+    assert client.delete("/api/projects/1").status_code == 409
+
+
+def test_archive_stops_what_runs_then_stamps_archived_at(monkeypatch, client):
+    calls = {}
+
+    async def fake_find(criteria):
+        return [_project()]
+
+    async def fake_close(project):
+        calls["closed"] = project["id"]
+
+    async def fake_update(project_id, updates, expected=None):
+        calls["updates"] = updates
+        return _project(archived_at="2026-10-03T00:00:00Z")
+
+    monkeypatch.setattr(projects_repo, "find", fake_find)
+    monkeypatch.setattr(project_service, "close_project", fake_close)
+    monkeypatch.setattr(projects_repo, "update", fake_update)
+    _given_removal_options(monkeypatch, can_trash=False, can_archive=True)
+
+    response = client.post("/api/projects/1/archive")
+    assert response.status_code == 200
+    assert calls["closed"] == 1
+    assert list(calls["updates"]) == ["archived_at"]
+
+
+def test_unarchive_clears_archived_at_and_only_for_an_archived_project(monkeypatch, client):
+    calls = {}
+    archived = {"rows": [_project(archived_at="2026-10-03T00:00:00Z")]}
+
+    async def fake_find_archived(criteria):
+        calls["criteria"] = criteria
+        return archived["rows"]
+
+    async def fake_update(project_id, updates, expected=None):
+        calls["updates"] = updates
+        return _project()
+
+    monkeypatch.setattr(projects_repo, "find_archived", fake_find_archived)
+    monkeypatch.setattr(projects_repo, "update", fake_update)
+
+    assert client.post("/api/projects/1/unarchive").status_code == 200
+    assert calls["criteria"] == {"id": 1, "user_id": _CALLER["id"]}
+    assert calls["updates"] == {"archived_at": None}
+
+    archived["rows"] = []
+    assert client.post("/api/projects/1/unarchive").status_code == 404
