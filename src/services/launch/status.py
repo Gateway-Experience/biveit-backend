@@ -2,9 +2,11 @@
 # from payments (what's bought), deployments (the site, its domains) and the domain events, folded into one
 # `stage` the UI can switch on (to_stage). Reading it also nudges fulfilment along when something's still pending
 # (a domain's DNS appearing, say), so polling the status is what moves a waiting launch forward.
-# Also: the user adding their own domain, and switching the site to another of its domains.
+# Also: the user adding their own domain, switching the site to another of its domains, and the list of all their
+# deployed sites.
 # The domain terms (attached, servable, active) are docs/launchflow.txt's "Domains".
 
+import asyncio
 from uuid import UUID
 
 import pydash
@@ -13,7 +15,9 @@ from src.config import settings
 from src.dto.projects import Project
 from src.dto.users import User
 from src.modules import deployments, payments
+from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
+from src.services.devenv import previews as site_previews
 from src.services.launch import access as launch_access
 from src.services.launch import checkouts, fulfilment
 from src.services.launch.checkouts import LaunchRefused
@@ -177,6 +181,71 @@ def to_stage(status: dict) -> str:
     if status["setup_failure"]:
         return "failed"
     return "waiting_dns" if status["site_domains"] else "choose_domain"
+
+
+async def get_deployed_sites(user: User) -> list[dict]:
+    """The user's sites that have gone live (to_deployed_site), in their project list's order. Trashed projects are
+    left out, like everywhere else. Original purpose: the Sites tab of the profile page. [I/O: reads]"""
+    projects = await projects_repo.find({"user_id": user["id"]})
+    sites = await asyncio.gather(*[_get_deployed_site(project) for project in projects])
+    return pydash.compact(sites)
+
+
+async def _get_deployed_site(project: Project) -> dict | None:
+    """to_deployed_site for one project, None if it has no active domain. That's what "deployed" means here: a domain
+    only becomes active once its setup succeeded, and it stays so even if the plan ends later. [I/O: reads]"""
+    site_domains = await deployments.get_site_domains(project)
+    active_domain = pydash.find(site_domains, lambda row: row["activated_at"] is not None)
+    if not active_domain:
+        return None
+    access, is_servable, runs = await asyncio.gather(
+        launch_access.get_launch_access(project["id"]),
+        deployments.is_servable(project, active_domain),
+        deployments.list_deployments(project),
+    )
+    return {
+        **to_deployed_site(project, active_domain, is_servable, access, runs),
+        "site_preview_at": site_previews.get_taken_at(project),  # when its snapshot was taken, None without one
+    }
+
+
+def to_deployed_site(project: Project, active_domain: dict, is_servable: bool, access: dict, runs: list[dict]) -> dict:
+    """[Pure] What the profile page shows about one deployed site:
+    project_id, name  the project
+    url, domain       where it's served: domain is {domain, kind, status, renews_at, trial_ends_at}, the last three
+                      None unless it's a domain they bought from us and are still paying for
+    state             live | not_servable (the active domain stopped being servable, a user's own whose records broke)
+                      | plan_ended (no plan running, a grace period included: the plan's over)
+    plan              the running plan {plan, status, price_usd, interval, started_at, renews_at, ends_at} | None
+    live_since        when the site first came up: its first successful deployment, or, for a site without any on
+                      record (an admin-set domain), when its domain went active
+    last_deployed_at  its latest successful deployment | None
+    `runs`: deployments.list_deployments' (newest first)."""
+    plan = access["plan_subscription"]
+    domain_subscription = access["domain_subscription"]
+    is_domain_paid = pydash.get(domain_subscription, "product_data.domain") == active_domain["domain"]
+    succeeded_at = [run["finished_at"] for run in runs if run["outcome"] == "succeeded"]
+    return {
+        "project_id": project["id"],
+        "name": project["name"],
+        "url": deployments.to_site_urls([active_domain["domain"]])[0],
+        "domain": {
+            **pydash.pick(active_domain, "domain", "kind"),
+            "status": domain_subscription["status"] if is_domain_paid else None,
+            "renews_at": domain_subscription["renews_at"] if is_domain_paid else None,
+            "trial_ends_at": domain_subscription["trial_ends_at"] if is_domain_paid else None,
+        },
+        "state": "plan_ended" if not plan else "live" if is_servable else "not_servable",
+        "plan": {
+            **pydash.pick(plan, "plan", "status", "renews_at", "ends_at"),
+            **pydash.pick(payments.PLANS[plan["plan"]], "price_usd", "interval"),
+            "started_at": plan["created_at"],
+        }
+        if plan
+        else None,
+        "live_since": pydash.last(succeeded_at) or active_domain["activated_at"],
+        "last_deployed_at": pydash.head(succeeded_at),
+    }
 
 
 async def add_own_domain(project: Project, domain: str) -> dict:

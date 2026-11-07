@@ -2,7 +2,7 @@
 # when the user opens it (open_project: its current conversation's workspace, agent session -- started
 # off with the starting form's answers the first time -- and, once building, dev environment, as
 # its stage says), turning it all off again (close_project), moving it to Trash (trash_project) and
-# deleting it from there for good (delete_project), and the
+# deleting it from there for good (delete_project), archiving it (archive_project), and the
 # user's edits from the project list and sidebar (update_project: rename, pin, file into a folder), and
 # finding projects by what the user wrote while prompting (search_prompts).
 # The workspace is per CONVERSATION (see services/devenv). Plain CRUD skips this layer and goes straight to
@@ -21,6 +21,7 @@ from src.repositories import projects as projects_repo
 from src.services import activity, devenv
 from src.services import agent as agent_service
 from src.services.devenv import previews as site_previews
+from src.services.launch import access as launch_access
 from src.utils.common import spawn, utc_now
 from src.utils.logging import log_error
 
@@ -158,11 +159,36 @@ async def stop_idle_projects() -> list[int]:
     return [*orphans, *pydash.map_(idle, "id")]
 
 
+class ProjectCantBeRemoved(Exception):
+    """What's been bought for the project keeps it from going to Trash, being deleted or being archived
+    (launch_access.to_removal_options)."""
+
+
+async def _get_removal_options(project: Project) -> dict:
+    return (await launch_access.get_removal_options([project["id"]]))[project["id"]]
+
+
+async def archive_project(project: Project) -> Project | None:
+    """Archive a project for its owner: like Trash, whatever runs for its development is turned off (close_project,
+    best effort) and it drops out of the list and can't be opened until it's taken back out. Its production site
+    isn't touched. Raises ProjectCantBeRemoved. Returns the archived project (None if it vanished meanwhile)."""
+    if not (await _get_removal_options(project))["can_archive"]:
+        raise ProjectCantBeRemoved(project["id"])
+    try:
+        await close_project(project)
+    except Exception as error:
+        log_error(error, "archive_project: couldn't stop everything", {"project_id": project["id"]})
+    return await projects_repo.update(project["id"], {"archived_at": utc_now()})
+
+
 async def trash_project(project: Project) -> Project | None:
     """Move a project to Trash for its owner: turn off whatever runs for it (close_project), then stamp
     trashed_at, so it drops out of the list and can't be opened until it's restored (repo find() skips
     it). Its container stays, so a restore picks up right where it left off. Stopping is best effort,
-    same as delete_project's. Returns the trashed project (None if it vanished meanwhile)."""
+    same as delete_project's. Raises ProjectCantBeRemoved. Returns the trashed project (None if it vanished
+    meanwhile)."""
+    if not (await _get_removal_options(project))["can_trash"]:
+        raise ProjectCantBeRemoved(project["id"])
     try:
         await close_project(project)
     except Exception as error:
@@ -178,7 +204,11 @@ async def delete_project(project: Project) -> None:
     afresh on the next open.
 
     Stopping is best effort: a session or dev server that won't stop must not keep the user from deleting
-    the project, so its failure is only logged (whatever's left running finds no live project behind it)."""
+    the project, so its failure is only logged (whatever's left running finds no live project behind it).
+
+    Raises ProjectCantBeRemoved: one that got into Trash before the rule existed still can't be deleted while paid."""
+    if not (await _get_removal_options(project))["can_trash"]:
+        raise ProjectCantBeRemoved(project["id"])
     try:
         await close_project(project)
         await devenv.remove_container(project["id"])

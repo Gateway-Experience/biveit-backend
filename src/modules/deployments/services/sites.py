@@ -74,6 +74,11 @@ async def get_active_domain(project: Project) -> str | None:
     return active["domain"] if active else None
 
 
+async def find_projects_with_active_domain(project_ids: list[int]) -> set[int]:
+    """Which of these projects have an active domain (see the top of this file): the ones that have gone live."""
+    return {row["project_id"] for row in await site_domains_repo.find_active(project_ids)}
+
+
 async def is_servable(project: Project, site_domain: dict) -> bool:
     """Whether an attached domain (a site_domains row) is servable (see the top of this file). Only the user's own
     takes a look: a DNS lookup. [I/O: reads]"""

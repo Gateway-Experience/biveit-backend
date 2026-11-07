@@ -1,5 +1,6 @@
 # Intentions: the launch flow's endpoints (services/launch; docs/plans/launch-flow.md) -- the caller taking their
 # approved project's site live: choosing a plan and a domain, paying, and watching it go live.
+#   GET  /me/sites                                (auth)  the caller's deployed sites, for their profile page
 #   GET  /projects/{id}/launch                    (auth)  where it stands: stage, plans, what's bought, the domain,
 #                                                         the deployment. Poll it: it also moves a waiting launch on
 #   GET  /projects/{id}/launch/domains?q=         (auth)  domains to buy, with our price -- for an empty q, ideas
@@ -53,6 +54,16 @@ async def _get_owned_project(project_id: int, user: User) -> Project:
 def _to_refusal(refusal: checkouts.LaunchRefused) -> JSONResponse:
     """The same {detail} shape as HTTPException's, plus whatever the FE needs to recover."""
     return JSONResponse(status_code=refusal.status, content={"detail": refusal.code, **refusal.details})
+
+
+@router.get("/me/sites")
+async def get_my_sites(request: Request, user: User = Depends(get_current_user)) -> list[dict]:
+    """Returned BARE (a plain array)."""
+    try:
+        return await status.get_deployed_sites(user)
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
 
 
 @router.get("/projects/{project_id}/launch")

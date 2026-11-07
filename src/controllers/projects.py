@@ -1,6 +1,7 @@
 # Intentions: the caller's own projects.
 #   GET  /projects  (auth)  my live projects (not in Trash), most recently edited first
 #   GET  /projects/trash      (auth)  my projects in Trash, most recently trashed first
+#   GET  /projects/archived   (auth)  my archived projects, most recently archived first
 #   GET  /projects/search?q=  (auth)  my projects where I wrote q while prompting, with the bit that matched
 #   GET  /projects/{id}/site-preview?v=  (auth)  the picture of my project's dev site (a JPEG), for its card
 #   GET  /projects/{id}/code  (auth)  my project's code as it is right now, a zip (modules/deployments). Only
@@ -10,10 +11,15 @@
 #   POST /projects/{id}/open  (auth)  get my project ready to work on: call it right after creating it,
 #                                     and whenever the user opens it
 #   PATCH  /projects/{id}     (auth)  rename, pin/unpin, or file my project into one of my folders
-#   POST /projects/{id}/trash    (auth)  move my project to Trash (what runs for it is turned off)
+#   POST /projects/{id}/trash    (auth)  move my project to Trash (what runs for it is turned off). 409
+#                                     PROJECT_CANT_BE_REMOVED if it's paid for or has gone live
+#   POST /projects/{id}/archive  (auth)  archive my project that went live and whose plan stopped. 409
+#                                     PROJECT_CANT_BE_REMOVED otherwise
+#   POST /projects/{id}/unarchive  (auth)  take my project out of the archive, as it was
 #   POST /projects/{id}/restore  (auth)  take my project out of Trash, as it was
 #   DELETE /projects/{id}     (auth)  delete my project in Trash for good (soft: it just disappears from
-#                                     every list), so a live project can't vanish in one click
+#                                     every list), so a live project can't vanish in one click. 409
+#                                     PROJECT_CANT_BE_REMOVED if it's paid for or has gone live
 # Guests count as callers too -- their projects stay theirs after signup (promotion keeps the user id).
 # Listing and creating are straight repo calls; the rest goes through services/projects.
 
@@ -27,6 +33,7 @@ from src.repositories import projects as projects_repo
 from src.services import agent as agent_service
 from src.services import projects as project_service
 from src.services.devenv import previews as site_previews
+from src.services.launch import access as launch_access
 from src.utils.auth import get_current_user
 from src.utils.logging import log_http_error
 
@@ -38,11 +45,18 @@ def _with_site_preview(project: Project) -> Project:
     return {**project, "site_preview_at": site_previews.get_taken_at(project)}
 
 
+async def _with_list_fields(projects: list[Project]) -> list[Project]:
+    """The projects plus what the FE's lists and menus need that isn't a column: the picture's time, and which ways out
+    of the list each one has."""
+    options = await launch_access.get_removal_options([project["id"] for project in projects])
+    return [{**_with_site_preview(project), **options[project["id"]]} for project in projects]
+
+
 @router.get("/projects")
 async def list_projects(request: Request, user: User = Depends(get_current_user)) -> list[Project]:
     """Returned BARE (a plain array). An empty list is the FE's cue for its "create a project" CTA."""
     try:
-        return [_with_site_preview(project) for project in await projects_repo.find({"user_id": user["id"]})]
+        return await _with_list_fields(await projects_repo.find({"user_id": user["id"]}))
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
@@ -52,7 +66,17 @@ async def list_projects(request: Request, user: User = Depends(get_current_user)
 async def list_trashed_projects(request: Request, user: User = Depends(get_current_user)) -> list[Project]:
     """Returned BARE (a plain array), same as GET /projects."""
     try:
-        return await projects_repo.find_trashed({"user_id": user["id"]})
+        return await _with_list_fields(await projects_repo.find_trashed({"user_id": user["id"]}))
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.get("/projects/archived")
+async def list_archived_projects(request: Request, user: User = Depends(get_current_user)) -> list[Project]:
+    """Returned BARE (a plain array), same as GET /projects."""
+    try:
+        return await projects_repo.find_archived({"user_id": user["id"]})
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
@@ -176,7 +200,7 @@ async def update_project(
         updated = await project_service.update_project(projects[0], body.model_dump(exclude_unset=True))
         if not updated:
             raise HTTPException(status_code=404, detail="PROJECT_NOT_FOUND")
-        return _with_site_preview(updated)
+        return (await _with_list_fields([updated]))[0]
     except HTTPException:
         raise
     except project_service.FolderNotFound as error:
@@ -189,7 +213,7 @@ async def update_project(
 @router.post("/projects/{project_id}/trash")
 async def trash_project(project_id: int, request: Request, user: User = Depends(get_current_user)) -> Project:
     """Move the caller's project to Trash and return it. 404 PROJECT_NOT_FOUND for a project that isn't
-    theirs, or is in Trash already."""
+    theirs, or is in Trash already. 409 PROJECT_CANT_BE_REMOVED for one that's paid for or has gone live."""
     try:
         projects = await projects_repo.find({"id": project_id, "user_id": user["id"]})
         if not projects:
@@ -198,6 +222,48 @@ async def trash_project(project_id: int, request: Request, user: User = Depends(
         if not trashed:
             raise HTTPException(status_code=404, detail="PROJECT_NOT_FOUND")
         return trashed
+    except HTTPException:
+        raise
+    except project_service.ProjectCantBeRemoved as error:
+        raise HTTPException(status_code=409, detail="PROJECT_CANT_BE_REMOVED") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.post("/projects/{project_id}/archive")
+async def archive_project(project_id: int, request: Request, user: User = Depends(get_current_user)) -> Project:
+    """Archive the caller's project and return it. 404 PROJECT_NOT_FOUND for a project that isn't theirs, or isn't in
+    their list. 409 PROJECT_CANT_BE_REMOVED unless it went live and nothing's being billed anymore."""
+    try:
+        projects = await projects_repo.find({"id": project_id, "user_id": user["id"]})
+        if not projects:
+            raise HTTPException(status_code=404, detail="PROJECT_NOT_FOUND")
+        archived = await project_service.archive_project(projects[0])
+        if not archived:
+            raise HTTPException(status_code=404, detail="PROJECT_NOT_FOUND")
+        return archived
+    except HTTPException:
+        raise
+    except project_service.ProjectCantBeRemoved as error:
+        raise HTTPException(status_code=409, detail="PROJECT_CANT_BE_REMOVED") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.post("/projects/{project_id}/unarchive")
+async def unarchive_project(project_id: int, request: Request, user: User = Depends(get_current_user)) -> Project:
+    """Take the caller's project out of the archive and return it -- back in the list where it was (updated_at stays).
+    404 PROJECT_NOT_FOUND if it isn't in their archive."""
+    try:
+        projects = await projects_repo.find_archived({"id": project_id, "user_id": user["id"]})
+        if not projects:
+            raise HTTPException(status_code=404, detail="PROJECT_NOT_FOUND")
+        unarchived = await projects_repo.update(project_id, {"archived_at": None})
+        if not unarchived:
+            raise HTTPException(status_code=404, detail="PROJECT_NOT_FOUND")
+        return (await _with_list_fields([unarchived]))[0]
     except HTTPException:
         raise
     except Exception as error:
@@ -216,7 +282,7 @@ async def restore_project(project_id: int, request: Request, user: User = Depend
         restored = await projects_repo.update(project_id, {"trashed_at": None})
         if not restored:
             raise HTTPException(status_code=404, detail="PROJECT_NOT_FOUND")
-        return _with_site_preview(restored)
+        return (await _with_list_fields([restored]))[0]
     except HTTPException:
         raise
     except Exception as error:
@@ -227,7 +293,8 @@ async def restore_project(project_id: int, request: Request, user: User = Depend
 @router.delete("/projects/{project_id}", status_code=204)
 async def delete_project(project_id: int, request: Request, user: User = Depends(get_current_user)) -> None:
     """Delete the caller's project for good: what runs for it is turned off and it's gone from every list
-    (soft delete, files kept). Only from Trash: 404 for a project that isn't in their Trash."""
+    (soft delete, files kept). Only from Trash: 404 for a project that isn't in their Trash. 409
+    PROJECT_CANT_BE_REMOVED for one that's paid for or has gone live."""
     try:
         projects = await projects_repo.find_trashed({"id": project_id, "user_id": user["id"]})
         if not projects:
@@ -235,6 +302,8 @@ async def delete_project(project_id: int, request: Request, user: User = Depends
         await project_service.delete_project(projects[0])
     except HTTPException:
         raise
+    except project_service.ProjectCantBeRemoved as error:
+        raise HTTPException(status_code=409, detail="PROJECT_CANT_BE_REMOVED") from error
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error

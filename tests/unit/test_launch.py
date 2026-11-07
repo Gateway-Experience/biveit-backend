@@ -12,6 +12,7 @@ from src.dto.launch import LaunchCheckoutRequest, Registrant
 from src.modules import deployments
 from src.modules.deployments.services import sites
 from src.modules.domains import DomainUnavailable, RegistrarError
+from src.services import projects as project_service
 from src.services.launch import access as launch_access
 from src.services.launch import checkouts, domain_events, fulfilment, offers, status
 
@@ -869,3 +870,145 @@ async def test_what_a_switch_needs(switch_world, changes, code):
     with pytest.raises(checkouts.LaunchRefused, match=code):
         await status.activate_domain(_PROJECT, "new.com")
     assert switch_world["set_up"] == []
+
+
+_DEPLOYED_PROJECT = {"id": 7, "name": "Bakery"}
+_ACTIVATED_AT = datetime(2026, 3, 1, tzinfo=UTC)
+
+
+def _to_site(plan=None, domain_subscription=None, is_servable=True, runs=(), kind="purchased"):
+    active_domain = {"domain": "bakery.com", "kind": kind, "activated_at": _ACTIVATED_AT}
+    access = {"plan_subscription": plan, "domain_subscription": domain_subscription}
+    return status.to_deployed_site(_DEPLOYED_PROJECT, active_domain, is_servable, access, list(runs))
+
+
+def _plan_row(**overrides):
+    return {"plan": "yearly", "status": "active", "renews_at": _ACTIVATED_AT, "ends_at": None, "created_at": _ACTIVATED_AT, **overrides}  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "plan, is_servable, state",
+    [
+        (_plan_row(), True, "live"),
+        (_plan_row(), False, "not_servable"),
+        (None, True, "plan_ended"),
+        (None, False, "plan_ended"),
+    ],
+)
+def test_a_deployed_sites_state(plan, is_servable, state):
+    assert _to_site(plan=plan, is_servable=is_servable)["state"] == state
+
+
+def test_a_deployed_site_carries_its_plans_price_and_dates():
+    site = _to_site(plan=_plan_row())
+    assert site["url"] == "https://bakery.com"
+    assert site["plan"] == {
+        "plan": "yearly",
+        "status": "active",
+        "renews_at": _ACTIVATED_AT,
+        "ends_at": None,
+        "price_usd": 159,
+        "interval": "year",
+        "started_at": _ACTIVATED_AT,
+    }
+
+
+def test_a_domain_subscription_only_counts_for_the_domain_it_paid_for():
+    paid = {
+        "product_data": {"domain": "bakery.com"},
+        "status": "trialing",
+        "renews_at": None,
+        "trial_ends_at": _ACTIVATED_AT,
+    }
+    other = {**paid, "product_data": {"domain": "another.com"}}
+    assert _to_site(domain_subscription=paid)["domain"]["trial_ends_at"] == _ACTIVATED_AT
+    assert _to_site(domain_subscription=other)["domain"]["trial_ends_at"] is None
+
+
+def test_a_deployed_sites_dates_come_from_its_successful_deployments():
+    first, latest = datetime(2026, 4, 1, tzinfo=UTC), datetime(2026, 6, 1, tzinfo=UTC)
+    runs = [
+        {"outcome": "failed", "finished_at": datetime(2026, 7, 1, tzinfo=UTC)},
+        {"outcome": "succeeded", "finished_at": latest},
+        {"outcome": "succeeded", "finished_at": first},
+    ]
+    site = _to_site(runs=runs)
+    assert (site["live_since"], site["last_deployed_at"]) == (first, latest)
+    assert _to_site()["live_since"] == _ACTIVATED_AT
+    assert _to_site()["last_deployed_at"] is None
+
+
+@pytest.mark.parametrize(
+    "bought, has_active_domain, can_trash, can_archive",
+    [
+        ({}, False, True, False),  # nothing bought, never live
+        ({}, True, False, True),  # went live, the plan's over
+        ({"plan_subscription": {"id": 1}}, False, False, False),  # billed, not live yet
+        ({"plan_subscription": {"id": 1}}, True, False, False),  # billed and live
+        ({"domain_subscription": {"id": 1}}, True, False, False),  # still paying for the domain
+        ({"one_time_subscription": {"id": 1}}, False, False, False),  # the code was paid for
+        ({"one_time_subscription": {"id": 1}}, True, False, True),  # paid for the code too, the plan's over
+    ],
+)
+def test_what_a_project_can_do_to_leave_the_list(bought, has_active_domain, can_trash, can_archive):
+    access = {"plan_subscription": None, "domain_subscription": None, "one_time_subscription": None, **bought}
+    assert launch_access.to_removal_options(access, has_active_domain) == {
+        "can_trash": can_trash,
+        "can_archive": can_archive,
+    }
+
+
+async def test_removal_options_are_read_per_project_and_drop_a_failed_domain(monkeypatch):
+    now = datetime.now(UTC)
+    row = {"target_id": 1, "status": "active", "created_at": now, "updated_at": now, "ends_at": None}
+    subscriptions = [
+        {**row, "id": 1, "target_id": 1, "product": "plan", "plan": "yearly"},
+        {**row, "id": 2, "target_id": 2, "product": "domain", "provider_ref": "failed", "product_data": {"domain": "a.com"}},
+    ]  # fmt: skip
+
+    async def find_by_targets(target_type, project_ids):
+        return subscriptions
+
+    async def find_live(project_ids):
+        return {3}
+
+    async def get_domain_failures(project_id):
+        return [{"subscription_ref": "failed"}]
+
+    async def get_project_access(project_id):
+        return launch_access.payments.to_access(subscriptions[1:], now)
+
+    monkeypatch.setattr(launch_access.payments, "find_subscriptions_by_targets", find_by_targets)
+    monkeypatch.setattr(launch_access.payments, "get_project_access", get_project_access)
+    monkeypatch.setattr(launch_access.deployments, "find_projects_with_active_domain", find_live)
+    monkeypatch.setattr(launch_access.domain_events, "get_domain_failures", get_domain_failures)
+
+    assert await launch_access.get_removal_options([1, 2, 3, 4]) == {
+        1: {"can_trash": False, "can_archive": False},  # on a plan
+        2: {"can_trash": True, "can_archive": False},  # its only purchase failed and was refunded
+        3: {"can_trash": False, "can_archive": True},  # went live, nothing billed
+        4: {"can_trash": True, "can_archive": False},
+    }
+
+
+@pytest.mark.parametrize(
+    "remove, options",
+    [
+        (project_service.trash_project, {"can_trash": False, "can_archive": True}),
+        (project_service.delete_project, {"can_trash": False, "can_archive": True}),
+        (project_service.archive_project, {"can_trash": True, "can_archive": False}),
+    ],
+)
+async def test_a_project_kept_by_what_was_bought_is_refused_before_anything_happens(monkeypatch, remove, options):
+    async def get_removal_options(project_ids):
+        return {7: options}
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("nothing should be touched")
+
+    monkeypatch.setattr(launch_access, "get_removal_options", get_removal_options)
+    monkeypatch.setattr(project_service, "close_project", fail_if_called)
+    monkeypatch.setattr(project_service.projects_repo, "update", fail_if_called)
+
+    with pytest.raises(project_service.ProjectCantBeRemoved):
+        await remove({"id": 7})
