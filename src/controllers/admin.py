@@ -4,7 +4,8 @@
 #   GET  /admin/server-usage          the machine's CPU, memory and disk (the dashboard polls it)
 #   GET  /admin/platform              {sections, projects}: services/platform_status's platform sections, and
 #                                     every live project with its owner and whether its container runs
-#   GET  /admin/projects/{id}         {project, is_running, devenv, sections}: the project (with its description),
+#   GET  /admin/projects/{id}         {project, is_running, devenv, sections}: the project (with its description:
+#                                     the column, else the starting form's bootstrap_data.description),
 #                                     whether its container runs, its dev environment as the owner's preview sees it
 #                                     (devenv.get_devenv_status: busy, preview_url, servers), and its sections
 #                                     (?conversation=<id>, else its newest conversation)
@@ -105,7 +106,11 @@ async def get_project(project_id: int, request: Request, conversation: int | Non
             platform_status.get_project_sections(project, conversation),
         )
         return {
-            "project": pydash.pick(project, "id", "name", "stage", "description"),
+            "project": {
+                **pydash.pick(project, "id", "name", "stage"),
+                # What the owner wrote on the starting form lives in bootstrap_data; the column is rarely set.
+                "description": project["description"] or pydash.get(project, "bootstrap_data.description"),
+            },
             "is_running": is_running,
             "devenv": devenv_status,
             "sections": sections,

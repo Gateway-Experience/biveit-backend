@@ -11,7 +11,14 @@ from src.utils.auth import get_current_user
 
 _ADMIN = {"id": 1, "username": "admin@biveit.com", "user_type": "USER", "role": "ADMIN"}
 _USER = {"id": 2, "username": "someone@x.com", "user_type": "USER", "role": None}
-_PROJECT = {"id": 16, "name": "Portfolio", "stage": "building", "description": "A portfolio site", "user_id": 2}
+_PROJECT = {
+    "id": 16,
+    "name": "Portfolio",
+    "stage": "building",
+    "description": None,
+    "bootstrap_data": {"description": "A portfolio site"},
+    "user_id": 2,
+}
 _DEVENV = {"busy": False, "preview_url": "https://abc.dev.example.com", "servers": []}
 _SECTION = {"title": "Platform", "rows": [{"label": "env", "value": "local"}]}
 
