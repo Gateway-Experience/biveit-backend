@@ -4,7 +4,8 @@
 #   GET  /admin/server-usage          the machine's CPU, memory and disk (the dashboard polls it)
 #   GET  /admin/platform              {sections, projects}: services/platform_status's platform sections, and
 #                                     every live project with its owner and whether its container runs
-#   GET  /admin/projects/{id}         {project, is_running, devenv, sections}: the project (with its description:
+#   GET  /admin/projects/{id}         {project, conversation_id, is_running, devenv, sections}: the project (with
+#                                     its current conversation's id, and its description:
 #                                     the column, else the starting form's bootstrap_data.description),
 #                                     whether its container runs, its dev environment as the owner's preview sees it
 #                                     (devenv.get_devenv_status: busy, preview_url, servers), and its sections
@@ -31,6 +32,10 @@
 #                                     404 NO_PLAN
 #     POST/PUT: 400 INVALID_PERIOD when ends_at isn't after starts_at. Each change kicks off the launch fulfilment, so
 #     hosting follows right away rather than at the next sweep.
+#   GET  /admin/conversations/{id}/messages  every message of any conversation, in seq order (a read-only view of
+#                                     the chat). 404 CONVERSATION_NOT_FOUND
+#   GET  /admin/conversations/{id}/files?path=  one of its uploads/ or artifacts/ files, as the owner's
+#                                     /conversations/{id}/files serves it (the view's attachments). 404 FILE_NOT_FOUND
 #   GET  /admin/users                 every live user (guests too), newest first: [{id, email, name, user_type,
 #                                     is_admin, created_at, last_active_at, project_count, cost_usd}]
 #                                     (services/users.get_user_overviews). The FE sorts and filters.
@@ -47,12 +52,16 @@ import asyncio
 from datetime import datetime, timedelta
 
 import pydash
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 
 from src.config import settings
+from src.controllers.conversations import to_file_response
+from src.dto.ai_conversations import AiMessage
 from src.dto.projects import Project, ProjectPlanRequest, SetDomainsRequest
 from src.dto.users import SetSandboxModeRequest, User
 from src.modules import deployments, payments
+from src.repositories import ai_conversations as ai_conversations_repo
+from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
 from src.repositories import users as users_repo
 from src.services import agent as agent_service
@@ -111,6 +120,7 @@ async def get_project(project_id: int, request: Request, conversation: int | Non
                 # What the owner wrote on the starting form lives in bootstrap_data; the column is rarely set.
                 "description": project["description"] or pydash.get(project, "bootstrap_data.description"),
             },
+            "conversation_id": current_conversation["id"],
             "is_running": is_running,
             "devenv": devenv_status,
             "sections": sections,
@@ -272,6 +282,33 @@ async def delete_project_plan(project_id: int, request: Request, background_task
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.get("/admin/conversations/{conversation_id}/messages")
+async def list_conversation_messages(conversation_id: int, request: Request) -> list[AiMessage]:
+    """All of it at once: it's for reading through, and an admin page can take a long conversation."""
+    if await ai_conversations_repo.get(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="CONVERSATION_NOT_FOUND")
+    try:
+        return await ai_messages_repo.find(conversation_id)
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.get("/admin/conversations/{conversation_id}/files")
+async def download_conversation_file(conversation_id: int, request: Request, path: str = Query(...)) -> Response:
+    conversation = await ai_conversations_repo.get(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="FILE_NOT_FOUND")
+    try:
+        file_fd, file_info = await agent_service.get_conversation_file(conversation, path)
+    except agent_service.FileNotAvailable as error:
+        raise HTTPException(status_code=404, detail="FILE_NOT_FOUND") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+    return to_file_response(request, file_fd, file_info)
 
 
 @router.get("/admin/users")

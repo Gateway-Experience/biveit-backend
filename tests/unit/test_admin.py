@@ -245,3 +245,36 @@ def test_setting_a_plan_says_why_it_was_refused_and_fulfils_the_project(services
     assert (
         client.post("/api/admin/projects/16/plan", json={**body, "starts_at": "2026-11-04T00:00:00"}).status_code == 422
     )
+
+
+@pytest.fixture
+def conversation_reads(services, monkeypatch):
+    """Conversation 13 exists with two messages; its files are refused like a planted symlink would be (the real
+    symlink checks are storage's, tested in test_storage)."""
+
+    async def get_conversation(conversation_id):
+        return {"id": 13, "project_id": 16} if conversation_id == 13 else None
+
+    async def find_messages(conversation_id):
+        row = {"conversation_id": 13, "content": [], "model": None, "stop_reason": None, "usage": None, "meta": {}}
+        return [
+            {**row, "id": 1, "seq": 1, "role": "user", "created_at": "2026-11-20T10:00:00Z"},
+            {**row, "id": 2, "seq": 2, "role": "assistant", "created_at": "2026-11-20T10:00:05Z"},
+        ]
+
+    async def get_conversation_file(conversation, path):
+        raise admin.agent_service.FileNotAvailable(path)
+
+    monkeypatch.setattr(admin.ai_conversations_repo, "get", get_conversation)
+    monkeypatch.setattr(admin.ai_messages_repo, "find", find_messages)
+    monkeypatch.setattr(admin.agent_service, "get_conversation_file", get_conversation_file)
+
+
+def test_reading_any_conversation(conversation_reads):
+    client = _client_as(_ADMIN)
+    assert [m["seq"] for m in client.get("/api/admin/conversations/13/messages").json()] == [1, 2]
+    assert client.get("/api/admin/conversations/99/messages").status_code == 404
+    assert _client_as(_USER).get("/api/admin/conversations/13/messages").status_code == 403
+    files_url = "/api/admin/conversations/13/files"
+    assert client.get(files_url, params={"path": "uploads/../../.env"}).json()["detail"] == "FILE_NOT_FOUND"
+    assert _client_as(_USER).get(files_url, params={"path": "uploads/a.png"}).status_code == 403

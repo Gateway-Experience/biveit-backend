@@ -256,6 +256,13 @@ async def download_file(
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+    return to_file_response(request, file_fd, file_info)
+
+
+def to_file_response(request: Request, file_fd: int, file_info: dict) -> Response:
+    """Serve a conversation file opened by agent_service.get_conversation_file (it takes over `file_fd`), with the
+    caching and sandboxing headers described in download_file. Shared with the admin's read-only view of a
+    conversation (controllers/admin)."""
     etag = f'"{file_info["version"]}"'
     headers = {
         "ETag": etag,
