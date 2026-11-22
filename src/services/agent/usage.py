@@ -217,6 +217,17 @@ async def get_cost_report(since: datetime, until: datetime) -> dict:
     }
 
 
+async def get_user_costs() -> dict[int, float]:
+    """{user_id: what their agents have cost so far, in USD}, from ai_usage at today's prices; users who never
+    spent anything aren't in it. Original purpose: the admin's users page. [I/O: reads]"""
+    prices, unknown_model_price = await _get_prices()
+    rows = await ai_usage_repo.find_user_totals()
+    return {
+        user_id: to_cost_usd(user_rows, prices, unknown_model_price)
+        for user_id, user_rows in pydash.group_by(rows, "user_id").items()
+    }
+
+
 async def get_project_cost_series(project_id: int, since: datetime, until: datetime) -> dict:
     """One project's cost over [since, until), per hour for a range of up to AI_USAGE_HOURLY_MAX_DAYS days, else per
     day (UTC): {bucket: hour | day, points: [{at, cost_usd}]}, every bucket in the range, empty ones at 0.

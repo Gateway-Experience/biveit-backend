@@ -83,6 +83,12 @@ async def get_by_platform(platform: str, platform_id: str) -> User | None:
     return cast("User | None", row)
 
 
+async def get_all() -> list[User]:
+    """Every live user, guests included, newest first."""
+    rows = await postgres.fetch(f"SELECT {_COLUMNS} FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC")
+    return cast("list[User]", rows)
+
+
 _GET_AUTH_BY_USERNAME = "SELECT id, password_hash FROM users WHERE username = $username AND deleted_at IS NULL"
 _GET_AUTH = "SELECT id, password_hash FROM users WHERE id = $user_id AND deleted_at IS NULL"
 

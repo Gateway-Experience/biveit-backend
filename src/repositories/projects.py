@@ -98,6 +98,19 @@ async def has_ever_created(user_id: int) -> bool:
     return bool(row and row["has_created"])
 
 
+async def count_by_user() -> list[dict]:
+    """Per owner: [{user_id, project_count, last_edited_at}] -- their live projects (archived ones count, Trash and
+    deleted ones don't) and the latest updated_at among them (a user's own edit, see _WRITABLE_COLUMNS). Owners with
+    no such project aren't listed."""
+    sql = """
+        SELECT user_id, count(*)::int AS project_count, max(updated_at) AS last_edited_at
+        FROM projects
+        WHERE deleted_at IS NULL AND trashed_at IS NULL
+        GROUP BY user_id
+    """
+    return await postgres.fetch(sql)
+
+
 async def insert(data: dict[str, Any]) -> Project:
     row = pydash.pick(data, *_WRITABLE_COLUMNS)
     inserted = await postgres.fetchrow(

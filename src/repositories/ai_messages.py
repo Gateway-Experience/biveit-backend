@@ -87,6 +87,20 @@ async def get_latest(conversation_id: int, role: str) -> AiMessage | None:
     return cast("AiMessage | None", row)
 
 
+async def find_latest_by_user(role: str) -> list[dict]:
+    """Per user who started a conversation (ai_conversations.user_id): [{user_id, latest_at}], when the newest
+    `role` message in any of their conversations was written. A full scan of that role's messages -- fine for an
+    admin page at today's size, worth an index or a stored column once it isn't."""
+    sql = """
+        SELECT ai_conversations.user_id, max(ai_messages.created_at) AS latest_at
+        FROM ai_messages
+        JOIN ai_conversations ON ai_conversations.id = ai_messages.conversation_id
+        WHERE ai_messages.role = $role
+        GROUP BY ai_conversations.user_id
+    """
+    return await postgres.fetch(sql, {"role": role})
+
+
 async def get_first_said(conversation_id: int, role: str) -> AiMessage | None:
     """A conversation's first message from `role` that was actually said -- signals skipped (a message made of
     signal blocks only; see services/agent/signals.is_signal_message). Walks the (conversation_id, seq) index

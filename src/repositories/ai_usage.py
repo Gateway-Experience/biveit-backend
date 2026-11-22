@@ -48,6 +48,21 @@ async def find_totals(since: datetime, user_id: int | None = None, ip_group: str
     return await postgres.fetch(sql, {"value": value, "since": since})
 
 
+async def find_user_totals() -> list[dict]:
+    """All tokens ever used, summed per user and model: [{user_id, model, input_tokens, output_tokens,
+    cache_read_tokens, cache_write_tokens}]."""
+    sql = """
+        SELECT user_id, model,
+               sum(input_tokens)::bigint AS input_tokens,
+               sum(output_tokens)::bigint AS output_tokens,
+               sum(cache_read_tokens)::bigint AS cache_read_tokens,
+               sum(cache_write_tokens)::bigint AS cache_write_tokens
+        FROM ai_usage
+        GROUP BY user_id, model
+    """
+    return await postgres.fetch(sql)
+
+
 async def find_project_totals(since: datetime, until: datetime) -> list[dict]:
     """Tokens used in [since, until), summed per project and model, with each project's name and owner (deleted ones
     too -- the spend happened): [{project_id, project_name, user_id, username, first_name, last_name, model,

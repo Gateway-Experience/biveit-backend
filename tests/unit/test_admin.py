@@ -11,13 +11,14 @@ from src.utils.auth import get_current_user
 
 _ADMIN = {"id": 1, "username": "admin@biveit.com", "user_type": "USER", "role": "ADMIN"}
 _USER = {"id": 2, "username": "someone@x.com", "user_type": "USER", "role": None}
-_PROJECT = {"id": 16, "name": "Portfolio", "stage": "building"}
+_PROJECT = {"id": 16, "name": "Portfolio", "stage": "building", "description": "A portfolio site", "user_id": 2}
+_DEVENV = {"busy": False, "preview_url": "https://abc.dev.example.com", "servers": []}
 _SECTION = {"title": "Platform", "rows": [{"label": "env", "value": "local"}]}
 
 
 @pytest.fixture
 def services(monkeypatch):
-    calls = {"stopped": []}
+    calls = {"stopped": [], "restored": [], "opened": []}
 
     async def find_projects(criteria):
         return [_PROJECT] if criteria == {"id": 16} else []
@@ -35,7 +36,32 @@ def services(monkeypatch):
         calls["stopped"] = [*calls["stopped"], project["id"]]
         return {"sessions": {}, "dev_servers": [], "container": True}
 
+    async def get_current_conversation(project_id, user_id):
+        return {"id": 13}
+
+    async def get_devenv_status(project, conversation_id):
+        return _DEVENV
+
+    async def restore_devenv(project, conversation_id):
+        calls["restored"] = [*calls["restored"], (project["id"], conversation_id)]
+
+    async def open_project(project):
+        calls["opened"] = [*calls["opened"], project["id"]]
+
+    async def is_container_running(project_id):
+        return True
+
+    async def get_user_overviews():
+        return [{"id": 1, "email": "admin@biveit.com"}]
+
     monkeypatch.setattr(admin.projects_repo, "find", find_projects)
+    monkeypatch.setattr(admin.user_service, "get_user_overviews", get_user_overviews)
+    monkeypatch.setattr(admin.projects_service, "open_project", open_project)
+    monkeypatch.setattr(admin.devenv, "is_container_running", is_container_running)
+    monkeypatch.setattr(admin.agent_service, "get_current_conversation", get_current_conversation)
+    monkeypatch.setattr(admin.agent_service, "restore_devenv", restore_devenv)
+    monkeypatch.setattr(admin.devenv, "get_devenv_status", get_devenv_status)
+    monkeypatch.setattr(admin.devenv, "has_app", lambda project, conversation_id: True)
     monkeypatch.setattr(admin.platform_status, "get_platform_sections", get_platform_sections)
     monkeypatch.setattr(admin.platform_status, "list_projects", list_projects)
     monkeypatch.setattr(admin.platform_status, "get_project_sections", get_project_sections)
@@ -58,6 +84,7 @@ def _client_as(user):
         ("GET", "/api/admin/platform"),
         ("GET", "/api/admin/projects/16"),
         ("POST", "/api/admin/projects/16/stop"),
+        ("GET", "/api/admin/users"),
     ],
 )
 def test_only_admins_get_in(method, path, services):
@@ -74,8 +101,35 @@ def test_the_dashboard_reads(services):
         "sections": [_SECTION],
         "projects": [{"id": 16, "name": "Portfolio", "is_running": True}],
     }
+    assert client.get("/api/admin/users").json() == [{"id": 1, "email": "admin@biveit.com"}]
     detail = client.get("/api/admin/projects/16", params={"conversation": 13}).json()
-    assert detail["project"] == _PROJECT and detail["sections"][0]["rows"][0]["value"] == "13"
+    assert detail["project"] == {"id": 16, "name": "Portfolio", "stage": "building", "description": "A portfolio site"}
+    assert (
+        detail["is_running"] is True
+        and detail["devenv"] == _DEVENV
+        and detail["sections"][0]["rows"][0]["value"] == "13"
+    )
+
+
+def test_starting_the_project(services):
+    assert _client_as(_ADMIN).post("/api/admin/projects/16/start").status_code == 202
+    assert services["opened"] == [16]
+    assert _client_as(_ADMIN).post("/api/admin/projects/99/start").status_code == 404
+    assert _client_as(_USER).post("/api/admin/projects/16/start").status_code == 403
+    assert services["opened"] == [16]
+
+
+def test_starting_the_dev_servers(services, monkeypatch):
+    client = _client_as(_ADMIN)
+    response = client.post("/api/admin/projects/16/dev-servers/start")
+    assert response.status_code == 202 and services["restored"] == [(16, 13)]
+    assert client.post("/api/admin/projects/99/dev-servers/start").status_code == 404
+    assert _client_as(_USER).post("/api/admin/projects/16/dev-servers/start").status_code == 403
+
+    monkeypatch.setattr(admin.devenv, "has_app", lambda project, conversation_id: False)
+    response = client.post("/api/admin/projects/16/dev-servers/start")
+    assert response.status_code == 409 and response.json()["detail"] == "BUILDING_NOT_STARTED"
+    assert services["restored"] == [(16, 13)]  # nothing to start without an app
 
 
 def test_an_unknown_project_is_404(services):
@@ -106,7 +160,19 @@ def deploying(services, monkeypatch):
         calls["deployed"] = [*calls["deployed"], (project["id"], conversation_id)]
         return {"run_id": "r1", "commit": "abc"}
 
+    async def open_project(project):
+        calls["opened"] = [*calls["opened"], project["id"]]
+
+    async def is_container_running(project_id):
+        return True
+
+    async def get_user_overviews():
+        return [{"id": 1, "email": "admin@biveit.com"}]
+
     monkeypatch.setattr(admin.projects_repo, "find", find_projects)
+    monkeypatch.setattr(admin.user_service, "get_user_overviews", get_user_overviews)
+    monkeypatch.setattr(admin.projects_service, "open_project", open_project)
+    monkeypatch.setattr(admin.devenv, "is_container_running", is_container_running)
     monkeypatch.setattr(admin.agent_service, "get_current_conversation", get_current_conversation)
     monkeypatch.setattr(admin.deployments, "set_domains", set_domains)
     monkeypatch.setattr(admin.deployments, "deploy", deploy)

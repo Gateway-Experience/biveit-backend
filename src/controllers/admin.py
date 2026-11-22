@@ -4,10 +4,18 @@
 #   GET  /admin/server-usage          the machine's CPU, memory and disk (the dashboard polls it)
 #   GET  /admin/platform              {sections, projects}: services/platform_status's platform sections, and
 #                                     every live project with its owner and whether its container runs
-#   GET  /admin/projects/{id}         {project, sections}: one project's sections (?conversation=<id>, else
-#                                     its newest conversation)
+#   GET  /admin/projects/{id}         {project, is_running, devenv, sections}: the project (with its description),
+#                                     whether its container runs, its dev environment as the owner's preview sees it
+#                                     (devenv.get_devenv_status: busy, preview_url, servers), and its sections
+#                                     (?conversation=<id>, else its newest conversation)
+#   POST /admin/projects/{id}/start   turn the project back on, as its owner opening it would
+#                                     (services/projects.open_project: the agent's session, and the dev environment
+#                                     once building), in the background: 202, then watch GET
 #   POST /admin/projects/{id}/stop    turn the project off: its runners, dev servers, container
 #                                     (services/projects.close_project). Nothing on disk is touched.
+#   POST /admin/projects/{id}/dev-servers/start  bring its dev environment back up -- container, servers, dev
+#                                     site -- as the owner opening it would, in the background: 202, then watch GET's
+#                                     devenv. 409 BUILDING_NOT_STARTED when there's no app to run yet
 #   GET  /admin/projects/{id}/deployments  {status, history, default_domain} (modules/deployments)
 #   POST /admin/projects/{id}/deployments  {domains}: set the site's domains -- none given = the default one,
 #                                     <hash>.<PROD_DOMAIN> -- then deploy, as its owner would; 202 {run_id, commit}.
@@ -22,6 +30,9 @@
 #                                     404 NO_PLAN
 #     POST/PUT: 400 INVALID_PERIOD when ends_at isn't after starts_at. Each change kicks off the launch fulfilment, so
 #     hosting follows right away rather than at the next sweep.
+#   GET  /admin/users                 every live user (guests too), newest first: [{id, email, name, user_type,
+#                                     is_admin, created_at, last_active_at, project_count, cost_usd}]
+#                                     (services/users.get_user_overviews). The FE sorts and filters.
 #   GET  /admin/sandbox-mode          the calling admin's own sandbox mode {sandbox, effective, server_sandbox}
 #   PUT  /admin/sandbox-mode          {sandbox}: switch their own purchases (payments + domains) to sandbox or back
 #   GET  /admin/ai-usage?since=&until=   what the agents cost in [since, until) (ISO datetimes): {total_usd, users,
@@ -44,10 +55,12 @@ from src.modules import deployments, payments
 from src.repositories import projects as projects_repo
 from src.repositories import users as users_repo
 from src.services import agent as agent_service
-from src.services import platform_status
+from src.services import devenv, platform_status
 from src.services import projects as projects_service
+from src.services import users as user_service
 from src.services.launch import fulfilment
 from src.utils.auth import require_admin
+from src.utils.common import spawn
 from src.utils.logging import log_http_error
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -85,10 +98,31 @@ async def get_platform(request: Request) -> dict:
 async def get_project(project_id: int, request: Request, conversation: int | None = None) -> dict:
     project = await _get_project(project_id)
     try:
+        current_conversation = await agent_service.get_current_conversation(project_id, project["user_id"])
+        is_running, devenv_status, sections = await asyncio.gather(
+            devenv.is_container_running(project_id),
+            devenv.get_devenv_status(project, current_conversation["id"]),
+            platform_status.get_project_sections(project, conversation),
+        )
         return {
-            "project": {"id": project["id"], "name": project["name"], "stage": project["stage"]},
-            "sections": await platform_status.get_project_sections(project, conversation),
+            "project": pydash.pick(project, "id", "name", "stage", "description"),
+            "is_running": is_running,
+            "devenv": devenv_status,
+            "sections": sections,
         }
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.post("/admin/projects/{project_id}/start", status_code=202)
+async def start_project(project_id: int, request: Request) -> dict:
+    """Kick off projects_service.open_project without waiting: bringing up the agent's session can take a while,
+    and the dev environment comes back in the background after it anyway. Failures land in the error log (spawn)."""
+    project = await _get_project(project_id)
+    try:
+        spawn(projects_service.open_project(project))
+        return {"status": "starting"}
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
@@ -100,6 +134,25 @@ async def stop_project(project_id: int, request: Request) -> dict:
     project = await _get_project(project_id)
     try:
         return await projects_service.close_project(project)
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.post("/admin/projects/{project_id}/dev-servers/start", status_code=202)
+async def start_dev_servers(project_id: int, request: Request) -> dict:
+    """Kick off agent_service.restore_devenv (ensure_devenv: brings up the container too if the project was
+    stopped) without waiting for it: an install plus the health wait can outlast the request. Failures land in
+    the error log (spawn); the devenv's busy flag shows while it runs."""
+    project = await _get_project(project_id)
+    try:
+        conversation = await agent_service.get_current_conversation(project_id, project["user_id"])
+        if not devenv.has_app(project, conversation["id"]):
+            raise HTTPException(status_code=409, detail="BUILDING_NOT_STARTED")
+        spawn(agent_service.restore_devenv(project, conversation["id"]))
+        return {"status": "starting"}
+    except HTTPException:
+        raise
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
@@ -211,6 +264,15 @@ async def delete_project_plan(project_id: int, request: Request, background_task
         return {"plan": None}
     except payments.NoPlan as error:
         raise HTTPException(status_code=404, detail="NO_PLAN") from error
+    except Exception as error:
+        log_http_error(error, request)
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error
+
+
+@router.get("/admin/users")
+async def list_users(request: Request) -> list[dict]:
+    try:
+        return await user_service.get_user_overviews()
     except Exception as error:
         log_http_error(error, request)
         raise HTTPException(status_code=500, detail="INTERNAL_SERVER_ERROR") from error

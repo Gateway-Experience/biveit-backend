@@ -59,6 +59,7 @@ from src.services.agent.usage import (
     check_hard_limits,
     get_cost_report,
     get_project_cost_series,
+    get_user_costs,
     meter_model_stream,
 )
 
@@ -90,6 +91,7 @@ __all__ = [
     "get_project_cost_series",
     "get_project_from_conv_id",
     "get_token_conversation_id",
+    "get_user_costs",
     "list_artifacts",
     "meter_model_stream",
     "open_model_request",
