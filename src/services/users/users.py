@@ -16,10 +16,13 @@ import bcrypt
 import pydash
 
 from src.config import settings
-from src.constants import AnalyticsEvent, UserPlatform, UserType
+from src.constants import AiMessageRole, AnalyticsEvent, UserPlatform, UserRole, UserType
 from src.dto.users import User
+from src.repositories import ai_messages as ai_messages_repo
+from src.repositories import projects as projects_repo
 from src.repositories import users as users_repo
 from src.repositories.users import DuplicateUser
+from src.services import agent as agent_service
 from src.utils import analytics
 from src.utils.auth import mint_access_token
 
@@ -31,6 +34,7 @@ __all__ = [
     "WrongPassword",
     "authenticate",
     "change_password",
+    "get_user_overviews",
     "issue_session",
     "promote_guest",
     "register",
@@ -76,11 +80,14 @@ def to_profile(user_data: dict[str, Any] | None) -> dict[str, Any]:
     return {**pydash.pick(user_data or {}, *_CLIENT_PROFILE_FIELDS), **({"meta": extras} if extras else {})}
 
 
-def to_signup_columns(user_data: dict[str, Any] | None, signup_source: dict[str, Any] | None) -> dict[str, Any]:
-    """[Pure] What a new account is written with from the FE: its profile (to_profile), plus where the visitor came
-    from (dto/users.SignupSource) as meta.signup_source -- written once, here, when the account is made, and never
+def to_signup_columns(
+    user_data: dict[str, Any] | None, signup_source: dict[str, Any] | None, language: str | None = None
+) -> dict[str, Any]:
+    """[Pure] What a new account is written with from the FE: its profile (to_profile), the language the app was
+    showing (a UserLanguage, already validated; None keeps the column's default), plus where the visitor came from
+    (dto/users.SignupSource) as meta.signup_source -- written once, here, when the account is made, and never
     touched after. Empty fields are left out; no source at all writes none."""
-    profile = to_profile(user_data)
+    profile = {**to_profile(user_data), **({"language": language} if language else {})}
     source = pydash.omit_by(signup_source or {}, pydash.is_none)
     if not source:
         return profile
@@ -126,12 +133,16 @@ def _to_web_identity(username: str) -> dict[str, Any]:
 
 
 async def register(
-    username: str, password: str, user_data: dict[str, Any] | None = None, signup_source: dict[str, Any] | None = None
+    username: str,
+    password: str,
+    user_data: dict[str, Any] | None = None,
+    signup_source: dict[str, Any] | None = None,
+    language: str | None = None,
 ) -> dict:
     """Create a credentialed USER and sign them in. Raises DuplicateUser if the username is taken."""
     user = await users_repo.insert(
         {
-            **to_signup_columns(user_data, signup_source),
+            **to_signup_columns(user_data, signup_source, language),
             **_to_web_identity(username),
             "password_hash": await hash_password(password),
             "user_type": UserType.USER,
@@ -154,6 +165,7 @@ async def promote_guest(
     password: str,
     user_data: dict[str, Any] | None = None,
     signup_source: dict[str, Any] | None = None,
+    language: str | None = None,
 ) -> dict:
     """Turn the caller's own GUEST account into a credentialed USER in place -- same row, so everything
     already attached to them survives. Raises NotAGuest if they're already a USER, UserNotFound if the
@@ -163,7 +175,7 @@ async def promote_guest(
     user = await users_repo.update(
         guest["id"],
         {
-            **to_signup_columns(user_data, signup_source),
+            **to_signup_columns(user_data, signup_source, language),
             **_to_web_identity(username),
             "password_hash": await hash_password(password),
             "user_type": UserType.USER,
@@ -230,3 +242,45 @@ async def update(user_id: int, updates: dict[str, Any]) -> User:
     if user is None:
         raise UserNotFound("no such user", {"user_id": user_id})
     return user
+
+
+async def get_user_overviews() -> list[dict]:
+    """Every live user (guests too), newest first, with what the admin wants to know about them:
+    {id, email, name, user_type, is_admin, created_at, last_active_at, project_count, cost_usd}.
+
+    last_active_at is the newest of what we already keep, nothing tracked for it: their last chat message
+    (only a real person writes user messages), their last project edit (projects.updated_at only moves on the
+    user's own edits), and signing up. So someone who only browses without typing or editing doesn't move it.
+    cost_usd is everything their agents ever cost, at today's prices (agent usage.get_user_costs).
+
+    Original purpose: the admin's users page (GET /admin/users). [I/O: reads]"""
+    users, project_stats, latest_messages, costs = await asyncio.gather(
+        users_repo.get_all(),
+        projects_repo.count_by_user(),
+        ai_messages_repo.find_latest_by_user(AiMessageRole.USER),
+        agent_service.get_user_costs(),
+    )
+    stats_by_user = pydash.key_by(project_stats, "user_id")
+    message_at_by_user = {row["user_id"]: row["latest_at"] for row in latest_messages}
+    return [
+        {
+            "id": user["id"],
+            "email": user["username"],
+            "name": " ".join(pydash.compact([user["first_name"], user["last_name"]])) or None,
+            "user_type": user["user_type"],
+            "is_admin": user["role"] == UserRole.ADMIN,
+            "created_at": user["created_at"],
+            "last_active_at": max(
+                pydash.compact(
+                    [
+                        user["created_at"],
+                        message_at_by_user.get(user["id"]),
+                        pydash.get(stats_by_user, [user["id"], "last_edited_at"]),
+                    ]
+                )
+            ),
+            "project_count": pydash.get(stats_by_user, [user["id"], "project_count"], 0),
+            "cost_usd": costs.get(user["id"], 0.0),
+        }
+        for user in users
+    ]

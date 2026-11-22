@@ -89,6 +89,8 @@ class RegisterRequest(BaseModel):
     last_name: _LastName = ""
     user_data: dict[str, Any] = {}
     signup_source: SignupSource | None = None
+    # The language the app was showing them in, kept as the new account's language.
+    language: UserLanguage | None = None
 
 
 class AuthenticateRequest(BaseModel):
@@ -120,6 +122,8 @@ class PromoteRequest(BaseModel):
     last_name: _LastName = ""
     user_data: dict[str, Any] = {}
     signup_source: SignupSource | None = None
+    # As RegisterRequest's.
+    language: UserLanguage | None = None
 
 
 class ChangePasswordRequest(BaseModel):

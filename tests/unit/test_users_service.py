@@ -2,6 +2,8 @@
 # client-input allowlist. The repo is monkeypatched, so no db is involved -- what's under test is the
 # service's own logic.
 
+from datetime import UTC, datetime
+
 import bcrypt
 import pytest
 from pydantic import ValidationError
@@ -11,6 +13,7 @@ from src.constants import UserType
 from src.dto.users import RegisterRequest, UpdateMeRequest
 from src.repositories import users as users_repo
 from src.services import users as user_service
+from src.services.users import users as users_module
 from src.services.users.users import to_profile
 
 # See tests/unit/test_auth.py -- HS256 wants >= 32 bytes.
@@ -331,6 +334,18 @@ async def test_google_existing_sub_signs_in_even_if_email_matches_a_username(fak
     assert result["user"]["id"] == 7
 
 
+async def test_google_new_account_gets_the_apps_language(fake_repo):
+    repo = fake_repo([])
+    result = await user_service.signin_google(_claims(), language="ko")
+    assert repo.rows[result["user"]["id"]]["language"] == "ko"
+
+
+async def test_google_sign_in_leaves_the_language_alone(fake_repo):
+    repo = fake_repo([_user(id=7, platform="GOOGLE", platform_id="1234567890", language="vi")])
+    await user_service.signin_google(_claims(), language="ko")
+    assert repo.rows[7]["language"] == "vi"
+
+
 async def test_google_username_is_the_email(fake_repo):
     fake_repo([])
     result = await user_service.signin_google(_claims())
@@ -345,6 +360,7 @@ async def test_google_username_is_the_email(fake_repo):
     [
         ({"language": "vi"}, True),
         ({"language": "en"}, True),
+        ({"language": "ja"}, True),  # every language the FE offers, not just the first two
         ({}, True),  # left out: unchanged
         ({"language": "fr"}, False),  # not one the FE offers
         ({"language": None}, False),  # a user always has one
@@ -408,3 +424,55 @@ async def test_a_google_only_account_sets_its_first_password_without_one(monkeyp
     state = _patch_auth(monkeypatch, None)
     await user_service.change_password(1, None, "first-password")
     assert bcrypt.checkpw(b"first-password", state["password_hash"].encode())
+
+
+# --- get_user_overviews (the admin's users page) ---
+
+
+async def test_user_overviews_put_each_users_stats_together(monkeypatch):
+    signed_up, edited, messaged = (datetime(2026, 11, day, tzinfo=UTC) for day in (1, 5, 9))
+    users = [
+        _user(id=1, username="a@x.com", first_name="Ann", last_name="", role="ADMIN", created_at=signed_up),
+        _user(
+            id=2,
+            username=None,
+            user_type=UserType.GUEST,
+            first_name=None,
+            last_name=None,
+            role=None,
+            created_at=signed_up,
+        ),
+    ]
+
+    async def get_all():
+        return users
+
+    async def count_by_user():
+        return [{"user_id": 1, "project_count": 3, "last_edited_at": edited}]
+
+    async def find_latest_by_user(role):
+        assert role == "user"
+        return [{"user_id": 1, "latest_at": messaged}]
+
+    async def get_user_costs():
+        return {1: 4.5}
+
+    monkeypatch.setattr(users_module.users_repo, "get_all", get_all)
+    monkeypatch.setattr(users_module.projects_repo, "count_by_user", count_by_user)
+    monkeypatch.setattr(users_module.ai_messages_repo, "find_latest_by_user", find_latest_by_user)
+    monkeypatch.setattr(users_module.agent_service, "get_user_costs", get_user_costs)
+
+    ann, guest = await user_service.get_user_overviews()
+    assert ann == {
+        "id": 1,
+        "email": "a@x.com",
+        "name": "Ann",
+        "user_type": UserType.USER,
+        "is_admin": True,
+        "created_at": signed_up,
+        "last_active_at": messaged,
+        "project_count": 3,
+        "cost_usd": 4.5,
+    }
+    assert guest["name"] is None and guest["is_admin"] is False
+    assert (guest["last_active_at"], guest["project_count"], guest["cost_usd"]) == (signed_up, 0, 0.0)

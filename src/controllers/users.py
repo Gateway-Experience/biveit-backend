@@ -186,7 +186,9 @@ async def register(body: RegisterRequest, request: Request, response: Response) 
     """Sign up with a username and password; returns the user and a token."""
     try:
         signup_source = body.signup_source.model_dump() if body.signup_source else None
-        result = await user_service.register(body.username, body.password, _with_names(body), signup_source)
+        result = await user_service.register(
+            body.username, body.password, _with_names(body), signup_source, body.language
+        )
     except user_service.DuplicateUser as error:
         raise HTTPException(status_code=400, detail="DUPLICATE_USERNAME") from error
     except Exception as error:
@@ -239,7 +241,9 @@ async def promote(
     Which guest comes from the session, never the body -- ids are guessable."""
     try:
         signup_source = body.signup_source.model_dump() if body.signup_source else None
-        result = await user_service.promote_guest(user, body.username, body.password, _with_names(body), signup_source)
+        result = await user_service.promote_guest(
+            user, body.username, body.password, _with_names(body), signup_source, body.language
+        )
     except user_service.NotAGuest as error:
         raise HTTPException(status_code=409, detail="NOT_A_GUEST") from error
     except user_service.UserNotFound as error:

@@ -33,15 +33,18 @@ class GoogleEmailTaken(Exception):
 
 
 async def signin_google(
-    claims: dict[str, Any], guest_id: int | None = None, signup_source: dict[str, Any] | None = None
+    claims: dict[str, Any],
+    guest_id: int | None = None,
+    signup_source: dict[str, Any] | None = None,
+    language: str | None = None,
 ) -> dict:
     """Sign in (or sign up) with Google. Keyed on `sub` (stable per Google account; emails can change
     hands). Three outcomes:
       - a user with this sub exists -> sign into it, refreshing the picture (a guest is left alone);
       - else, `guest_id` names a live GUEST -> promote it in place;
       - else -> create a new USER.
-    `signup_source` (dto/users.SignupSource) is kept on a new account only (a promoted guest included); a sign-in to
-    an existing one leaves theirs alone. The username is the email, as for password accounts. It's set once at sign-up and NOT refreshed
+    `signup_source` (dto/users.SignupSource) and `language` (the app's, a UserLanguage) are kept on a new account
+    only (a promoted guest included); a sign-in to an existing one leaves theirs alone. The username is the email, as for password accounts. It's set once at sign-up and NOT refreshed
     on later sign-ins -- if their Google address changes, the new one may already be someone else's. Raises GoogleEmailNotVerified if Google doesn't
     vouch for the email, GoogleEmailTaken if a new account's email is already a username. Only explicit
     fields are written -- nothing else from Google (tokens included) is kept."""
@@ -73,7 +76,7 @@ async def signin_google(
         "user_type": UserType.USER,
         "username": claims["email"],
     }
-    signup_with_source = {**signup, **to_signup_columns(None, signup_source)}
+    signup_with_source = {**signup, **to_signup_columns(None, signup_source, language)}
     if guest and guest["user_type"] == UserType.GUEST:
         promoted = await users_repo.update(
             guest["id"], {**signup_with_source, "tags": pydash.union(guest["tags"], ["GOOGLE"])}

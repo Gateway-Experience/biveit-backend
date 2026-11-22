@@ -40,10 +40,15 @@ class UserPlatform(StrEnum):
 
 class UserLanguage(StrEnum):
     """users.language -- the language the user picked in the FE's language picker (keep in sync with its
-    SUPPORTED_LANGUAGES). The UI shows in it, and the agent talks to them in it."""
+    SUPPORTED_LANGUAGES). The UI shows in it, and the agent talks to them in it. A new account gets the language
+    the app was showing when they signed up."""
 
     EN = "en"
     VI = "vi"
+    KO = "ko"
+    ZH = "zh"
+    JA = "ja"
+    RU = "ru"
 
 
 class UserJourney(StrEnum):
@@ -61,7 +66,14 @@ JOURNEY_STEP_MAX_LENGTH = 100
 
 
 # How the agent is told about a language (services/agent/sessions.introduce_project).
-USER_LANGUAGE_NAMES = {UserLanguage.EN: "English", UserLanguage.VI: "Vietnamese"}
+USER_LANGUAGE_NAMES = {
+    UserLanguage.EN: "English",
+    UserLanguage.VI: "Vietnamese",
+    UserLanguage.KO: "Korean",
+    UserLanguage.ZH: "Simplified Chinese",
+    UserLanguage.JA: "Japanese",
+    UserLanguage.RU: "Russian",
+}
 
 
 class Charset(StrEnum):

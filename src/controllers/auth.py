@@ -26,7 +26,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import ValidationError
 
 from src.config import settings
-from src.constants import GoogleLoginError, UserType
+from src.constants import GoogleLoginError, UserLanguage, UserType
 from src.dto.users import SignupSource, User
 from src.services import users as user_service
 from src.utils.auth import clear_access_cookie, get_current_user_optional, set_access_cookie
@@ -78,11 +78,14 @@ def _read_signup_source(request: Request) -> dict:
 async def login_google(
     request: Request,
     next_path: str | None = Query(None, alias="next"),
+    language: str | None = None,
     user: User | None = Depends(get_current_user_optional),
 ) -> Response:
-    """Start Google login: remember where to land, which guest (if the caller is one) to promote, and where the
-    visitor came from (dto/users.SignupSource, as plain query params -- this is a full-page redirect, so there's no
-    body), then redirect to Google's consent screen. The source is only used if this turns out to be a signup."""
+    """Start Google login: remember where to land, which guest (if the caller is one) to promote, where the
+    visitor came from (dto/users.SignupSource) and the language the app was showing them (a UserLanguage) -- as
+    plain query params, since this is a full-page redirect, so there's no body -- then redirect to Google's consent
+    screen. The source and the language are only used if this turns out to be a signup; a language we don't have
+    is dropped rather than failing the sign-in."""
     signup_source = _read_signup_source(request)
     if not settings.is_google_login_enabled():
         return _redirect_to_frontend_error(GoogleLoginError.DISABLED)
@@ -91,6 +94,7 @@ async def login_google(
             "next": _to_safe_next(next_path),
             "guest_id": user["id"] if user and user["user_type"] == UserType.GUEST else None,
             "signup_source": signup_source,
+            "language": language if language in UserLanguage else None,
         }
         # redirect_uri passed explicitly: it must match the registered URI byte for byte, and deriving it
         # from the request breaks behind a TLS-terminating proxy (http vs https).
@@ -112,7 +116,10 @@ async def google_callback(request: Request) -> Response:
     try:
         token = await oauth.google.authorize_access_token(request)
         result = await user_service.signin_google(
-            token["userinfo"], login_state.get("guest_id"), login_state.get("signup_source")
+            token["userinfo"],
+            login_state.get("guest_id"),
+            login_state.get("signup_source"),
+            login_state.get("language"),
         )
     except OAuthError as error:
         expected_code = _EXPECTED_OAUTH_ERRORS.get(error.error)

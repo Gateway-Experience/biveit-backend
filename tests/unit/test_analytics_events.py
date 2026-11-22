@@ -157,7 +157,7 @@ async def test_a_payment_event_has_the_same_uuid_however_often_its_sent(monkeypa
 
 
 def test_an_email_signup_is_sent_with_the_browsers_session(monkeypatch, captured):
-    async def register(username, password, user_data, signup_source=None):
+    async def register(username, password, user_data, signup_source=None, language=None):
         assert signup_source == {
             "utm_source": "facebook",
             "utm_medium": None,
@@ -220,3 +220,10 @@ def test_the_source_is_kept_in_meta_next_to_the_profiles_extras():
 
 def test_no_source_writes_no_source():
     assert "meta" not in user_service.users.to_signup_columns({"first_name": "A"}, {"utm_source": None})
+
+
+def test_the_apps_language_is_the_new_accounts_and_none_keeps_the_default():
+    assert user_service.users.to_signup_columns({"first_name": "A"}, None, "vi")["language"] == "vi"
+    assert "language" not in user_service.users.to_signup_columns({"first_name": "A"}, None)
+    # Only the validated argument sets it, never the free-form profile blob.
+    assert user_service.users.to_signup_columns({"language": "xx"}, None)["meta"] == {"language": "xx"}
