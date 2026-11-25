@@ -213,7 +213,7 @@ AGENT_ENDPOINT_ENV = {
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-flash[1m]",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-flash",
     "CLAUDE_CODE_SUBAGENT_MODEL": "deepseek-flash",
-    "CLAUDE_CODE_EFFORT_LEVEL": "max",
+    "CLAUDE_CODE_EFFORT_LEVEL": "high",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "950000",
 }
 # The model key sets scripts/manage.py switches between: one .env-format file per set in this folder (at the
