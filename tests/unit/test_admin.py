@@ -25,7 +25,7 @@ _SECTION = {"title": "Platform", "rows": [{"label": "env", "value": "local"}]}
 
 @pytest.fixture
 def services(monkeypatch):
-    calls = {"stopped": [], "restored": [], "opened": []}
+    calls = {"stopped": [], "restored": [], "opened": [], "marked_active": []}
 
     async def find_projects(criteria):
         return [_PROJECT] if criteria == {"id": 16} else []
@@ -52,6 +52,9 @@ def services(monkeypatch):
     async def restore_devenv(project, conversation_id):
         calls["restored"] = [*calls["restored"], (project["id"], conversation_id)]
 
+    async def mark_active(conversation_id):
+        calls["marked_active"] = [*calls["marked_active"], conversation_id]
+
     async def open_project(project):
         calls["opened"] = [*calls["opened"], project["id"]]
 
@@ -67,6 +70,7 @@ def services(monkeypatch):
     monkeypatch.setattr(admin.devenv, "is_container_running", is_container_running)
     monkeypatch.setattr(admin.agent_service, "get_current_conversation", get_current_conversation)
     monkeypatch.setattr(admin.agent_service, "restore_devenv", restore_devenv)
+    monkeypatch.setattr(admin.activity, "mark_active", mark_active)
     monkeypatch.setattr(admin.devenv, "get_devenv_status", get_devenv_status)
     monkeypatch.setattr(admin.devenv, "has_app", lambda project, conversation_id: True)
     monkeypatch.setattr(admin.platform_status, "get_platform_sections", get_platform_sections)
@@ -130,13 +134,14 @@ def test_starting_the_dev_servers(services, monkeypatch):
     client = _client_as(_ADMIN)
     response = client.post("/api/admin/projects/16/dev-servers/start")
     assert response.status_code == 202 and services["restored"] == [(16, 13)]
+    assert services["marked_active"] == [13]  # restarts the idle clock, or the sweep would stop it again
     assert client.post("/api/admin/projects/99/dev-servers/start").status_code == 404
     assert _client_as(_USER).post("/api/admin/projects/16/dev-servers/start").status_code == 403
 
     monkeypatch.setattr(admin.devenv, "has_app", lambda project, conversation_id: False)
     response = client.post("/api/admin/projects/16/dev-servers/start")
     assert response.status_code == 409 and response.json()["detail"] == "BUILDING_NOT_STARTED"
-    assert services["restored"] == [(16, 13)]  # nothing to start without an app
+    assert services["restored"] == [(16, 13)] and services["marked_active"] == [13]  # nothing to start without an app
 
 
 def test_an_unknown_project_is_404(services):

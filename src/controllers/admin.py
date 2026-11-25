@@ -64,8 +64,8 @@ from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import projects as projects_repo
 from src.repositories import users as users_repo
+from src.services import activity, devenv, platform_status
 from src.services import agent as agent_service
-from src.services import devenv, platform_status
 from src.services import projects as projects_service
 from src.services import users as user_service
 from src.services.launch import fulfilment
@@ -158,12 +158,14 @@ async def stop_project(project_id: int, request: Request) -> dict:
 async def start_dev_servers(project_id: int, request: Request) -> dict:
     """Kick off agent_service.restore_devenv (ensure_devenv: brings up the container too if the project was
     stopped) without waiting for it: an install plus the health wait can outlast the request. Failures land in
-    the error log (spawn); the devenv's busy flag shows while it runs."""
+    the error log (spawn); the devenv's busy flag shows while it runs. Counts as activity, so the idle sweep
+    doesn't stop it again right away on a project that sat idle past DEVENV_IDLE_STOP_SECONDS."""
     project = await _get_project(project_id)
     try:
         conversation = await agent_service.get_current_conversation(project_id, project["user_id"])
         if not devenv.has_app(project, conversation["id"]):
             raise HTTPException(status_code=409, detail="BUILDING_NOT_STARTED")
+        await activity.mark_active(conversation["id"])
         spawn(agent_service.restore_devenv(project, conversation["id"]))
         return {"status": "starting"}
     except HTTPException:
