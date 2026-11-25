@@ -148,10 +148,12 @@ class ConfigName(StrEnum):
     AI_DAILY_LIMIT_USD_PER_IP = "AI_DAILY_LIMIT_USD_PER_IP"
     # How far past a daily limit the model proxy cuts calls off (a multiplier). Default AI_HARD_LIMIT_FACTOR.
     AI_HARD_LIMIT_FACTOR = "AI_HARD_LIMIT_FACTOR"
-    # What the models cost us, USD per million tokens, as {model: {input, output, cache_read, cache_write}}, and what
-    # a model not in it costs. Defaults AI_MODEL_PRICES / AI_UNKNOWN_MODEL_PRICE.
+    # What the models cost us, USD per million tokens, as {model: {input, output, cache_read, cache_write, peak?}},
+    # what a model not in it costs, and the hours a model's `peak` prices apply. Defaults AI_MODEL_PRICES /
+    # AI_UNKNOWN_MODEL_PRICE / AI_PEAK_HOURS.
     AI_MODEL_PRICES = "AI_MODEL_PRICES"
     AI_UNKNOWN_MODEL_PRICE = "AI_UNKNOWN_MODEL_PRICE"
+    AI_PEAK_HOURS = "AI_PEAK_HOURS"
     # PUBLIC, read by the FE only: where to reach us to pay by something other than card (the launch dialog's
     # "Can't pay by card?" panel), as {whatsapp, zalo, email}. A missing/null one isn't shown; no row at all means
     # the FE falls back to its support email.
@@ -186,10 +188,26 @@ AI_HARD_LIMIT_FACTOR = 1.2
 # ("claude-sonnet-5-5" -> "claude-sonnet"; DeepSeek answers with the name we asked for, "deepseek-flash"); anything
 # else by AI_UNKNOWN_MODEL_PRICE, priced high on purpose so an unexpected model can't run up a bill below the
 # limit. DeepSeek charges nothing extra for writing its cache: a cache write is priced as plain input.
-# References: https://api-docs.deepseek.com/quick_start/pricing (V4 Flash / V4 Pro), Anthropic's for claude-*.
+# DeepSeek bills double in its peak hours (AI_PEAK_HOURS): a model's `peak` prices apply to calls made then, its plain
+# ones the rest of the time. A model without `peak` costs the same around the clock.
+# The API's answers carry token counts only, never a price, so it's all worked out here, at read time.
+# References: https://api-docs.deepseek.com/quick_start/pricing (deepseek-flash / V4 Pro; the pro prices as billed
+# in the platform's usage export), Anthropic's for claude-*.
 AI_MODEL_PRICES = {
-    "deepseek-flash": {"input": 0.14, "output": 0.28, "cache_read": 0.0028, "cache_write": 0.14},
-    "deepseek-pro": {"input": 0.435, "output": 0.87, "cache_read": 0.003625, "cache_write": 0.435},
+    "deepseek-flash": {
+        "input": 0.15,
+        "output": 0.6,
+        "cache_read": 0.003,
+        "cache_write": 0.15,
+        "peak": {"input": 0.3, "output": 1.2, "cache_read": 0.006, "cache_write": 0.3},
+    },
+    "deepseek-pro": {
+        "input": 0.66,
+        "output": 1.98,
+        "cache_read": 0.022,
+        "cache_write": 0.66,
+        "peak": {"input": 1.32, "output": 3.96, "cache_read": 0.044, "cache_write": 1.32},
+    },
     "claude-haiku": {"input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25},
     "claude-sonnet": {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75},
     "claude-opus": {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25},
@@ -197,6 +215,10 @@ AI_MODEL_PRICES = {
 # The admin's AI usage page shows a project's cost per hour for a range up to this many days, per day beyond.
 AI_USAGE_HOURLY_MAX_DAYS = 2
 AI_UNKNOWN_MODEL_PRICE = {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25}
+# When models' `peak` prices apply (AI_MODEL_PRICES), in UTC: these ISO weekdays (Monday = 1) and the hours starting
+# at these. DeepSeek's: 01:00-04:00 and 06:00-10:00, Monday to Friday. It also counts Chinese public holidays as
+# off-peak; those aren't modelled, so calls made in these hours on such a day are priced a bit high (the safe side).
+AI_PEAK_HOURS = {"weekdays": [1, 2, 3, 4, 5], "hours": [1, 2, 3, 6, 7, 8, 9]}
 MODEL_PROXY_READ_TIMEOUT_SECONDS = 600
 # How long the backend waits on any one request to a runner (they all answer right away) before calling it hung.
 RUNNER_REQUEST_TIMEOUT_SECONDS = 10

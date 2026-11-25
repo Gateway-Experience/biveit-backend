@@ -8,13 +8,14 @@
 # Limits: a user may spend AI_DAILY_LIMIT_USD_PER_USER a day (UTC), and so may an IP group (an IPv4 address, or an
 # IPv6 /64 -- one customer's block) -- the second catches one person rotating accounts. Spend is always summed
 # from the rows and priced at read time (AI_MODEL_PRICES), so nothing is stored as a counter and a price change
-# applies at once. Checked twice:
+# applies at once. The model's answers carry token counts only, so a price is picked here: DeepSeek bills double in its
+# peak hours, so a call made then is priced at its model's `peak` prices (AI_PEAK_HOURS). Checked twice:
 #   - when the user sends a message (check_daily_limits): over either limit, it's refused -- before a turn starts,
 #     so a turn is never cut off halfway through editing the site. A turn already going finishes.
 #   - on every model call (check_hard_limits): past AI_HARD_LIMIT_FACTOR times a limit, the proxy refuses it -- a
 #     backstop for a turn that runs away, which should practically never trigger.
-# The limits, the hard-limit factor and the prices are all system config (ConfigName), with the constants as
-# defaults.
+# The limits, the hard-limit factor, the prices and the peak hours are all system config (ConfigName), with the
+# constants as defaults.
 
 import ipaddress
 import json
@@ -28,6 +29,7 @@ from src.constants import (
     AI_DAILY_LIMIT_USD_PER_USER,
     AI_HARD_LIMIT_FACTOR,
     AI_MODEL_PRICES,
+    AI_PEAK_HOURS,
     AI_UNKNOWN_MODEL_PRICE,
     AI_USAGE_HOURLY_MAX_DAYS,
     AiMessageRole,
@@ -101,15 +103,24 @@ def read_usage(body: bytes) -> dict | None:
     return {"model": model, **{ours: int(usage.get(theirs) or 0) for ours, theirs in _USAGE_FIELDS.items()}}
 
 
-def to_cost_usd(totals: list[dict], prices: dict[str, dict], unknown_model_price: dict) -> float:
-    """[Pure] What token totals per model (ai_usage_repo.find_totals' rows) cost, at `prices` (USD per million
-    tokens, AI_MODEL_PRICES' shape): each model at the longest price key its name starts with, else
-    `unknown_model_price` (AI_UNKNOWN_MODEL_PRICE's shape)."""
+def to_cost_usd(totals: list[dict], pricing: dict) -> float:
+    """[Pure] What token totals cost (ai_usage_repo's rows: per model and UTC hour of the week, utc_weekday +
+    utc_hour), at `pricing` (_get_pricing's shape: {prices, unknown_model_price, peak_hours}). Each model goes at the
+    longest price key its name starts with, else at unknown_model_price; within that, at its `peak` prices for a row
+    in the peak hours, its plain ones otherwise. A row without its hour is priced off-peak."""
     return sum(
         (row[field] or 0) * price[field.removesuffix("_tokens")] / 1_000_000
         for row in totals
-        for price in [_find_price(row["model"], prices, unknown_model_price)]
+        for model_price in [_find_price(row["model"], pricing["prices"], pricing["unknown_model_price"])]
+        for price in [model_price.get("peak", model_price) if _is_peak(row, pricing["peak_hours"]) else model_price]
         for field in _TOKEN_FIELDS
+    )
+
+
+def _is_peak(row: dict, peak_hours: dict) -> bool:
+    """[Pure] Whether a row's hour (utc_weekday: ISO, Monday = 1; utc_hour) is a peak one (AI_PEAK_HOURS' shape)."""
+    return row.get("utc_weekday") in peak_hours.get("weekdays", []) and row.get("utc_hour") in peak_hours.get(
+        "hours", []
     )
 
 
@@ -170,15 +181,15 @@ async def _check_limits(user_id: int, ip_group: str | None, factor: float) -> No
     """Raises AiLimitReached for the first of the user's / the IP group's daily limits (times `factor`) that
     today's spend has reached."""
     day_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-    prices, unknown_model_price = await _get_prices()
+    pricing = await _get_pricing()
     user_limit = await _get_number(ConfigName.AI_DAILY_LIMIT_USD_PER_USER, AI_DAILY_LIMIT_USD_PER_USER)
-    user_spend = to_cost_usd(await ai_usage_repo.find_totals(day_start, user_id=user_id), prices, unknown_model_price)
+    user_spend = to_cost_usd(await ai_usage_repo.find_totals(day_start, user_id=user_id), pricing)
     if user_spend >= user_limit * factor:
         raise AiLimitReached("user", day_start + timedelta(days=1))
     if ip_group is None:
         return
     ip_limit = await _get_number(ConfigName.AI_DAILY_LIMIT_USD_PER_IP, AI_DAILY_LIMIT_USD_PER_IP)
-    ip_spend = to_cost_usd(await ai_usage_repo.find_totals(day_start, ip_group=ip_group), prices, unknown_model_price)
+    ip_spend = to_cost_usd(await ai_usage_repo.find_totals(day_start, ip_group=ip_group), pricing)
     if ip_spend >= ip_limit * factor:
         raise AiLimitReached("ip", day_start + timedelta(days=1))
 
@@ -189,7 +200,7 @@ async def get_cost_report(since: datetime, until: datetime) -> dict:
       users      [{user_id, name, cost_usd, project_count}], costliest first
       projects   [{project_id, name, user_id, user_name, cost_usd}], costliest first
     Original purpose: the admin's AI usage page. [I/O: reads]"""
-    prices, unknown_model_price = await _get_prices()
+    pricing = await _get_pricing()
     rows = await ai_usage_repo.find_project_totals(since, until)
     projects = [
         {
@@ -197,7 +208,7 @@ async def get_cost_report(since: datetime, until: datetime) -> dict:
             "name": project_rows[0]["project_name"],
             "user_id": project_rows[0]["user_id"],
             "user_name": _to_user_name(project_rows[0]),
-            "cost_usd": to_cost_usd(project_rows, prices, unknown_model_price),
+            "cost_usd": to_cost_usd(project_rows, pricing),
         }
         for project_id, project_rows in pydash.group_by(rows, "project_id").items()
     ]
@@ -220,12 +231,9 @@ async def get_cost_report(since: datetime, until: datetime) -> dict:
 async def get_user_costs() -> dict[int, float]:
     """{user_id: what their agents have cost so far, in USD}, from ai_usage at today's prices; users who never
     spent anything aren't in it. Original purpose: the admin's users page. [I/O: reads]"""
-    prices, unknown_model_price = await _get_prices()
+    pricing = await _get_pricing()
     rows = await ai_usage_repo.find_user_totals()
-    return {
-        user_id: to_cost_usd(user_rows, prices, unknown_model_price)
-        for user_id, user_rows in pydash.group_by(rows, "user_id").items()
-    }
+    return {user_id: to_cost_usd(user_rows, pricing) for user_id, user_rows in pydash.group_by(rows, "user_id").items()}
 
 
 async def get_project_cost_series(project_id: int, since: datetime, until: datetime) -> dict:
@@ -233,10 +241,10 @@ async def get_project_cost_series(project_id: int, since: datetime, until: datet
     day (UTC): {bucket: hour | day, points: [{at, cost_usd}]}, every bucket in the range, empty ones at 0.
     Original purpose: the admin's AI usage page, a project's bar chart. [I/O: reads]"""
     bucket = "hour" if until - since <= timedelta(days=AI_USAGE_HOURLY_MAX_DAYS) else "day"
-    prices, unknown_model_price = await _get_prices()
+    pricing = await _get_pricing()
     rows = await ai_usage_repo.find_bucket_totals(project_id, since, until, bucket)
     costs = {
-        bucket_start: to_cost_usd(bucket_rows, prices, unknown_model_price)
+        bucket_start: to_cost_usd(bucket_rows, pricing)
         for bucket_start, bucket_rows in pydash.group_by(rows, "bucket_start").items()
     }
     return {
@@ -260,11 +268,14 @@ def _to_user_name(row: dict) -> str:
     return row.get("username") or full_name or f"guest #{row['user_id']}"
 
 
-async def _get_prices() -> tuple[dict, dict]:
-    """(AI_MODEL_PRICES, AI_UNKNOWN_MODEL_PRICE) as system config has them, else the code defaults."""
-    prices = await system_config.get(ConfigName.AI_MODEL_PRICES, AI_MODEL_PRICES)
-    unknown_model_price = await system_config.get(ConfigName.AI_UNKNOWN_MODEL_PRICE, AI_UNKNOWN_MODEL_PRICE)
-    return prices, unknown_model_price
+async def _get_pricing() -> dict:
+    """{prices, unknown_model_price, peak_hours} -- AI_MODEL_PRICES, AI_UNKNOWN_MODEL_PRICE and AI_PEAK_HOURS as
+    system config has them, else the code defaults. What to_cost_usd prices with."""
+    return {
+        "prices": await system_config.get(ConfigName.AI_MODEL_PRICES, AI_MODEL_PRICES),
+        "unknown_model_price": await system_config.get(ConfigName.AI_UNKNOWN_MODEL_PRICE, AI_UNKNOWN_MODEL_PRICE),
+        "peak_hours": await system_config.get(ConfigName.AI_PEAK_HOURS, AI_PEAK_HOURS),
+    }
 
 
 async def _get_number(name: ConfigName, default: float) -> float:

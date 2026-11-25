@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from src.app import create_listener_app
 from src.config import settings
-from src.constants import AI_MODEL_PRICES, AI_UNKNOWN_MODEL_PRICE, AiMessageRole
+from src.constants import AI_MODEL_PRICES, AI_PEAK_HOURS, AI_UNKNOWN_MODEL_PRICE, AiMessageRole
 from src.repositories import ai_conversations as ai_conversations_repo
 from src.repositories import ai_messages as ai_messages_repo
 from src.repositories import ai_usage as ai_usage_repo
@@ -22,7 +22,7 @@ from src.services.agent import conversations, tokens, usage
 
 _CONVERSATION = {"id": 5, "project_id": 3, "user_id": 7}
 _USER_MESSAGE = {"id": 1, "seq": 1, "role": "user", "meta": {"client_ip": "203.0.113.9"}}
-# A day's spend on deepseek-flash: 10M fresh input tokens = $1.40.
+# A day's spend on deepseek-flash: 10M fresh input tokens = $1.50 (off-peak: it carries no hour).
 _FLASH_SPEND = {"model": "deepseek-flash", "input_tokens": 10_000_000, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}  # fmt: skip
 
 
@@ -119,32 +119,49 @@ def test_no_usage_in_an_error_or_an_empty_answer(body):
     assert usage.read_usage(body) is None
 
 
+_ONE_MILLION_OUT = {"input_tokens": 0, "output_tokens": 1_000_000, "cache_read_tokens": 0, "cache_write_tokens": 0}
+_PRICING = {"prices": AI_MODEL_PRICES, "unknown_model_price": AI_UNKNOWN_MODEL_PRICE, "peak_hours": AI_PEAK_HOURS}
+
+
 def test_models_are_priced_by_the_longest_matching_name():
-    one_million_out = {"input_tokens": 0, "output_tokens": 1_000_000, "cache_read_tokens": 0, "cache_write_tokens": 0}
-    prices = {"claude": {**AI_MODEL_PRICES["claude-opus"]}, **AI_MODEL_PRICES}
-    assert usage.to_cost_usd(
-        [{**one_million_out, "model": "deepseek-flash"}], prices, AI_UNKNOWN_MODEL_PRICE
-    ) == pytest.approx(0.28)
-    assert usage.to_cost_usd(
-        [{**one_million_out, "model": "claude-sonnet-5-5"}], prices, AI_UNKNOWN_MODEL_PRICE
-    ) == pytest.approx(15.0)
+    pricing = {**_PRICING, "prices": {"claude": {**AI_MODEL_PRICES["claude-opus"]}, **AI_MODEL_PRICES}}
+    assert usage.to_cost_usd([{**_ONE_MILLION_OUT, "model": "deepseek-flash"}], pricing) == pytest.approx(0.6)
+    assert usage.to_cost_usd([{**_ONE_MILLION_OUT, "model": "claude-sonnet-5-5"}], pricing) == pytest.approx(15.0)
     # Never heard of it: priced high, so it can't run up a bill under the limit.
-    assert usage.to_cost_usd(
-        [{**one_million_out, "model": "mystery-1"}], prices, AI_UNKNOWN_MODEL_PRICE
-    ) == pytest.approx(25.0)
+    assert usage.to_cost_usd([{**_ONE_MILLION_OUT, "model": "mystery-1"}], pricing) == pytest.approx(25.0)
+
+
+@pytest.mark.parametrize(
+    ("utc_weekday", "utc_hour", "cost"),
+    [
+        (1, 1, 1.2),  # Monday 01:00-02:00: DeepSeek's peak, double
+        (5, 9, 1.2),  # Friday 09:00-10:00: the last peak hour
+        (1, 4, 0.6),  # Monday 04:00: the gap between the two peak windows
+        (3, 10, 0.6),  # Wednesday 10:00: peak's over
+        (6, 2, 0.6),  # Saturday: no peak at all
+    ],
+)
+def test_a_call_in_the_peak_hours_costs_its_peak_price(utc_weekday, utc_hour, cost):
+    row = {**_ONE_MILLION_OUT, "model": "deepseek-flash", "utc_weekday": utc_weekday, "utc_hour": utc_hour}
+    assert usage.to_cost_usd([row], _PRICING) == pytest.approx(cost)
+
+
+def test_a_model_without_peak_prices_costs_the_same_around_the_clock():
+    row = {**_ONE_MILLION_OUT, "model": "claude-sonnet-5-5", "utc_weekday": 1, "utc_hour": 1}
+    assert usage.to_cost_usd([row], _PRICING) == pytest.approx(15.0)
 
 
 # --- the limits ---
 
 
 async def test_under_both_limits_a_turn_can_start(spend):
-    spend["user"][7] = [_FLASH_SPEND]  # $1.40 of $2
+    spend["user"][7] = [_FLASH_SPEND]  # $1.50 of $2
     spend["ip"]["203.0.113.9"] = [_FLASH_SPEND]
     await usage.check_daily_limits(7, "203.0.113.9")
 
 
 async def test_a_user_past_their_limit_waits_till_midnight_utc(spend):
-    spend["user"][7] = [_FLASH_SPEND, _FLASH_SPEND]  # $2.80
+    spend["user"][7] = [_FLASH_SPEND, _FLASH_SPEND]  # $3
 
     with pytest.raises(usage.AiLimitReached) as reached:
         await usage.check_daily_limits(7, "203.0.113.9")
@@ -153,7 +170,7 @@ async def test_a_user_past_their_limit_waits_till_midnight_utc(spend):
 
 
 async def test_an_ip_past_its_limit_stops_every_account_on_it(spend):
-    spend["ip"]["203.0.113.9"] = [_FLASH_SPEND] * 5  # $7 of $6, across accounts; this one's spent nothing
+    spend["ip"]["203.0.113.9"] = [_FLASH_SPEND] * 5  # $7.50 of $6, across accounts; this one's spent nothing
 
     with pytest.raises(usage.AiLimitReached, match="ip"):
         await usage.check_daily_limits(7, "203.0.113.9")
@@ -161,9 +178,9 @@ async def test_an_ip_past_its_limit_stops_every_account_on_it(spend):
 
 
 async def test_the_hard_limit_is_a_little_past_the_daily_one(spend):
-    spend["user"][7] = [{**_FLASH_SPEND, "input_tokens": 15_000_000}]  # $2.10: past the daily $2, under 1.2x
+    spend["user"][7] = [{**_FLASH_SPEND, "input_tokens": 15_000_000}]  # $2.25: past the daily $2, under 1.2x
     await usage.check_hard_limits(5)
-    spend["user"][7] = [_FLASH_SPEND, _FLASH_SPEND]  # $2.80: past $2.40
+    spend["user"][7] = [_FLASH_SPEND, _FLASH_SPEND]  # $3: past $2.40
     with pytest.raises(usage.AiLimitReached):
         await usage.check_hard_limits(5)
 
@@ -299,31 +316,31 @@ async def test_the_report_adds_up_projects_into_their_owners(spend, monkeypatch)
         owner_7 = {"user_id": 7, "username": "anh", "first_name": None, "last_name": None}
         guest_9 = {"user_id": 9, "username": None, "first_name": None, "last_name": None}
         return [
-            {**owner_7, "project_id": 3, "project_name": "Bikes", **_tokens(input_tokens=10_000_000)},  # $1.40
+            {**owner_7, "project_id": 3, "project_name": "Bikes", **_tokens(input_tokens=10_000_000)},  # $1.50
             {
                 **owner_7,
                 "project_id": 3,
                 "project_name": "Bikes",
                 **_tokens("claude-haiku", output_tokens=100_000),
             },  # $0.50
-            {**owner_7, "project_id": 4, "project_name": "Cafe", **_tokens(output_tokens=1_000_000)},  # $0.28
-            {**guest_9, "project_id": 5, "project_name": "Yoga", **_tokens(input_tokens=1_000_000)},  # $0.14
+            {**owner_7, "project_id": 4, "project_name": "Cafe", **_tokens(output_tokens=1_000_000)},  # $0.60
+            {**guest_9, "project_id": 5, "project_name": "Yoga", **_tokens(input_tokens=1_000_000)},  # $0.15
         ]
 
     monkeypatch.setattr(ai_usage_repo, "find_project_totals", find_project_totals)
 
     report = await usage.get_cost_report(datetime(2026, 11, 1, tzinfo=UTC), datetime(2026, 11, 3, tzinfo=UTC))
 
-    assert report["total_usd"] == pytest.approx(2.32)
+    assert report["total_usd"] == pytest.approx(2.75)
     assert [(project["project_id"], round(project["cost_usd"], 2)) for project in report["projects"]] == [
-        (3, 1.9),
-        (4, 0.28),
-        (5, 0.14),
+        (3, 2.0),
+        (4, 0.6),
+        (5, 0.15),
     ]
     assert report["projects"][0]["user_name"] == "anh"
     assert [(user["name"], round(user["cost_usd"], 2), user["project_count"]) for user in report["users"]] == [
-        ("anh", 2.18, 2),
-        ("guest #9", 0.14, 1),
+        ("anh", 2.6, 2),
+        ("guest #9", 0.15, 1),
     ]
 
 
@@ -344,7 +361,7 @@ async def test_a_short_range_is_charted_by_hour_with_empty_hours_at_zero(spend, 
     assert [(point["at"].hour, round(point["cost_usd"], 2)) for point in series["points"]] == [
         (10, 0.0),
         (11, 0.0),
-        (12, 0.14),
+        (12, 0.15),
         (13, 0.0),
     ]
 
