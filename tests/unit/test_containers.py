@@ -11,6 +11,11 @@ from src.constants import DEVENV_IMAGE
 from src.services.devenv import containers
 
 _PROJECT = {"id": 39, "hash": "b81d6e0f3a92c475", "user_id": 7, "user_hash": "4e7a1c9b0d2f8a63", "meta": {}}
+# What docker inspect shows a container publishing, as a `docker run --publish=127.0.0.1:<host>:<inside>` made it.
+_PLANNED_BINDINGS = {
+    "8000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8039"}],
+    "5173/tcp": [{"HostIp": "127.0.0.1", "HostPort": "16039"}],
+}
 
 
 @pytest.fixture(autouse=True)
@@ -69,7 +74,17 @@ def docker(monkeypatch):
         if argv[:2] == ["docker", "run"]:
             if state["fail_run"]:
                 raise containers.CommandFailed("name already in use")
-            state["container"] = {"State": {"Running": True}, "Config": {"Image": argv[-3]}}
+            published = [
+                option.removeprefix("--publish=127.0.0.1:").split(":")
+                for option in argv
+                if option.startswith("--publish=")
+            ]
+            bindings = {f"{inside}/tcp": [{"HostIp": "127.0.0.1", "HostPort": host}] for host, inside in published}
+            state["container"] = {
+                "State": {"Running": True},
+                "Config": {"Image": argv[-3]},
+                "HostConfig": {"PortBindings": bindings},
+            }
         if argv[:2] == ["docker", "start"]:
             state["container"] = {**state["container"], "State": {"Running": True}}
         return ""
@@ -116,12 +131,31 @@ async def test_a_project_keeps_the_image_it_was_created_with(docker):
 
 
 async def test_a_stopped_container_is_started_and_a_running_one_left_alone(docker):
-    docker["container"] = {"State": {"Running": False}, "Config": {"Image": "biveit-devenv:1"}}
+    docker["container"] = {
+        "State": {"Running": False},
+        "Config": {"Image": "biveit-devenv:1"},
+        "HostConfig": {"PortBindings": _PLANNED_BINDINGS},
+    }
     await containers.ensure_container(_PROJECT)
     assert _ran(docker, "start") and not _ran(docker, "run")
     docker["ran"] = []
     await containers.ensure_container(_PROJECT)
     assert not _ran(docker, "start") and not _ran(docker, "run")
+
+
+async def test_a_container_on_other_ports_than_the_plan_is_made_afresh(docker, monkeypatch):
+    # Made before the port plan changed: its ports were fixed then, so starting it would bring the old ones back.
+    docker["container"] = {
+        "State": {"Running": True},
+        "Config": {"Image": "biveit-devenv:1"},
+        "HostConfig": {"PortBindings": _PLANNED_BINDINGS},
+    }
+    monkeypatch.setattr(settings, "dev_backend_port_base", 10000)
+    monkeypatch.setattr(settings, "dev_frontend_port_base", 11000)
+    monkeypatch.setattr(settings, "project_port_slots", 1000)
+    await containers.ensure_container(_PROJECT)
+    assert _ran(docker, "rm") == [["docker", "rm", "--force", containers.get_container_name(39)]]
+    assert _options(_ran(docker, "run")[0], "--publish=") == ["127.0.0.1:10039:8000", "127.0.0.1:11039:5173"]
 
 
 async def test_losing_a_creation_race_is_fine_only_if_the_other_container_runs(docker, monkeypatch):
@@ -141,19 +175,45 @@ async def test_losing_a_creation_race_is_fine_only_if_the_other_container_runs(d
         await containers.ensure_container(_PROJECT)
 
 
-async def test_locally_starting_a_projects_container_stops_the_others(docker, monkeypatch):
-    # Locally every project publishes the same two dev ports: only one container can hold them.
-    monkeypatch.setattr(settings, "env", "local")
+async def test_locally_starting_a_projects_container_stops_only_the_one_on_its_ports(docker, monkeypatch):
+    # With 20 port slots (settings.project_port_slots), 39 and 59 are both in slot 19, 7 isn't.
+    monkeypatch.setattr(settings, "project_port_slots", 20)
     real_run_command = containers.run_command
+    stopped = []
 
     async def with_others_running(argv, cwd=None, input_text=None, timeout_seconds=600, env=None):
         if argv[:2] == ["docker", "ps"]:
-            return "biveit-local-project-7\nbiveit-local-project-39\n"
+            return "59\n7\n"
         return await real_run_command(argv, cwd, input_text, timeout_seconds, env)
 
+    async def stop(project_id):
+        stopped.append(project_id)
+        return True
+
     monkeypatch.setattr(containers, "run_command", with_others_running)
+    monkeypatch.setattr(containers, "stop_container", stop)
     await containers.ensure_container(_PROJECT)
-    assert _ran(docker, "stop") == [["docker", "stop", "biveit-local-project-7"]]  # not itself
+    assert stopped == [59]
+
+
+async def test_on_a_server_starting_a_container_stops_nothing(docker, monkeypatch):
+    # Every project has its own slot there (the default 8000 slots), so nothing running shares 39's ports.
+    real_run_command = containers.run_command
+    stopped = []
+
+    async def with_others_running(argv, cwd=None, input_text=None, timeout_seconds=600, env=None):
+        if argv[:2] == ["docker", "ps"]:
+            return "59\n7\n"
+        return await real_run_command(argv, cwd, input_text, timeout_seconds, env)
+
+    async def stop(project_id):
+        stopped.append(project_id)
+        return True
+
+    monkeypatch.setattr(containers, "run_command", with_others_running)
+    monkeypatch.setattr(containers, "stop_container", stop)
+    await containers.ensure_container(_PROJECT)
+    assert stopped == []
 
 
 async def test_stopping_and_removing_are_idempotent(docker):

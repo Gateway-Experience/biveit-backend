@@ -3,9 +3,6 @@
 
 from enum import StrEnum
 
-# A site's container publishes SITE_PORT_BASE + project id on the host's 127.0.0.1 -- the "prod 24000 + id"
-# of the port plan (see PROJECT_DEV_BACKEND_PORT_BASE in src/constants.py).
-SITE_PORT_BASE = 24000
 # Inside the container: nginx on SITE_INTERNAL_PORT (what's published), the backend behind it on
 # SITE_INTERNAL_BACKEND_PORT. Both are also written in data/deployments/image/nginx.conf -- keep them in step.
 SITE_INTERNAL_PORT = 8080

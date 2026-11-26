@@ -414,9 +414,10 @@ async def _get_platform_section() -> dict:
             ("dev domain", "none (local: no dev sites)" if local else settings.dev_domain or "NONE -- no dev sites"),
             (
                 "project dev ports",
-                f"{addresses.get_dev_backend_port(0)} / {addresses.get_dev_frontend_port(0)} for every project (local)"
-                if local
-                else "8000 + id (backend) / 16000 + id (frontend)",
+                (
+                    f"{settings.dev_backend_port_base} (backend) / {settings.dev_frontend_port_base} (frontend)"
+                    f" / {settings.site_port_base} (site) + id % {settings.project_port_slots}"
+                ),
             ),
             ("storage dir", _describe_dir(settings.storage_dir)),
             ("template dir", _describe_dir(settings.template_dir)),

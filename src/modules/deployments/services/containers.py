@@ -6,7 +6,8 @@
 #             the source of truth for what's live, nothing is recorded on our side
 #   network   the projects' network (devenv), so it reaches the platform's Mongo at the same gateway address,
 #             and nothing else of the host; containers there can't reach each other
-#   port      SITE_PORT_BASE + id on the host's 127.0.0.1 only: the host's nginx is the way in
+#   port      the port plan's site range (settings.site_port_base; 24000 + id on a server) on the host's
+#             127.0.0.1 only: the host's nginx is the way in
 #   restart   unless-stopped, so docker brings sites back after a reboot or a crash
 #   hardening no capabilities, no new privileges, an init process, the image's unprivileged user
 
@@ -24,7 +25,6 @@ from src.modules.deployments.constants import (
     SITE_HEALTH_PATH,
     SITE_HEALTH_WAIT_SECONDS,
     SITE_INTERNAL_PORT,
-    SITE_PORT_BASE,
 )
 from src.services import devenv
 from src.utils import http
@@ -37,7 +37,7 @@ class SiteUnhealthy(Exception):
 
 
 def get_site_port(project_id: int) -> int:
-    return SITE_PORT_BASE + project_id
+    return settings.get_project_port(settings.site_port_base, project_id)
 
 
 def _get_container_name(project_id: int) -> str:

@@ -140,12 +140,34 @@ def test_the_shipped_templates_render(monkeypatch):
     assert site.count("proxy_cookie_flags ~ secure samesite=none;") == 2
 
 
-def test_a_local_platform_uses_fixed_ports_and_no_site(monkeypatch):
+def _use_local_ports(monkeypatch):
+    """The local port plan (.env.example): 10000 / 11000 / 12000, 1000 slots."""
+    monkeypatch.setattr(settings, "dev_backend_port_base", 10000)
+    monkeypatch.setattr(settings, "dev_frontend_port_base", 11000)
+    monkeypatch.setattr(settings, "site_port_base", 12000)
+    monkeypatch.setattr(settings, "project_port_slots", 1000)
+
+
+def test_a_server_gives_every_project_its_own_ports():
+    # The defaults: id % 8000 is the id itself.
+    assert (addresses.get_dev_backend_port(42), addresses.get_dev_frontend_port(42)) == (8042, 16042)
+    assert not addresses.shares_dev_ports(42, 2)
+
+
+def test_locally_ports_come_from_a_small_range_and_theres_no_site(monkeypatch):
+    _use_local_ports(monkeypatch)
     monkeypatch.setattr(settings, "env", "local")
     monkeypatch.setattr(settings, "dev_domain", "dev.example.com")
-    assert (addresses.get_dev_backend_port(42), addresses.get_dev_frontend_port(42)) == (10101, 10102)
+    assert (addresses.get_dev_backend_port(1042), addresses.get_dev_frontend_port(1042)) == (10042, 11042)
     assert addresses.get_dev_host(_PROJECT) is None
-    assert addresses.get_dev_url(_PROJECT) == "http://localhost:10102"
+    assert addresses.get_dev_url(_PROJECT) == "http://localhost:11042"
+
+
+def test_locally_projects_in_the_same_slot_share_ports(monkeypatch):
+    _use_local_ports(monkeypatch)
+    assert addresses.shares_dev_ports(7, 1007)
+    assert not addresses.shares_dev_ports(7, 27)
+    assert not addresses.shares_dev_ports(7, 7)  # itself
 
 
 # --- copying the boilerplate ---

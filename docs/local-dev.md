@@ -20,7 +20,7 @@ browser ── biveit-frontend (Vite, :5173)
            claude  ── its communication MCP (src/mcps/communication) ── calls back into :3001
               │  once the agent starts building
               ▼
-           the user's project: backend :10101 + frontend :10102 (pm2), with its own Mongo db + Redis db
+           the user's project: backend :10000+slot + frontend :11000+slot (pm2; slot = id % 1000), with its own Mongo db + Redis db
 ```
 
 The agent sessions and the projects' dev servers run **directly on your machine**, not in containers.
@@ -95,8 +95,11 @@ Fill in these secrets in `.env.local`. Any long random string works; generate ea
 | `PROJECT_SECRET_SEED` | the agent can't set up a project's app |
 | `ADMIN_TOKEN` | the admin endpoints are off (optional) |
 
-Leave `DEV_DOMAIN` empty: locally there's no nginx, and every project's dev site opens straight on
-`http://localhost:10102`. Google login is optional (`GOOGLE_CLIENT_ID` and friends); email/password
+Leave `DEV_DOMAIN` empty: locally there's no nginx, and a project's dev site opens straight on its frontend
+port, `http://localhost:<11000 + id % 1000>` (project 7: `:11007`). Set `PROD_DOMAIN` to a fake domain, e.g.
+`biveitapp.test` (`.test` never resolves): it makes the launch flow's free subdomain work, and with
+`PUBLIC_HOSTING=false` nothing is written to nginx or DNS for it -- a launched site runs on
+`localhost:<12000 + id % 1000>`. Google login is optional (`GOOGLE_CLIENT_ID` and friends); email/password
 works without it.
 
 Create the tables, then start the backend:
@@ -167,9 +170,10 @@ It's for working on the chat UI without spending model turns.
 
 ## Things to know
 
-- **One project's dev servers at a time.** Locally every project uses the same two ports (10101 and
-  10102). Stop the previous project first (`scripts.manage stop <id>`), or the next one's setup fails
-  with the ports taken.
+- **The port plan is in `.env.local`.** A project's dev backend, dev frontend and deployed site get
+  10000 / 11000 / 12000 + `id % 1000` (`DEV_BACKEND_PORT_BASE`, `DEV_FRONTEND_PORT_BASE`, `SITE_PORT_BASE`,
+  `PROJECT_PORT_SLOTS`). Projects in different slots run side by side; two in the same slot (1 and 1001) can't:
+  starting one stops the other. On a server every project has its own ports (8000 / 16000 / 24000 + id).
 - **The agent's tools come from this repo.** `src/mcps/communication` is the MCP server every session
   runs. Each session's `.mcp.json` is written when the session starts, pointing at this repo's Python.
   So after changing the MCP, restart the session (`manage stop`, then open the project) to pick it up.
@@ -183,6 +187,6 @@ It's for working on the chat UI without spending model turns.
 | Opening a project fails with 503 | the session couldn't start. Check `tmux ls` and the `<conversation id>.session.log` next to the workspace. `claude` or `tmux` not on the backend's `PATH` is the usual cause |
 | The agent never replies | attach to its tmux session and look: a startup screen nobody answered, or an error. `scripts.manage status <id>` shows whether the channel port is listening |
 | A session sits on "New MCP server found" | the workspace lacks `.claude/settings.local.json` (`enableAllProjectMcpServers`). It comes from `data/template/` and is copied only where missing: copy it in, then restart the session (`scripts.manage stop <id>`, then open the project) |
-| The preview never comes up | `scripts.manage status <id>` shows the dev servers. Their logs are in the workspace's `logs/`. Ports 10101/10102 held by another project is common |
+| The preview never comes up | `scripts.manage status <id>` shows the dev servers. Their logs are in the workspace's `logs/`. Its ports (10000 / 11000 + id % 1000) held by something other than a project is the usual suspect |
 | Login always 401s | `JWT_SECRET` is empty |
 | `Too many sessions` | two Claude processes in one workspace (e.g. one started by hand). `scripts.manage stop <id>` clears them |

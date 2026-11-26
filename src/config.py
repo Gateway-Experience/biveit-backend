@@ -163,6 +163,21 @@ class Settings(BaseSettings):
     # widening it (/24 -> /16, same start) is fine, moving it isn't. It caps the RUNNING containers (a /16:
     # ~65k), not the projects -- a stopped container holds no address.
     devenv_network_subnet: str = "10.213.0.0/16"
+    # The projects' port plan: what each project publishes on the host's 127.0.0.1 -- one port in each of three
+    # ranges: its dev backend, its dev frontend (services/devenv/addresses) and its deployed site (modules/
+    # deployments). A project's port is the range's start + its slot, slot = id % project_port_slots
+    # (get_project_port). Two projects in one slot can't run at once: starting one's dev container stops the other's
+    # (services/devenv/containers).
+    #   server  8000 / 16000 / 24000, 8000 slots (the defaults): every project its own ports, for ids below 8000.
+    #   local   10000 / 11000 / 12000, 1000 slots (.env.local).
+    # Keep the ranges apart (each start at least project_port_slots past the one before) and below the OS's
+    # outgoing-connection ports (32768-60999); everything else (db, redis, our API) stays below 8000. Another backend
+    # on the same machine (a staging one) needs ranges of its own. A container's ports are fixed when it's created:
+    # a dev container whose ports no longer match is recreated on its next start, a site's on its next release.
+    dev_backend_port_base: int = 8000
+    dev_frontend_port_base: int = 16000
+    site_port_base: int = 24000
+    project_port_slots: int = 8000
     # Every project secret (its JWT secret, admin token...) is derived from this plus the project id, so
     # nothing has to be stored, and re-rendering a project's env gives the same values. Effectively a
     # key: long, random, never shared. Empty -> rendering a template that asks for a secret fails.
@@ -206,6 +221,10 @@ class Settings(BaseSettings):
     def resolved_cors_origins(self) -> list[str]:
         """Allowed browser origins: the explicit cors_allowed_origins list if set, else frontend_url."""
         return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()] or [self.frontend_url]
+
+    def get_project_port(self, range_start: int, project_id: int) -> int:
+        """[Pure] A project's host port in the port plan's range starting at `range_start` (dev_backend_port_base...)."""
+        return range_start + project_id % self.project_port_slots
 
     def is_google_login_enabled(self) -> bool:
         return bool(self.google_client_id and self.google_client_secret and self.session_secret)

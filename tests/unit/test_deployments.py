@@ -529,6 +529,13 @@ async def test_there_is_nothing_to_download_before_the_app_exists(monkeypatch):
 # --- the site's container ---
 
 
+def test_a_sites_port_comes_from_the_port_plan(monkeypatch):
+    assert containers.get_site_port(42) == 24042  # a server's: 24000 + id
+    monkeypatch.setattr(settings, "site_port_base", 12000)
+    monkeypatch.setattr(settings, "project_port_slots", 1000)
+    assert containers.get_site_port(1042) == 12042  # the local plan's: 12000 + id % 1000
+
+
 def test_a_site_container_gets_no_host_folder_and_publishes_on_localhost_only():
     argv = containers._to_run_argv(_PROJECT, "biveit-dev-site-42:abc", "abc", ["JWT_SECRET", "MONGO_URI"])
     assert [option for option in argv if option.startswith("--volume=")] == ["--volume=biveit-dev-site-42-data:/data"]

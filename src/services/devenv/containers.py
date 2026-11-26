@@ -80,15 +80,19 @@ async def ensure_container(project: Project) -> None:
       none      record the project's image tag if it has none yet, then create it
       stopped   start it
       running   nothing to do
-    Then its user (a recreated container loses it). A creation race lost to another ensure_container (the
-    name was taken a moment ago) is fine if the other one's container runs. Raises ContainerUnavailable."""
+    A container publishing other ports than the port plan's (it changed since the container was made -- ports are
+    fixed at creation) is removed first, so it's made afresh: it's disposable. Then its user (a recreated container
+    loses it). A creation race lost to another ensure_container (the name was taken a moment ago) is fine if the other one's container runs. Raises ContainerUnavailable."""
     name = get_container_name(project["id"])
-    container = await _inspect(name)
+    inspected = await _inspect(name)
+    is_on_other_ports = bool(inspected) and _to_published_ports(inspected) != set(_get_published_ports(project))
+    if is_on_other_ports:
+        await run_command(["docker", "rm", "--force", name])
+    container = None if is_on_other_ports else inspected
     if not (container and container["State"]["Running"]):
-        if settings.env == "local":
-            # Locally every project publishes the same two dev ports (LOCAL_DEV_BACKEND_PORT), so only one
-            # project's container can run at a time: starting this one stops the others (their agents too).
-            await _stop_other_local_containers(name)
+        # Projects can share dev ports (addresses.shares_dev_ports, only ever locally): starting this one stops
+        # whichever running container holds its ports (and that project's agent with it).
+        await _stop_containers_sharing_ports(project["id"])
         try:
             if container:
                 await run_command(["docker", "start", name])
@@ -203,10 +207,6 @@ def _to_run_argv(project: Project, image: str) -> list[str]:
     """[Pure-ish] The `docker run` creating the project's container (see the top of this file)."""
     state_dir = f"{DEVENV_PROJECT_PATH}/{DEVENV_STATE_DIR}"
     limits = DEVENV_CONTAINER_LIMITS
-    published = [
-        (addresses.get_dev_backend_port(project["id"]), DEVENV_INTERNAL_BACKEND_PORT),
-        (addresses.get_dev_frontend_port(project["id"]), DEVENV_INTERNAL_FRONTEND_PORT),
-    ]
     return [
         "docker",
         "run",
@@ -229,11 +229,32 @@ def _to_run_argv(project: Project, image: str) -> list[str]:
         f"--volume={get_host_socket_dir(project['id'])}:{DEVENV_SOCKETS_PATH}",
         f"--env=HOME={state_dir}/home",
         f"--env=PM2_HOME={state_dir}/pm2",
-        *[f"--publish=127.0.0.1:{host_port}:{internal_port}" for host_port, internal_port in published],
+        *[
+            f"--publish=127.0.0.1:{host_port}:{internal_port}"
+            for host_port, internal_port in _get_published_ports(project)
+        ],
         image,
         "sleep",
         "infinity",
     ]
+
+
+def _get_published_ports(project: Project) -> list[tuple[int, int]]:
+    """[Pure-ish] What the project's container publishes, as (host port, port inside), from the port plan."""
+    return [
+        (addresses.get_dev_backend_port(project["id"]), DEVENV_INTERNAL_BACKEND_PORT),
+        (addresses.get_dev_frontend_port(project["id"]), DEVENV_INTERNAL_FRONTEND_PORT),
+    ]
+
+
+def _to_published_ports(container: dict) -> set[tuple[int, int]]:
+    """[Pure] What an inspected container publishes, as (host port, port inside) -- _get_published_ports' shape."""
+    bindings = pydash.get(container, "HostConfig.PortBindings") or {}
+    return {
+        (int(binding["HostPort"]), int(inside.split("/")[0]))
+        for inside, host_bindings in bindings.items()
+        for binding in host_bindings or []
+    }
 
 
 async def _ensure_image_recorded(project: Project) -> str:
@@ -268,17 +289,11 @@ async def _ensure_container_user(project_id: int) -> None:
     await run_in_container(project_id, ["sh", "-c", script], user="root")
 
 
-async def _stop_other_local_containers(name: str) -> None:
-    running = await run_command(
-        [
-            "docker",
-            "ps",
-            "--format={{.Names}}",
-            f"--filter=label=biveit.env={settings.env}",
-            "--filter=label=biveit.project",
-        ]
+async def _stop_containers_sharing_ports(project_id: int) -> None:
+    running_ids = await list_running_project_ids()
+    await asyncio.gather(
+        *[stop_container(other_id) for other_id in running_ids if addresses.shares_dev_ports(project_id, other_id)]
     )
-    await asyncio.gather(*[run_command(["docker", "stop", other]) for other in running.split() if other != name])
 
 
 async def _inspect(name: str) -> dict | None:

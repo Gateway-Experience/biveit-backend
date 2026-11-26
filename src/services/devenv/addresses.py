@@ -1,23 +1,24 @@
 # Intentions: where a project's dev environment can be reached -- derived from the project (its id for
-# the ports, its hash for the dev site) and DEV_DOMAIN, nothing stored. A local platform (ENV=local) is
-# the exception: fixed ports for every project, and no dev site (see LOCAL_DEV_BACKEND_PORT).
+# the ports, its hash for the dev site) and DEV_DOMAIN, nothing stored. Ports come from the port plan
+# (settings.project_port_slots: on a server every project has its own, locally a few are shared). A local platform
+# (ENV=local) has no dev site either.
 
 from src.config import settings
-from src.constants import (
-    LOCAL_DEV_BACKEND_PORT,
-    LOCAL_DEV_FRONTEND_PORT,
-    PROJECT_DEV_BACKEND_PORT_BASE,
-    PROJECT_DEV_FRONTEND_PORT_BASE,
-)
 from src.dto.projects import Project
 
 
 def get_dev_backend_port(project_id: int) -> int:
-    return LOCAL_DEV_BACKEND_PORT if _is_local_platform() else PROJECT_DEV_BACKEND_PORT_BASE + project_id
+    return settings.get_project_port(settings.dev_backend_port_base, project_id)
 
 
 def get_dev_frontend_port(project_id: int) -> int:
-    return LOCAL_DEV_FRONTEND_PORT if _is_local_platform() else PROJECT_DEV_FRONTEND_PORT_BASE + project_id
+    return settings.get_project_port(settings.dev_frontend_port_base, project_id)
+
+
+def shares_dev_ports(project_id: int, other_project_id: int) -> bool:
+    """[Pure-ish] Whether two different projects' dev servers would take the same host ports (the same slot), so
+    only one of them can run at a time. Only ever locally: on a server each project has a slot of its own."""
+    return project_id != other_project_id and _get_port_slot(project_id) == _get_port_slot(other_project_id)
 
 
 def get_dev_host(project: Project) -> str | None:
@@ -32,6 +33,10 @@ def get_dev_url(project: Project) -> str:
     straight at the Vite port."""
     dev_host = get_dev_host(project)
     return f"https://{dev_host}" if dev_host else f"http://localhost:{get_dev_frontend_port(project['id'])}"
+
+
+def _get_port_slot(project_id: int) -> int:
+    return project_id % settings.project_port_slots
 
 
 def _is_local_platform() -> bool:

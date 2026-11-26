@@ -261,16 +261,6 @@ SUBPROCESS_ENV_PASSTHROUGH = [
 ]  # fmt: skip
 
 # --- Dev environments (services/devenv) ---
-# A project's dev servers are published on the host's 127.0.0.1 at these + its id (so ids below 8000 fit):
-# dev backend 8000 + id, dev frontend 16000 + id, prod backend 24000 + id. Everything else (db, redis, our
-# API) stays below 8000, and all of it below the OS's outgoing-connection ports (32768+).
-PROJECT_DEV_BACKEND_PORT_BASE = 8000
-PROJECT_DEV_FRONTEND_PORT_BASE = 16000
-# ...except on a local platform (ENV=local), where every project uses the same two fixed ports and there's
-# no nginx: open the dev site straight on the frontend port. So only one project's dev servers can run
-# at a time locally -- another project's would find the ports taken.
-LOCAL_DEV_BACKEND_PORT = 10101
-LOCAL_DEV_FRONTEND_PORT = 10102
 # The boilerplate's apps, copied into the workspace when building starts (projects.stage records
 # that it started; these being there means the setup got that far).
 DEVENV_APP_DIRS = ["backend", "frontend"]
@@ -326,7 +316,7 @@ DEVENV_SOCKETS_PATH = "/sockets"
 # HOME (Claude Code's settings and transcripts, tool caches), PM2_HOME, Redis data, logs.
 DEVENV_STATE_DIR = ".devenv"
 # The dev servers' ports INSIDE a container -- the same for every project (each container has its own
-# network). The host side stays per project (PROJECT_DEV_BACKEND_PORT_BASE...), published on 127.0.0.1.
+# network). The host side is per project (the port plan, settings.project_port_slots), published on 127.0.0.1.
 DEVENV_INTERNAL_BACKEND_PORT = 8000
 DEVENV_INTERNAL_FRONTEND_PORT = 5173
 # Ceilings for one project's container, not reservations -- it only uses what it needs.
